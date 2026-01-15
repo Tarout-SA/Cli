@@ -1,6 +1,6 @@
 {
   "name": "@tarout/cli",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Tarout PaaS Command Line Interface",
   "type": "module",
   "bin": {
