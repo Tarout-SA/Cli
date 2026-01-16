@@ -19,6 +19,7 @@ export function startAuthServer(): Promise<{
 }> {
 	return new Promise((resolve) => {
 		const app = express();
+		// biome-ignore lint/style/useConst: server is declared before assignment due to closure scope requirements
 		let server: Server;
 		let callbackResolver: (data: AuthCallbackData) => void;
 		let callbackRejecter: (error: Error) => void;
