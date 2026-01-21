@@ -144,3 +144,137 @@ export function updateProfile(updates: Partial<Profile>): void {
 export function listProfiles(): string[] {
 	return Object.keys(config.get("profiles"));
 }
+
+// ==========================================
+// Project Configuration (Local .tarout directory)
+// ==========================================
+
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { join } from "node:path";
+
+/**
+ * Project configuration stored in .tarout/project.json
+ * Links a local directory to a remote Tarout application.
+ * @interface ProjectConfig
+ */
+export interface ProjectConfig {
+	/** The linked application ID */
+	applicationId: string;
+	/** The application name (for display purposes) */
+	name: string;
+	/** The organization ID the app belongs to */
+	organizationId: string;
+	/** When the project was linked */
+	linkedAt: string;
+}
+
+/** Default path to the local project config directory */
+const PROJECT_CONFIG_DIR = ".tarout";
+/** Default path to the local project config file */
+const PROJECT_CONFIG_FILE = "project.json";
+
+/**
+ * Gets the path to the .tarout directory for a given base path.
+ * @param {string} [basePath] - The base directory path (defaults to cwd)
+ * @returns {string} The full path to the .tarout directory
+ */
+export function getProjectConfigDir(basePath?: string): string {
+	const base = basePath || process.cwd();
+	return join(base, PROJECT_CONFIG_DIR);
+}
+
+/**
+ * Gets the path to the project.json file for a given base path.
+ * @param {string} [basePath] - The base directory path (defaults to cwd)
+ * @returns {string} The full path to the project.json file
+ */
+export function getProjectConfigPath(basePath?: string): string {
+	return join(getProjectConfigDir(basePath), PROJECT_CONFIG_FILE);
+}
+
+/**
+ * Checks if the current directory is linked to a Tarout project.
+ * @param {string} [basePath] - The base directory path (defaults to cwd)
+ * @returns {boolean} True if a project config exists
+ */
+export function isProjectLinked(basePath?: string): boolean {
+	return existsSync(getProjectConfigPath(basePath));
+}
+
+/**
+ * Gets the project configuration from the local .tarout directory.
+ * @param {string} [basePath] - The base directory path (defaults to cwd)
+ * @returns {ProjectConfig | null} The project config or null if not linked
+ */
+export function getProjectConfig(basePath?: string): ProjectConfig | null {
+	const configPath = getProjectConfigPath(basePath);
+
+	if (!existsSync(configPath)) {
+		return null;
+	}
+
+	try {
+		const content = readFileSync(configPath, "utf-8");
+		return JSON.parse(content) as ProjectConfig;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Saves the project configuration to the local .tarout directory.
+ * Creates the .tarout directory if it doesn't exist.
+ * @param {ProjectConfig} config - The project configuration to save
+ * @param {string} [basePath] - The base directory path (defaults to cwd)
+ */
+export function setProjectConfig(
+	config: ProjectConfig,
+	basePath?: string,
+): void {
+	const configDir = getProjectConfigDir(basePath);
+	const configPath = getProjectConfigPath(basePath);
+
+	// Create .tarout directory if it doesn't exist
+	if (!existsSync(configDir)) {
+		mkdirSync(configDir, { recursive: true });
+	}
+
+	// Write the config file
+	writeFileSync(configPath, JSON.stringify(config, null, 2), "utf-8");
+
+	// Create .gitignore in .tarout directory to ignore sensitive files
+	const gitignorePath = join(configDir, ".gitignore");
+	if (!existsSync(gitignorePath)) {
+		writeFileSync(
+			gitignorePath,
+			"# Ignore local tarout config\n*\n!.gitignore\n",
+			"utf-8",
+		);
+	}
+}
+
+/**
+ * Removes the project configuration (unlinks the project).
+ * @param {string} [basePath] - The base directory path (defaults to cwd)
+ * @returns {boolean} True if the config was removed, false if it didn't exist
+ */
+export function removeProjectConfig(basePath?: string): boolean {
+	const configDir = getProjectConfigDir(basePath);
+
+	if (!existsSync(configDir)) {
+		return false;
+	}
+
+	try {
+		rmSync(configDir, { recursive: true, force: true });
+		return true;
+	} catch {
+		return false;
+	}
+}

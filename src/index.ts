@@ -3,13 +3,16 @@
 import { Command } from "commander";
 import { registerAppsCommands } from "./commands/apps.js";
 import { registerAuthCommands } from "./commands/auth.js";
+import { registerBuildCommand } from "./commands/build.js";
 import { registerDbCommands } from "./commands/db.js";
 import {
 	registerDeployCommands,
 	registerLogsCommand,
 } from "./commands/deploy.js";
+import { registerDevCommand } from "./commands/dev.js";
 import { registerDomainsCommands } from "./commands/domains.js";
 import { registerEnvCommands } from "./commands/env.js";
+import { registerLinkCommands } from "./commands/link.js";
 import { registerEnvsCommands, registerOrgsCommands } from "./commands/orgs.js";
 import { setGlobalOptions } from "./lib/output.js";
 
@@ -46,6 +49,9 @@ registerDbCommands(program);
 registerDomainsCommands(program);
 registerOrgsCommands(program);
 registerEnvsCommands(program);
+registerLinkCommands(program);
+registerDevCommand(program);
+registerBuildCommand(program);
 
 // Parse and execute
 program.parse();

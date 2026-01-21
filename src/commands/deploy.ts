@@ -454,6 +454,168 @@ export function registerDeployCommands(program: Command) {
 				handleError(err);
 			}
 		});
+
+	// Deploy rollback command - rollback to a previous deployment
+	program
+		.command("deploy:rollback")
+		.argument("<app>", "Application ID or name")
+		.description("Rollback to a previous deployment")
+		.option("--to <deployment-id>", "Specific deployment ID to rollback to")
+		.option("--previous", "Rollback to the immediately previous deployment")
+		.option("-w, --wait", "Wait for rollback to complete")
+		.action(async (appIdentifier, options) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+
+				const client = getApiClient();
+
+				// Find the application
+				const _spinner = startSpinner("Finding application...");
+				const apps = await client.application.allByOrganization.query();
+				const appSummary = findApp(apps, appIdentifier);
+
+				if (!appSummary) {
+					failSpinner();
+					const suggestions = findSimilar(
+						appIdentifier,
+						apps.map((a) => a.name),
+					);
+					throw new NotFoundError("Application", appIdentifier, suggestions);
+				}
+
+				// Get deployments
+				const deployments = await client.deployment.all.query({
+					applicationId: appSummary.applicationId,
+				});
+
+				succeedSpinner();
+
+				// Filter to only successful deployments
+				const successfulDeployments = deployments.filter(
+					(d: any) => d.status === "done",
+				);
+
+				if (successfulDeployments.length === 0) {
+					log("");
+					log("No successful deployments found to rollback to.");
+					return;
+				}
+
+				let targetDeploymentId: string;
+
+				if (options.to) {
+					// Use specific deployment ID
+					const targetDeployment = successfulDeployments.find(
+						(d: any) =>
+							d.deploymentId === options.to ||
+							d.deploymentId.startsWith(options.to),
+					);
+
+					if (!targetDeployment) {
+						throw new NotFoundError("Deployment", options.to);
+					}
+
+					targetDeploymentId = targetDeployment.deploymentId;
+				} else if (options.previous) {
+					// Use the second most recent successful deployment (first is current)
+					if (successfulDeployments.length < 2) {
+						log("");
+						log("No previous deployment to rollback to.");
+						log("There must be at least 2 successful deployments.");
+						return;
+					}
+
+					targetDeploymentId = successfulDeployments[1].deploymentId;
+				} else {
+					// Interactive selection
+					log("");
+					log(
+						`Select a deployment to rollback to for ${colors.cyan(appSummary.name)}:`,
+					);
+					log("");
+
+					const choices = successfulDeployments
+						.slice(0, 10)
+						.map((d: any, index: number) => ({
+							name: `${colors.cyan(d.deploymentId.slice(0, 8))} - ${d.title || "Deployment"} (${formatDate(d.createdAt)})${index === 0 ? colors.dim(" [current]") : ""}`,
+							value: d.deploymentId,
+						}));
+
+					const { select } = await import("../utils/prompts.js");
+					targetDeploymentId = await select("Select deployment:", choices);
+				}
+
+				// Confirm rollback
+				if (!options.yes) {
+					const targetDeployment = successfulDeployments.find(
+						(d: any) => d.deploymentId === targetDeploymentId,
+					);
+
+					log("");
+					log(`Rolling back ${colors.cyan(appSummary.name)} to:`);
+					log(`  Deployment: ${colors.cyan(targetDeploymentId.slice(0, 8))}`);
+					log(`  Title: ${targetDeployment?.title || "Deployment"}`);
+					log(`  Created: ${formatDate(targetDeployment?.createdAt)}`);
+					log("");
+
+					const { confirm } = await import("../utils/prompts.js");
+					const confirmed = await confirm(
+						"Are you sure you want to rollback?",
+						false,
+					);
+
+					if (!confirmed) {
+						log("Cancelled.");
+						return;
+					}
+				}
+
+				// Perform rollback
+				const _rollbackSpinner = startSpinner("Initiating rollback...");
+
+				const result = await client.deployment.rollback.mutate({
+					applicationId: appSummary.applicationId,
+					targetDeploymentId,
+				});
+
+				if (options.wait) {
+					// Stream logs and wait for completion
+					await streamDeploymentWithLogs(
+						client,
+						result.deploymentId,
+						appSummary.name,
+						appSummary.applicationId,
+					);
+					return;
+				}
+
+				succeedSpinner("Rollback initiated!");
+
+				if (isJsonMode()) {
+					outputData({
+						deploymentId: result.deploymentId,
+						rollbackFrom: targetDeploymentId,
+						status: "running",
+					});
+				} else {
+					quietOutput(result.deploymentId);
+					log("");
+					log(`Deployment ID: ${colors.cyan(result.deploymentId)}`);
+					log(`Rolling back to: ${colors.dim(targetDeploymentId.slice(0, 8))}`);
+					log("");
+					log("Rollback is running in the background.");
+					log(
+						`Check status: ${colors.dim(`tarout deploy:status ${appSummary.applicationId.slice(0, 8)}`)}`,
+					);
+					log(
+						`View logs: ${colors.dim(`tarout deploy:logs ${result.deploymentId.slice(0, 8)}`)}`,
+					);
+					log("");
+				}
+			} catch (err) {
+				handleError(err);
+			}
+		});
 }
 
 // Register logs command separately
