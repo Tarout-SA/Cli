@@ -35,7 +35,7 @@ export function registerDeployCommands(program: Command) {
 		.command("deploy")
 		.argument("<app>", "Application ID or name")
 		.description("Deploy an application")
-		.option("-r, --region <region>", "Deployment region", "me-central1")
+		.option("-r, --region <region>", "Deployment region", "me-central2")
 		.option("-w, --wait", "Wait for deployment to complete and stream logs")
 		.action(async (appIdentifier, options) => {
 			try {
