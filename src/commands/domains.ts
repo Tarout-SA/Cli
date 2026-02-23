@@ -57,9 +57,10 @@ export function registerDomainsCommands(program: Command) {
 						throw new NotFoundError("Application", appIdentifier, suggestions);
 					}
 
-					domainsList = await client.domain.byApplicationId.query({
+					const result = await client.domain.byApplicationId.query({
 						applicationId: app.applicationId,
 					});
+					domainsList = result.domains;
 				} else {
 					// List all domains
 					domainsList = await client.domain.all.query({
