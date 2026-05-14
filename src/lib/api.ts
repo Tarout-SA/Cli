@@ -39,9 +39,7 @@ export function createApiClient(): TaroutApiClient {
 		links: [
 			httpBatchLink({
 				url: `${apiUrl}/api/trpc`,
-				headers: () => ({
-					"x-api-key": token,
-				}),
+				headers: () => (token ? { "x-api-key": token } : {}),
 			}),
 		],
 	});

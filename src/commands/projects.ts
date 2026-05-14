@@ -5,6 +5,14 @@ import { AuthError, handleError } from "../lib/errors.js";
 import { colors, isJsonMode, log, outputData, table } from "../lib/output.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
 
+interface ProjectSummary {
+	description?: string | null;
+	isDefault?: boolean;
+	name: string;
+	projectId: string;
+	slug: string;
+}
+
 /**
  * `tarout projects ...` commands.
  *
@@ -29,7 +37,7 @@ export function registerProjectsCommands(program: Command) {
 				const profile = getCurrentProfile();
 				const _spinner = startSpinner("Fetching projects...");
 
-				const all = await client.project.all.query();
+				const all: ProjectSummary[] = await client.project.all.query();
 				succeedSpinner();
 
 				if (isJsonMode()) {
@@ -43,14 +51,17 @@ export function registerProjectsCommands(program: Command) {
 					return;
 				}
 
-				const rows = all.map((p: any) => ({
-					Name: p.name,
-					Slug: p.slug,
-					Default: p.isDefault ? "yes" : "",
-					Active:
-						p.projectId === profile?.projectId ? colors.green("● active") : "",
-				}));
-				table(rows);
+				table(
+					["NAME", "SLUG", "DEFAULT", "ACTIVE"],
+					all.map((p) => [
+						p.name,
+						p.slug,
+						p.isDefault ? "yes" : "",
+						p.projectId === profile?.projectId
+							? colors.success("● active")
+							: "",
+					]),
+				);
 			} catch (err) {
 				failSpinner();
 				handleError(err);
@@ -66,9 +77,9 @@ export function registerProjectsCommands(program: Command) {
 				const client = getApiClient();
 				const _spinner = startSpinner("Switching project...");
 
-				const all = await client.project.all.query();
+				const all: ProjectSummary[] = await client.project.all.query();
 				const target = all.find(
-					(p: any) =>
+					(p) =>
 						p.projectId === slugOrId ||
 						p.slug === slugOrId ||
 						p.name.toLowerCase() === slugOrId.toLowerCase(),
@@ -93,7 +104,7 @@ export function registerProjectsCommands(program: Command) {
 				});
 
 				succeedSpinner(
-					`Switched to project ${colors.green(target.name)} (${target.slug})`,
+					`Switched to project ${colors.success(target.name)} (${target.slug})`,
 				);
 			} catch (err) {
 				failSpinner();
@@ -123,7 +134,7 @@ export function registerProjectsCommands(program: Command) {
 					});
 
 					succeedSpinner(
-						`Created project ${colors.green(created.name)} (${created.slug})`,
+						`Created project ${colors.success(created.name)} (${created.slug})`,
 					);
 				} catch (err) {
 					failSpinner();

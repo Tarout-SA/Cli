@@ -23,6 +23,15 @@ import {
 import { confirm, input } from "../utils/prompts.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
 
+interface AppSummary {
+	appName?: string;
+	applicationId: string;
+	applicationStatus: string;
+	createdAt: Date | string;
+	domain?: string | Array<{ host: string }> | null;
+	name: string;
+}
+
 export function registerAppsCommands(program: Command) {
 	const apps = program.command("apps").description("Manage applications");
 
@@ -38,7 +47,8 @@ export function registerAppsCommands(program: Command) {
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching applications...");
 
-				const applications = await client.application.allByOrganization.query();
+				const applications: AppSummary[] =
+					await client.application.allByOrganization.query();
 
 				succeedSpinner();
 
@@ -62,7 +72,7 @@ export function registerAppsCommands(program: Command) {
 						colors.cyan(app.applicationId.slice(0, 8)),
 						app.name,
 						getStatusBadge(app.applicationStatus),
-						app.domain || colors.dim("-"),
+						formatDomain(app.domain),
 						formatDate(app.createdAt),
 					]),
 				);
@@ -157,7 +167,8 @@ export function registerAppsCommands(program: Command) {
 
 				// Find the application
 				const _spinner = startSpinner("Finding application...");
-				const apps = await client.application.allByOrganization.query();
+				const apps: AppSummary[] =
+					await client.application.allByOrganization.query();
 				const app = findApp(apps, appIdentifier);
 
 				if (!app) {
@@ -220,7 +231,8 @@ export function registerAppsCommands(program: Command) {
 
 				// First, get the list to find the app ID
 				const _spinner = startSpinner("Fetching application...");
-				const apps = await client.application.allByOrganization.query();
+				const apps: AppSummary[] =
+					await client.application.allByOrganization.query();
 				const appSummary = findApp(apps, appIdentifier);
 
 				if (!appSummary) {
@@ -321,7 +333,8 @@ export function registerAppsCommands(program: Command) {
 				const client = getApiClient();
 				const _spinner = startSpinner("Finding application...");
 
-				const apps = await client.application.allByOrganization.query();
+				const apps: AppSummary[] =
+					await client.application.allByOrganization.query();
 				const appSummary = findApp(apps, appIdentifier);
 
 				if (!appSummary) {
@@ -369,10 +382,7 @@ export function registerAppsCommands(program: Command) {
 }
 
 // Helper functions
-function findApp(
-	apps: Array<{ applicationId: string; name: string; appName?: string }>,
-	identifier: string,
-) {
+function findApp(apps: AppSummary[], identifier: string) {
 	const lowerIdentifier = identifier.toLowerCase();
 
 	return apps.find(
@@ -382,6 +392,12 @@ function findApp(
 			app.name.toLowerCase() === lowerIdentifier ||
 			app.appName?.toLowerCase() === lowerIdentifier,
 	);
+}
+
+function formatDomain(domain: AppSummary["domain"]): string {
+	if (typeof domain === "string") return domain;
+	if (Array.isArray(domain)) return domain[0]?.host ?? colors.dim("-");
+	return colors.dim("-");
 }
 
 function generateSlug(name: string): string {

@@ -332,17 +332,21 @@ export function registerDbCommands(program: Command) {
 
 				// Connection info
 				log(`${colors.bold("Connection")}`);
-				if (dbDetails.cloudInstanceId || dbDetails.databaseName) {
-					log(`  Host: ${colors.cyan(dbDetails.cloudHost || "localhost")}`);
-					log(
-						`  Port: ${dbDetails.cloudPort || (dbSummary.type === "postgres" ? 5432 : 3306)}`,
-					);
-					log(
-						`  Database: ${dbDetails.cloudDatabaseName || dbDetails.databaseName}`,
-					);
-					log(
-						`  Username: ${dbDetails.cloudUsername || dbDetails.databaseUser}`,
-					);
+				if (
+					dbDetails.directHost ||
+					dbDetails.poolerHost ||
+					dbDetails.databaseName
+				) {
+					const host =
+						dbDetails.poolerHost || dbDetails.directHost || "localhost";
+					const port =
+						dbDetails.poolerPort ||
+						dbDetails.directPort ||
+						(dbSummary.type === "postgres" ? 5432 : 3306);
+					log(`  Host: ${colors.cyan(host)}`);
+					log(`  Port: ${port}`);
+					log(`  Database: ${dbDetails.databaseName}`);
+					log(`  Username: ${dbDetails.databaseUser}`);
 					log(`  Password: ${colors.dim("********")}`);
 				} else {
 					log(`  ${colors.dim("Not yet deployed")}`);
@@ -350,7 +354,11 @@ export function registerDbCommands(program: Command) {
 				log("");
 
 				// Connection string
-				if (dbDetails.cloudHost || dbDetails.databaseName) {
+				if (
+					dbDetails.directHost ||
+					dbDetails.poolerHost ||
+					dbDetails.databaseName
+				) {
 					log(`${colors.bold("Connection String")}`);
 					const connStr = getConnectionString(dbSummary.type, dbDetails);
 					log(`  ${colors.cyan(connStr)}`);
@@ -406,7 +414,11 @@ export function registerDbCommands(program: Command) {
 				succeedSpinner();
 
 				// Check if database is deployed
-				if (!dbDetails.cloudHost && !dbDetails.databaseName) {
+				if (
+					!dbDetails.directHost &&
+					!dbDetails.poolerHost &&
+					!dbDetails.databaseName
+				) {
 					throw new CliError(
 						"Database not deployed yet. Deploy first.",
 						ExitCode.GENERAL_ERROR,
@@ -510,17 +522,17 @@ function getTypeLabel(type: DatabaseType): string {
 }
 
 function getConnectionString(type: DatabaseType, details: any): string {
-	const host = details.cloudHost || "localhost";
-	const user = details.cloudUsername || details.databaseUser || "user";
-	const dbName = details.cloudDatabaseName || details.databaseName || "db";
+	const host = details.poolerHost || details.directHost || "localhost";
+	const user = details.databaseUser || "user";
+	const dbName = details.databaseName || "db";
 
 	switch (type) {
 		case "postgres": {
-			const pgPort = details.cloudPort || 5432;
+			const pgPort = details.poolerPort || details.directPort || 5432;
 			return `postgresql://${user}:****@${host}:${pgPort}/${dbName}`;
 		}
 		case "mysql": {
-			const myPort = details.cloudPort || 3306;
+			const myPort = details.poolerPort || details.directPort || 3306;
 			return `mysql://${user}:****@${host}:${myPort}/${dbName}`;
 		}
 		default:
@@ -532,10 +544,10 @@ function getConnectCommand(
 	type: DatabaseType,
 	details: any,
 ): { command: string; args: string[]; env: Record<string, string> } {
-	const host = details.cloudHost || "localhost";
-	const user = details.cloudUsername || details.databaseUser || "user";
-	const password = details.cloudPassword || details.databasePassword || "";
-	const dbName = details.cloudDatabaseName || details.databaseName || "db";
+	const host = details.poolerHost || details.directHost || "localhost";
+	const user = details.databaseUser || "user";
+	const password = details.databasePassword || "";
+	const dbName = details.databaseName || "db";
 
 	switch (type) {
 		case "postgres":
@@ -545,7 +557,7 @@ function getConnectCommand(
 					"-h",
 					host,
 					"-p",
-					String(details.cloudPort || 5432),
+					String(details.poolerPort || details.directPort || 5432),
 					"-U",
 					user,
 					"-d",
@@ -560,7 +572,7 @@ function getConnectCommand(
 					"-h",
 					host,
 					"-P",
-					String(details.cloudPort || 3306),
+					String(details.poolerPort || details.directPort || 3306),
 					"-u",
 					user,
 					`-p${password}`,

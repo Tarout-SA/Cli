@@ -29,6 +29,19 @@ import {
 	updateSpinner,
 } from "../utils/spinner.js";
 
+interface AppSummary {
+	appName?: string;
+	applicationId: string;
+	name: string;
+}
+
+interface DeploymentSummary {
+	createdAt: Date | string;
+	deploymentId: string;
+	status: string;
+	title?: string | null;
+}
+
 export function registerDeployCommands(program: Command) {
 	// Deploy command
 	program
@@ -45,7 +58,8 @@ export function registerDeployCommands(program: Command) {
 
 				// Find the application
 				const _spinner = startSpinner("Finding application...");
-				const apps = await client.application.allByOrganization.query();
+				const apps: AppSummary[] =
+					await client.application.allByOrganization.query();
 				const app = findApp(apps, appIdentifier);
 
 				if (!app) {
@@ -115,7 +129,8 @@ export function registerDeployCommands(program: Command) {
 
 				// Find the application
 				const _spinner = startSpinner("Fetching status...");
-				const apps = await client.application.allByOrganization.query();
+				const apps: AppSummary[] =
+					await client.application.allByOrganization.query();
 				const appSummary = findApp(apps, appIdentifier);
 
 				if (!appSummary) {
@@ -191,7 +206,8 @@ export function registerDeployCommands(program: Command) {
 
 				// Find the application
 				const _spinner = startSpinner("Cancelling deployment...");
-				const apps = await client.application.allByOrganization.query();
+				const apps: AppSummary[] =
+					await client.application.allByOrganization.query();
 				const app = findApp(apps, appIdentifier);
 
 				if (!app) {
@@ -231,7 +247,8 @@ export function registerDeployCommands(program: Command) {
 
 				// Find the application
 				const _spinner = startSpinner("Fetching deployments...");
-				const apps = await client.application.allByOrganization.query();
+				const apps: AppSummary[] =
+					await client.application.allByOrganization.query();
 				const appSummary = findApp(apps, appIdentifier);
 
 				if (!appSummary) {
@@ -244,9 +261,10 @@ export function registerDeployCommands(program: Command) {
 				}
 
 				// Get deployments
-				const deployments = await client.deployment.all.query({
-					applicationId: appSummary.applicationId,
-				});
+				const deployments: DeploymentSummary[] =
+					await client.deployment.all.query({
+						applicationId: appSummary.applicationId,
+					});
 
 				succeedSpinner();
 
@@ -479,7 +497,8 @@ export function registerDeployCommands(program: Command) {
 
 				// Find the application
 				const _spinner = startSpinner("Finding application...");
-				const apps = await client.application.allByOrganization.query();
+				const apps: AppSummary[] =
+					await client.application.allByOrganization.query();
 				const appSummary = findApp(apps, appIdentifier);
 
 				if (!appSummary) {
@@ -492,15 +511,16 @@ export function registerDeployCommands(program: Command) {
 				}
 
 				// Get deployments
-				const deployments = await client.deployment.all.query({
-					applicationId: appSummary.applicationId,
-				});
+				const deployments: DeploymentSummary[] =
+					await client.deployment.all.query({
+						applicationId: appSummary.applicationId,
+					});
 
 				succeedSpinner();
 
 				// Filter to only successful deployments
 				const successfulDeployments = deployments.filter(
-					(d: any) => d.status === "done",
+					(d) => d.status === "done",
 				);
 
 				if (successfulDeployments.length === 0) {
@@ -514,7 +534,7 @@ export function registerDeployCommands(program: Command) {
 				if (options.to) {
 					// Use specific deployment ID
 					const targetDeployment = successfulDeployments.find(
-						(d: any) =>
+						(d) =>
 							d.deploymentId === options.to ||
 							d.deploymentId.startsWith(options.to),
 					);
@@ -544,7 +564,7 @@ export function registerDeployCommands(program: Command) {
 
 					const choices = successfulDeployments
 						.slice(0, 10)
-						.map((d: any, index: number) => ({
+						.map((d, index) => ({
 							name: `${colors.cyan(d.deploymentId.slice(0, 8))} - ${d.title || "Deployment"} (${formatDate(d.createdAt)})${index === 0 ? colors.dim(" [current]") : ""}`,
 							value: d.deploymentId,
 						}));
@@ -556,14 +576,20 @@ export function registerDeployCommands(program: Command) {
 				// Confirm rollback
 				if (!options.yes) {
 					const targetDeployment = successfulDeployments.find(
-						(d: any) => d.deploymentId === targetDeploymentId,
+						(d) => d.deploymentId === targetDeploymentId,
 					);
 
 					log("");
 					log(`Rolling back ${colors.cyan(appSummary.name)} to:`);
 					log(`  Deployment: ${colors.cyan(targetDeploymentId.slice(0, 8))}`);
 					log(`  Title: ${targetDeployment?.title || "Deployment"}`);
-					log(`  Created: ${formatDate(targetDeployment?.createdAt)}`);
+					log(
+						`  Created: ${
+							targetDeployment
+								? formatDate(targetDeployment.createdAt)
+								: colors.dim("unknown")
+						}`,
+					);
 					log("");
 
 					const { confirm } = await import("../utils/prompts.js");
@@ -649,10 +675,7 @@ export function registerLogsCommand(program: Command) {
 }
 
 // Helper functions
-function findApp(
-	apps: Array<{ applicationId: string; name: string; appName?: string }>,
-	identifier: string,
-) {
+function findApp(apps: AppSummary[], identifier: string) {
 	const lowerIdentifier = identifier.toLowerCase();
 
 	return apps.find(

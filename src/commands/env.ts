@@ -21,6 +21,12 @@ import {
 import { confirm } from "../utils/prompts.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
 
+interface AppSummary {
+	appName?: string;
+	applicationId: string;
+	name: string;
+}
+
 export function registerEnvCommands(program: Command) {
 	const env = program
 		.command("env")
@@ -42,7 +48,8 @@ export function registerEnvCommands(program: Command) {
 
 				// Find the application
 				const _spinner = startSpinner("Fetching environment variables...");
-				const apps = await client.application.allByOrganization.query();
+				const apps: AppSummary[] =
+					await client.application.allByOrganization.query();
 				const app = findApp(apps, appIdentifier);
 
 				if (!app) {
@@ -129,7 +136,8 @@ export function registerEnvCommands(program: Command) {
 
 				// Find the application
 				const _spinner = startSpinner("Setting environment variable...");
-				const apps = await client.application.allByOrganization.query();
+				const apps: AppSummary[] =
+					await client.application.allByOrganization.query();
 				const app = findApp(apps, appIdentifier);
 
 				if (!app) {
@@ -193,7 +201,8 @@ export function registerEnvCommands(program: Command) {
 
 				// Find the application
 				const _spinner = startSpinner("Removing environment variable...");
-				const apps = await client.application.allByOrganization.query();
+				const apps: AppSummary[] =
+					await client.application.allByOrganization.query();
 				const app = findApp(apps, appIdentifier);
 
 				if (!app) {
@@ -237,7 +246,8 @@ export function registerEnvCommands(program: Command) {
 
 				// Find the application
 				const _spinner = startSpinner("Downloading environment variables...");
-				const apps = await client.application.allByOrganization.query();
+				const apps: AppSummary[] =
+					await client.application.allByOrganization.query();
 				const app = findApp(apps, appIdentifier);
 
 				if (!app) {
@@ -305,7 +315,8 @@ export function registerEnvCommands(program: Command) {
 
 				// Find the application
 				const _spinner = startSpinner("Uploading environment variables...");
-				const apps = await client.application.allByOrganization.query();
+				const apps: AppSummary[] =
+					await client.application.allByOrganization.query();
 				const app = findApp(apps, appIdentifier);
 
 				if (!app) {
@@ -341,10 +352,7 @@ export function registerEnvCommands(program: Command) {
 }
 
 // Helper functions
-function findApp(
-	apps: Array<{ applicationId: string; name: string; appName?: string }>,
-	identifier: string,
-) {
+function findApp(apps: AppSummary[], identifier: string) {
 	const lowerIdentifier = identifier.toLowerCase();
 
 	return apps.find(
