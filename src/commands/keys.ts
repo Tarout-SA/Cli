@@ -89,7 +89,10 @@ export function registerKeysCommands(program: Command) {
 				let publicKey = options.publicKey;
 
 				if (!keyName) {
-					keyName = await input("Key name:");
+					keyName = await input("Key name:", undefined, {
+						field: "name",
+						flag: "--name",
+					});
 				}
 
 				if (!publicKey && options.file) {
@@ -101,7 +104,11 @@ export function registerKeysCommands(program: Command) {
 					log(
 						"Paste your public key below (usually found in ~/.ssh/id_rsa.pub):",
 					);
-					publicKey = await input("Public key:");
+					publicKey = await input("Public key:", undefined, {
+						field: "publicKey",
+						flag: "--public-key",
+						sensitive: false,
+					});
 				}
 
 				const client = getApiClient();
@@ -166,6 +173,11 @@ export function registerKeysCommands(program: Command) {
 					const confirmed = await confirm(
 						`Are you sure you want to delete SSH key "${key.name}"?`,
 						false,
+						{
+							field: "confirm_delete_ssh_key",
+							flag: "--yes",
+							context: { keyName: key.name },
+						},
 					);
 
 					if (!confirmed) {

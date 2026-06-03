@@ -107,6 +107,7 @@ export function registerTicketsCommands(program: Command) {
 			"-c, --category <category>",
 			"Category: billing, technical, account, feature_request",
 		)
+		.option("-d, --description <description>", "Ticket description")
 		.action(async (options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
@@ -116,31 +117,46 @@ export function registerTicketsCommands(program: Command) {
 				let category = options.category;
 
 				if (!subject) {
-					subject = await input("Subject:");
+					subject = await input("Subject:", undefined, {
+						field: "ticket_subject",
+						flag: "--subject",
+					});
 				}
 
 				if (!priority) {
-					priority = await select("Priority:", [
-						{ name: "Low", value: "low" },
-						{ name: "Medium", value: "medium" },
-						{ name: "High", value: "high" },
-						{ name: "Critical - Production is down!", value: "critical" },
-					]);
+					priority = await select(
+						"Priority:",
+						[
+							{ name: "Low", value: "low" },
+							{ name: "Medium", value: "medium" },
+							{ name: "High", value: "high" },
+							{ name: "Critical - Production is down!", value: "critical" },
+						],
+						{ field: "ticket_priority", flag: "--priority" },
+					);
 				}
 
 				if (!category) {
-					category = await select("Category:", [
-						{ name: "Technical issue", value: "technical" },
-						{ name: "Billing question", value: "billing" },
-						{ name: "Account management", value: "account" },
-						{ name: "Feature request", value: "feature_request" },
-					]);
+					category = await select(
+						"Category:",
+						[
+							{ name: "Technical issue", value: "technical" },
+							{ name: "Billing question", value: "billing" },
+							{ name: "Account management", value: "account" },
+							{ name: "Feature request", value: "feature_request" },
+						],
+						{ field: "ticket_category", flag: "--category" },
+					);
 				}
 
 				log("");
-				const description = await input(
-					"Description (press Enter twice when done):",
-				);
+				const description =
+					options.description ||
+					(await input(
+						"Description (press Enter twice when done):",
+						undefined,
+						{ field: "ticket_description", flag: "--description" },
+					));
 
 				if (!shouldSkipConfirmation()) {
 					log("");
@@ -149,7 +165,11 @@ export function registerTicketsCommands(program: Command) {
 					log(`Category: ${category}`);
 					log("");
 
-					const confirmed = await confirm("Submit this ticket?", true);
+					const confirmed = await confirm("Submit this ticket?", true, {
+						field: "confirm_submit_ticket",
+						flag: "--yes",
+						context: { subject, priority, category },
+					});
 					if (!confirmed) {
 						log("Cancelled.");
 						return;
@@ -290,7 +310,10 @@ export function registerTicketsCommands(program: Command) {
 				let message = options.message;
 
 				if (!message) {
-					message = await input("Your reply:");
+					message = await input("Your reply:", undefined, {
+						field: "reply_message",
+						flag: "--message",
+					});
 				}
 
 				// Resolve ticket ID
@@ -479,6 +502,11 @@ export function registerTicketsCommands(program: Command) {
 					const confirmed = await confirm(
 						`Close ticket "${ticketIdentifier}"?`,
 						false,
+						{
+							field: "confirm_close_ticket",
+							flag: "--yes",
+							context: { ticket: ticketIdentifier },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");

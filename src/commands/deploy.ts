@@ -240,10 +240,14 @@ async function promptForCredentials(
 			{ name: "Paste an API token", value: "token" },
 			{ name: "Create a free Tarout account", value: "register" },
 		],
+		{ field: "auth_method", flag: "--token" },
 	);
 
 	if (authAction === "token") {
-		const apiToken = await password("Tarout API token:");
+		const apiToken = await password("Tarout API token:", {
+			field: "token",
+			flag: "--token",
+		});
 		return authenticateViaApiToken(apiToken.trim(), apiUrl, {
 			showSuccess: true,
 			persist: true,
@@ -2605,7 +2609,11 @@ export function registerDeployCommands(program: Command) {
 						}));
 
 					const { select } = await import("../utils/prompts.js");
-					targetDeploymentId = await select("Select deployment:", choices);
+					targetDeploymentId = await select(
+						"Select deployment:",
+						choices,
+						{ field: "deployment", flag: "--to" },
+					);
 				}
 
 				// Confirm rollback
@@ -2631,6 +2639,14 @@ export function registerDeployCommands(program: Command) {
 					const confirmed = await confirm(
 						"Are you sure you want to rollback?",
 						false,
+						{
+							field: "confirm_rollback",
+							flag: "--yes",
+							context: {
+								deploymentId: targetDeploymentId,
+								app: appSummary.name,
+							},
+						},
 					);
 
 					if (!confirmed) {

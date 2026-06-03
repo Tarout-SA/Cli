@@ -38,7 +38,8 @@ import { registerTicketsCommands } from "./commands/tickets.js";
 import { registerUpCommand } from "./commands/up.js";
 import { registerWalletCommands } from "./commands/wallet.js";
 import { registerWhatsappCommands } from "./commands/whatsapp.js";
-import { setGlobalOptions } from "./lib/output.js";
+import { outputError, setGlobalOptions } from "./lib/output.js";
+import { ExitCode } from "./utils/exit-codes.js";
 
 const program = new Command();
 
@@ -49,6 +50,10 @@ program
 	.version(packageJson.version)
 	.option("--json", "Output as JSON (machine-readable)")
 	.option("-y, --yes", "Skip all confirmation prompts")
+	.option(
+		"--non-interactive",
+		"Fail fast on missing input (emit needs_input + exit 6 instead of prompting on TTY)",
+	)
 	.option("-q, --quiet", "Minimal output")
 	.option("-v, --verbose", "Extra debug information")
 	.option("--no-color", "Disable colored output")
@@ -57,6 +62,7 @@ program
 		setGlobalOptions({
 			json: opts.json || false,
 			yes: opts.yes || false,
+			nonInteractive: opts.nonInteractive || false,
 			quiet: opts.quiet || false,
 			verbose: opts.verbose || false,
 			noColor: opts.color === false,
@@ -99,6 +105,41 @@ registerSmsCommands(program);
 registerWhatsappCommands(program);
 registerFirewallCommands(program);
 registerQueuesCommands(program);
+
+// Configure Commander's stderr writer so parse-time failures (unknown
+// flags, bad argParser values, missing required arguments) emit a JSON
+// envelope under `--json` instead of a raw human error line. The exit
+// code Commander would have used is preserved, but mapped onto our
+// `INVALID_ARGUMENTS` constant for argument errors.
+//
+// `exitOverride` was tried first, but Commander does not always invoke it
+// for subcommand argParser failures (`commander.invalidArgument` thrown
+// from inside a custom argParser on a nested command bypasses the
+// inherited override). Intercepting `writeErr` works for every error
+// path because Commander always writes the human message before exiting.
+const argErrorPatterns = [
+	/invalid/i,
+	/missing required/i,
+	/unknown option/i,
+	/unknown command/i,
+];
+const originalWriteErr = process.stderr.write.bind(process.stderr);
+program.configureOutput({
+	writeErr: (str: string) => {
+		if (process.argv.includes("--json")) {
+			setGlobalOptions({ json: true });
+			const isArgError = argErrorPatterns.some((p) => p.test(str));
+			outputError(
+				isArgError ? "INVALID_ARGUMENTS" : "CLI_ERROR",
+				str.replace(/^error:\s*/i, "").trim(),
+			);
+			process.exit(
+				isArgError ? ExitCode.INVALID_ARGUMENTS : ExitCode.GENERAL_ERROR,
+			);
+		}
+		return originalWriteErr(str);
+	},
+});
 
 // Parse and execute
 program.parse();

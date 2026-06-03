@@ -144,6 +144,12 @@ export function registerMonitorCommands(program: Command) {
 				if (!monitorName) {
 					monitorName = await input(
 						`Monitor name (default: ${app.name} uptime):`,
+						undefined,
+						{
+							field: "monitor_name",
+							flag: "--name",
+							context: { applicationId: app.applicationId, appName: app.name },
+						},
 					);
 					if (!monitorName) monitorName = `${app.name} uptime`;
 				}
@@ -151,6 +157,12 @@ export function registerMonitorCommands(program: Command) {
 				if (!monitorUrl) {
 					monitorUrl = await input(
 						"URL to monitor (e.g., https://example.com/health):",
+						undefined,
+						{
+							field: "monitor_url",
+							flag: "--url",
+							context: { applicationId: app.applicationId },
+						},
 					);
 				}
 
@@ -260,6 +272,11 @@ export function registerMonitorCommands(program: Command) {
 					const confirmed = await confirm(
 						`Delete monitor "${monitorId}"?`,
 						false,
+						{
+							field: "confirm_delete_monitor",
+							flag: "--yes",
+							context: { monitorId },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");

@@ -121,29 +121,62 @@ export function registerDestinationsCommands(program: Command) {
 			}) => {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
-					const name = options.name || (await input("Destination name:"));
+					const name =
+						options.name ||
+						(await input("Destination name:", undefined, {
+							field: "name",
+							flag: "--name",
+						}));
 					const provider =
 						options.provider ||
-						(await select("Storage provider:", [
-							{ name: "S3 (AWS)", value: "s3" },
-							{ name: "GCS (Google Cloud)", value: "gcs" },
-							{ name: "R2 (Cloudflare)", value: "r2" },
-							{ name: "Wasabi", value: "wasabi" },
-							{ name: "MinIO (custom)", value: "minio" },
-						]));
-					const bucket = options.bucket || (await input("Bucket name:"));
+						(await select(
+							"Storage provider:",
+							[
+								{ name: "S3 (AWS)", value: "s3" },
+								{ name: "GCS (Google Cloud)", value: "gcs" },
+								{ name: "R2 (Cloudflare)", value: "r2" },
+								{ name: "Wasabi", value: "wasabi" },
+								{ name: "MinIO (custom)", value: "minio" },
+							],
+							{
+								field: "provider",
+								flag: "--provider",
+							},
+						));
+					const bucket =
+						options.bucket ||
+						(await input("Bucket name:", undefined, {
+							field: "bucket",
+							flag: "--bucket",
+						}));
 					const region =
 						options.region ||
-						(await input("Region (or leave blank):")) ||
+						(await input("Region (or leave blank):", undefined, {
+							field: "region",
+							flag: "--region",
+						})) ||
 						undefined;
 					const endpoint =
 						options.endpoint ||
-						(await input("Custom endpoint URL (or leave blank):")) ||
+						(await input("Custom endpoint URL (or leave blank):", undefined, {
+							field: "endpoint",
+							flag: "--endpoint",
+						})) ||
 						undefined;
 					const accessKey =
-						options.accessKey || (await input("Access Key ID:"));
+						options.accessKey ||
+						(await input("Access Key ID:", undefined, {
+							field: "access_key",
+							flag: "--access-key",
+							sensitive: true,
+						}));
 					const secretAccessKey =
-						options.secretKey || (await input("Secret Access Key:"));
+						options.secretKey ||
+						(await input("Secret Access Key:", undefined, {
+							field: "secret_key",
+							flag: "--secret-key",
+							sensitive: true,
+						}));
 
 					const client = getApiClient();
 					const _spinner = startSpinner("Creating destination...");
@@ -227,6 +260,11 @@ export function registerDestinationsCommands(program: Command) {
 					const confirmed = await confirm(
 						`Delete destination "${destinationId}"?`,
 						false,
+						{
+							field: "confirm_delete_destination",
+							flag: "--yes",
+							context: { destinationId },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -286,12 +324,31 @@ export function registerDestinationsCommands(program: Command) {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
 					const provider =
-						options.provider || (await input("Storage provider (s3/gcs/r2):"));
-					const bucket = options.bucket || (await input("Bucket name:"));
+						options.provider ||
+						(await input("Storage provider (s3/gcs/r2):", undefined, {
+							field: "provider",
+							flag: "--provider",
+						}));
+					const bucket =
+						options.bucket ||
+						(await input("Bucket name:", undefined, {
+							field: "bucket",
+							flag: "--bucket",
+						}));
 					const accessKey =
-						options.accessKey || (await input("Access Key ID:"));
+						options.accessKey ||
+						(await input("Access Key ID:", undefined, {
+							field: "access_key",
+							flag: "--access-key",
+							sensitive: true,
+						}));
 					const secretAccessKey =
-						options.secretKey || (await input("Secret Access Key:"));
+						options.secretKey ||
+						(await input("Secret Access Key:", undefined, {
+							field: "secret_key",
+							flag: "--secret-key",
+							sensitive: true,
+						}));
 					const client = getApiClient();
 					const _spinner = startSpinner("Testing credentials...");
 					const result = await client.destination.testCredentials.mutate({

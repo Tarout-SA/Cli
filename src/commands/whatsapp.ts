@@ -25,7 +25,10 @@ export function registerWhatsappCommands(program: Command) {
 		.action(async (options: { env?: string }) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const environmentId = options.env || (await input("Environment ID:"));
+				const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching WhatsApp config...");
 				const data = await client.whatsapp.getConfig.query({ environmentId });
@@ -67,17 +70,34 @@ export function registerWhatsappCommands(program: Command) {
 			}) => {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
-					const environmentId = options.env || (await input("Environment ID:"));
+					const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
 					const provider =
 						options.provider ||
-						(await select("WhatsApp provider:", [
-							{ name: "Meta (official)", value: "meta" },
-							{ name: "Twilio", value: "twilio" },
-						]));
-					const apiKey = options.apiKey || (await input("API Key / Token:"));
+						(await select(
+							"WhatsApp provider:",
+							[
+								{ name: "Meta (official)", value: "meta" },
+								{ name: "Twilio", value: "twilio" },
+							],
+							{ field: "whatsapp_provider", flag: "--provider" },
+						));
+					const apiKey =
+						options.apiKey ||
+						(await input("API Key / Token:", undefined, {
+							field: "api_key",
+							flag: "--api-key",
+							sensitive: true,
+						}));
 					const whatsappNumber =
 						options.number ||
-						(await input("WhatsApp business number (e.g. +1234567890):"));
+						(await input(
+							"WhatsApp business number (e.g. +1234567890):",
+							undefined,
+							{ field: "whatsapp_number", flag: "--number" },
+						));
 					const client = getApiClient();
 					const _spinner = startSpinner("Creating WhatsApp config...");
 					const result = await client.whatsapp.createConfig.mutate({
@@ -117,7 +137,10 @@ export function registerWhatsappCommands(program: Command) {
 			}) => {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
-					const environmentId = options.env || (await input("Environment ID:"));
+					const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
 					const isEnabled = options.enable
 						? true
 						: options.disable
@@ -157,8 +180,16 @@ export function registerWhatsappCommands(program: Command) {
 			}) => {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
-					const environmentId = options.env || (await input("Environment ID:"));
-					const to = options.to || (await input("Recipient phone number:"));
+					const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
+					const to =
+						options.to ||
+						(await input("Recipient phone number:", undefined, {
+							field: "recipient_phone",
+							flag: "--to",
+						}));
 					const client = getApiClient();
 					const _spinner = startSpinner("Sending WhatsApp message...");
 					const result = await client.whatsapp.send.mutate({
@@ -187,7 +218,10 @@ export function registerWhatsappCommands(program: Command) {
 			async (options: { env?: string; limit?: string; status?: string }) => {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
-					const environmentId = options.env || (await input("Environment ID:"));
+					const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
 					const client = getApiClient();
 					const _spinner = startSpinner("Fetching logs...");
 					const logs = await client.whatsapp.getLogs.query({
@@ -237,7 +271,10 @@ export function registerWhatsappCommands(program: Command) {
 		.action(async (options: { env?: string; start?: string; end?: string }) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const environmentId = options.env || (await input("Environment ID:"));
+				const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching stats...");
 				const stats = await client.whatsapp.getStats.query({

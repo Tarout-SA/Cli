@@ -265,6 +265,11 @@ export function registerEnvCommands(program: Command) {
 					const confirmed = await confirm(
 						`File ${options.output} already exists. Overwrite?`,
 						false,
+						{
+							field: "confirm_overwrite_env_file",
+							flag: "--yes",
+							context: { outputPath: options.output },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");

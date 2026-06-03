@@ -14,12 +14,38 @@ import {
 	box,
 	colors,
 	isJsonMode,
+	isNonInteractiveMode,
 	log,
 	outputData,
+	outputError,
 	success,
 } from "../lib/output.js";
+import { ExitCode, exit } from "../utils/exit-codes.js";
 import { input, promptOrEmit } from "../utils/prompts.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
+
+/**
+ * Browser-only auth (`tarout login`, `tarout register`) can't satisfy an
+ * unattended agent — there's no way to drive the OAuth round-trip from a
+ * non-TTY parent. Emit a structured AUTH_BOOTSTRAP_REQUIRED error so the
+ * calling agent knows to surface the API-token path to its user instead
+ * of waiting on a never-arriving browser callback.
+ */
+function refuseBrowserAuthForAgent(action: "login" | "register"): never {
+	const message = `tarout ${action} requires a browser. Agents should ask the user to run \`tarout token <api-token>\` or set TAROUT_TOKEN — generate one at https://tarout.sa/dashboard/account/api-keys.`;
+	if (isJsonMode()) {
+		outputError("AUTH_BOOTSTRAP_REQUIRED", message, {
+			action,
+			recommendedFlags: [
+				"export TAROUT_TOKEN=<token>",
+				"tarout token <api-token>",
+			],
+		});
+	} else {
+		process.stderr.write(`error: ${message}\n`);
+	}
+	exit(ExitCode.AUTH_ERROR);
+}
 
 export function registerAuthCommands(program: Command) {
 	// Login command
@@ -32,12 +58,24 @@ export function registerAuthCommands(program: Command) {
 				if (isLoggedIn()) {
 					const profile = getCurrentProfile();
 					if (profile) {
+						if (isJsonMode()) {
+							outputData({
+								alreadyLoggedIn: true,
+								userEmail: profile.userEmail,
+								organizationName: profile.organizationName,
+							});
+							return;
+						}
 						log(`Already logged in as ${colors.cyan(profile.userEmail)}`);
 						log(`Organization: ${profile.organizationName}`);
 						log("");
 						log(`Run ${colors.dim("tarout logout")} to sign out first.`);
 						return;
 					}
+				}
+
+				if (isJsonMode() || isNonInteractiveMode()) {
+					refuseBrowserAuthForAgent("login");
 				}
 
 				const apiUrl = options.apiUrl;
@@ -157,10 +195,22 @@ export function registerAuthCommands(program: Command) {
 				if (isLoggedIn()) {
 					const profile = getCurrentProfile();
 					if (profile) {
+						if (isJsonMode()) {
+							outputData({
+								alreadyLoggedIn: true,
+								userEmail: profile.userEmail,
+								organizationName: profile.organizationName,
+							});
+							return;
+						}
 						log(`Already logged in as ${colors.cyan(profile.userEmail)}`);
 						log(`Run ${colors.dim("tarout logout")} to sign out first.`);
 						return;
 					}
+				}
+
+				if (isJsonMode() || isNonInteractiveMode()) {
+					refuseBrowserAuthForAgent("register");
 				}
 
 				const apiUrl = options.apiUrl;

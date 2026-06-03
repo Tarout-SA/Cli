@@ -68,6 +68,11 @@ export function registerLinkCommands(program: Command) {
 						const confirmed = await confirm(
 							"Do you want to relink to a different application?",
 							false,
+							{
+								field: "confirm_relink",
+								flag: "--yes",
+								context: { currentApp: existingConfig.name },
+							},
 						);
 
 						if (!confirmed) {
@@ -116,7 +121,11 @@ export function registerLinkCommands(program: Command) {
 						}),
 					);
 
-					const selectedId = await select("Select an application:", choices);
+					const selectedId = await select(
+						"Select an application:",
+						choices,
+						{ field: "app", flag: "--app" },
+					);
 					selectedApp =
 						apps.find(
 							(a: { applicationId: string }) => a.applicationId === selectedId,
@@ -193,6 +202,11 @@ export function registerLinkCommands(program: Command) {
 					const confirmed = await confirm(
 						"Are you sure you want to unlink this directory?",
 						false,
+						{
+							field: "confirm_unlink",
+							flag: "--yes",
+							context: { currentApp: config.name },
+						},
 					);
 
 					if (!confirmed) {

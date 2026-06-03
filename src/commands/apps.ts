@@ -105,11 +105,17 @@ export function registerAppsCommands(program: Command) {
 				let description = options.description;
 
 				if (!appName) {
-					appName = await input("Application name:");
+					appName = await input("Application name:", undefined, {
+						field: "app_name",
+						flag: "<name>",
+					});
 				}
 
 				if (!description && !shouldSkipConfirmation()) {
-					description = await input("Description (optional):");
+					description = await input("Description (optional):", undefined, {
+						field: "description",
+						flag: "--description",
+					});
 				}
 
 				// Generate appName (URL-safe slug)
@@ -192,6 +198,11 @@ export function registerAppsCommands(program: Command) {
 					const confirmed = await confirm(
 						`Are you sure you want to delete "${app.name}"? This cannot be undone.`,
 						false,
+						{
+							field: "confirm_delete_app",
+							flag: "--yes",
+							context: { appName: app.name, applicationId: app.applicationId },
+						},
 					);
 
 					if (!confirmed) {
@@ -392,6 +403,11 @@ export function registerAppsCommands(program: Command) {
 					const confirmed = await confirm(
 						`Stop application "${app.name}"?`,
 						false,
+						{
+							field: "confirm_stop_app",
+							flag: "--yes",
+							context: { appName: app.name, applicationId: app.applicationId },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -513,7 +529,10 @@ export function registerAppsCommands(program: Command) {
 				const branch = options.branch;
 
 				if (!repo) {
-					repo = await input("Repository (owner/repo):");
+					repo = await input("Repository (owner/repo):", undefined, {
+						field: "github_repo",
+						flag: "--repo",
+					});
 				}
 
 				const [owner, repository] = (repo || "").split("/");
@@ -537,6 +556,10 @@ export function registerAppsCommands(program: Command) {
 									name: p.name || p.login || p.githubId,
 									value: p.githubId || p.id,
 								})),
+								{
+									field: "github_provider_id",
+									flag: "--provider-id",
+								},
 							);
 						}
 					}
@@ -600,7 +623,10 @@ export function registerAppsCommands(program: Command) {
 
 				let repo = options.repo;
 				if (!repo) {
-					repo = await input("Repository (namespace/repo):");
+					repo = await input("Repository (namespace/repo):", undefined, {
+						field: "gitlab_repo",
+						flag: "--repo",
+					});
 				}
 
 				const parts = (repo || "").split("/");
@@ -620,6 +646,10 @@ export function registerAppsCommands(program: Command) {
 								name: p.name || p.gitlabId,
 								value: p.gitlabId || p.id,
 							})),
+							{
+								field: "gitlab_provider_id",
+								flag: "--provider-id",
+							},
 						);
 					}
 				}
@@ -683,6 +713,11 @@ export function registerAppsCommands(program: Command) {
 				if (!image) {
 					image = await input(
 						"Docker image (e.g., nginx:latest or myorg/app:1.0):",
+						undefined,
+						{
+							field: "docker_image",
+							flag: "--image",
+						},
 					);
 				}
 
@@ -740,7 +775,10 @@ export function registerAppsCommands(program: Command) {
 
 				let gitUrl = options.url;
 				if (!gitUrl) {
-					gitUrl = await input("Git URL (https://... or git@...):");
+					gitUrl = await input("Git URL (https://... or git@...):", undefined, {
+						field: "git_url",
+						flag: "--url",
+					});
 				}
 
 				const _configSpinner = startSpinner("Connecting git repository...");
@@ -802,6 +840,11 @@ export function registerAppsCommands(program: Command) {
 					const confirmed = await confirm(
 						`Disconnect source provider from "${app.name}"?`,
 						false,
+						{
+							field: "confirm_disconnect_git_provider",
+							flag: "--yes",
+							context: { appName: app.name, applicationId: app.applicationId },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -855,11 +898,18 @@ export function registerAppsCommands(program: Command) {
 
 				let buildType = options.type;
 				if (!buildType) {
-					buildType = await select("Build type:", [
-						{ name: "Nixpacks (auto-detect)", value: "nixpacks" },
-						{ name: "Dockerfile", value: "dockerfile" },
-						{ name: "Static / SPA", value: "static" },
-					]);
+					buildType = await select(
+						"Build type:",
+						[
+							{ name: "Nixpacks (auto-detect)", value: "nixpacks" },
+							{ name: "Dockerfile", value: "dockerfile" },
+							{ name: "Static / SPA", value: "static" },
+						],
+						{
+							field: "build_type",
+							flag: "--type",
+						},
+					);
 				}
 
 				const _configSpinner = startSpinner("Saving build configuration...");
@@ -915,7 +965,10 @@ export function registerAppsCommands(program: Command) {
 
 				let repo = options.repo;
 				if (!repo) {
-					repo = await input("Repository (owner/repo):");
+					repo = await input("Repository (owner/repo):", undefined, {
+						field: "bitbucket_repo",
+						flag: "--repo",
+					});
 				}
 
 				const parts = (repo || "").split("/");
@@ -936,6 +989,10 @@ export function registerAppsCommands(program: Command) {
 									name: p.username || p.bitbucketId,
 									value: p.bitbucketId || p.id,
 								})),
+								{
+									field: "bitbucket_provider_id",
+									flag: "--provider-id",
+								},
 							);
 						}
 					} catch {
@@ -1002,7 +1059,10 @@ export function registerAppsCommands(program: Command) {
 
 				let repo = options.repo;
 				if (!repo) {
-					repo = await input("Repository (owner/repo):");
+					repo = await input("Repository (owner/repo):", undefined, {
+						field: "gitea_repo",
+						flag: "--repo",
+					});
 				}
 
 				const parts = (repo || "").split("/");
@@ -1594,6 +1654,15 @@ export function registerAppsCommands(program: Command) {
 					const confirmed = await confirm(
 						`Change plan for "${app.name}" to "${newPlan}"?`,
 						false,
+						{
+							field: "confirm_change_plan",
+							flag: "--yes",
+							context: {
+								appName: app.name,
+								applicationId: app.applicationId,
+								newPlan,
+							},
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -1868,7 +1937,11 @@ export function registerAppsCommands(program: Command) {
 					throw new NotFoundError("Application", appIdentifier);
 				}
 				const dockerfileContent =
-					options.content || (await input("Dockerfile content:"));
+					options.content ||
+					(await input("Dockerfile content:", undefined, {
+						field: "dockerfile_content",
+						flag: "--content",
+					}));
 				const _saveSpinner = startSpinner("Saving Dockerfile...");
 				await client.application.saveDockerfileUploadProvider.mutate({
 					applicationId: app.applicationId,

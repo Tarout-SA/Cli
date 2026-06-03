@@ -150,7 +150,10 @@ export function registerNotificationsCommands(program: Command) {
 				// Build payload from flags or prompt interactively
 				const name =
 					options.name ||
-					(await input("Name (press Enter for default):")) ||
+					(await input("Name (press Enter for default):", undefined, {
+						field: "name",
+						flag: "--name",
+					})) ||
 					"Email Notifications";
 
 				const payload: Record<string, unknown> = {
@@ -198,6 +201,11 @@ export function registerNotificationsCommands(program: Command) {
 					const confirmed = await confirm(
 						`Delete notification configuration "${notificationId}"?`,
 						false,
+						{
+							field: "confirm_delete_notification",
+							flag: "--yes",
+							context: { notificationId },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -313,10 +321,16 @@ export function registerNotificationsCommands(program: Command) {
 				let message = options.message;
 
 				if (!title) {
-					title = await input("Subject:");
+					title = await input("Subject:", undefined, {
+						field: "title",
+						flag: "--title",
+					});
 				}
 				if (!message) {
-					message = await input("Message:");
+					message = await input("Message:", undefined, {
+						field: "message",
+						flag: "--message",
+					});
 				}
 
 				const client = getApiClient();
@@ -355,7 +369,13 @@ export function registerNotificationsCommands(program: Command) {
 		.action(async (options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const name = options.name || (await input("Name:")) || "Notifications";
+				const name =
+					options.name ||
+					(await input("Name:", undefined, {
+						field: "name",
+						flag: "--name",
+					})) ||
+					"Notifications";
 				const client = getApiClient();
 				const _spinner = startSpinner("Creating notification config...");
 				const result = await client.notification.create.mutate({

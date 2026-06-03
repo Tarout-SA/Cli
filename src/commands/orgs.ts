@@ -89,6 +89,12 @@ export function registerOrgsCommands(program: Command) {
 				if (!name) {
 					name = await input(
 						`New name (current: ${profile.organizationName}):`,
+						undefined,
+						{
+							field: "organization_name",
+							flag: "--name",
+							context: { currentName: profile.organizationName },
+						},
 					);
 				}
 
@@ -131,6 +137,14 @@ export function registerOrgsCommands(program: Command) {
 					const confirmed = await confirm(
 						`Type the organization name "${profile.organizationName}" to confirm deletion:`,
 						false,
+						{
+							field: "confirm_delete_organization",
+							flag: "--yes",
+							context: {
+								organizationId: profile.organizationId,
+								organizationName: profile.organizationName,
+							},
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -186,6 +200,14 @@ export function registerOrgsCommands(program: Command) {
 					const confirmed = await confirm(
 						`Transfer ownership to user "${userId}"?`,
 						false,
+						{
+							field: "confirm_transfer_ownership",
+							flag: "--yes",
+							context: {
+								organizationId: profile.organizationId,
+								newOwnerUserId: userId,
+							},
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -327,6 +349,11 @@ export function registerOrgsCommands(program: Command) {
 					const confirmed = await confirm(
 						`Revoke invitation "${invitationId}"?`,
 						false,
+						{
+							field: "confirm_revoke_invitation",
+							flag: "--yes",
+							context: { invitationId },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -534,7 +561,11 @@ export function registerEnvsCommands(program: Command) {
 
 				let envName = name;
 				if (!envName) {
-					envName = await input("Environment name (e.g., staging):");
+					envName = await input(
+						"Environment name (e.g., staging):",
+						undefined,
+						{ field: "environment_name", flag: "name" },
+					);
 				}
 
 				const client = getApiClient();
@@ -603,6 +634,14 @@ export function registerEnvsCommands(program: Command) {
 					const confirmed = await confirm(
 						`Delete environment "${env.name}"?`,
 						false,
+						{
+							field: "confirm_delete_environment",
+							flag: "--yes",
+							context: {
+								environmentId: env.environmentId,
+								environmentName: env.name,
+							},
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");

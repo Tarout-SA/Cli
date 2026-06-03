@@ -171,7 +171,11 @@ export function registerProjectsCommands(program: Command) {
 
 				let name = options.name;
 				if (!name) {
-					name = await input("New name (leave blank to keep):");
+					name = await input("New name (leave blank to keep):", undefined, {
+						field: "project_name",
+						flag: "--name",
+						context: { projectId },
+					});
 				}
 
 				const client = getApiClient();
@@ -213,6 +217,11 @@ export function registerProjectsCommands(program: Command) {
 					const confirmed = await confirm(
 						`Delete project "${projectId}"? This cannot be undone.`,
 						false,
+						{
+							field: "confirm_delete_project",
+							flag: "--yes",
+							context: { projectId },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");

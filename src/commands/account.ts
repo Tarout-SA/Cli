@@ -73,7 +73,12 @@ export function registerAccountCommands(program: Command) {
 					if (options.password) {
 						updates.password = options.password;
 						updates.currentPassword =
-							options.currentPassword || (await input("Current password:"));
+							options.currentPassword ||
+							(await input("Current password:", undefined, {
+								field: "currentPassword",
+								flag: "--current-password",
+								sensitive: true,
+							}));
 					}
 
 					if (Object.keys(updates).length === 0) {
@@ -111,13 +116,18 @@ export function registerAccountCommands(program: Command) {
 					const confirmed = await confirm(
 						"Delete your account? This cannot be undone.",
 						false,
+						{ field: "confirm_delete_account", flag: "--yes" },
 					);
 					if (!confirmed) {
 						log("Cancelled.");
 						return;
 					}
 				}
-				const confirmEmail = await input("Type your email address to confirm:");
+				const confirmEmail = await input(
+					"Type your email address to confirm:",
+					undefined,
+					{ field: "confirm_email", flag: "--confirm-email" },
+				);
 				const client = getApiClient();
 				const _spinner = startSpinner("Deleting account...");
 				await client.user.deleteSelf.mutate({ confirmEmail } as any);
@@ -192,7 +202,12 @@ export function registerAccountCommands(program: Command) {
 			}) => {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
-					const name = options.name || (await input("API key name:"));
+					const name =
+						options.name ||
+						(await input("API key name:", undefined, {
+							field: "name",
+							flag: "--name",
+						}));
 					const client = getApiClient();
 					const _spinner = startSpinner("Creating API key...");
 					const result = await client.user.createApiKey.mutate({
@@ -239,6 +254,11 @@ export function registerAccountCommands(program: Command) {
 					const confirmed = await confirm(
 						`Delete API key "${apiKeyId}"?`,
 						false,
+						{
+							field: "confirm_delete_api_key",
+							flag: "--yes",
+							context: { apiKeyId },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -501,6 +521,11 @@ export function registerAccountCommands(program: Command) {
 					const ok = await confirmFn(
 						`Remove user "${userId}" from the organization?`,
 						false,
+						{
+							field: "confirm_remove_member",
+							flag: "--yes",
+							context: { userId },
+						},
 					);
 					if (!ok) {
 						log("Cancelled.");
@@ -529,10 +554,14 @@ export function registerAccountCommands(program: Command) {
 				const { select: selectFn } = await import("../utils/prompts.js");
 				const role =
 					options.role ||
-					(await selectFn("Role:", [
-						{ name: "Admin", value: "admin" },
-						{ name: "Member", value: "member" },
-					]));
+					(await selectFn(
+						"Role:",
+						[
+							{ name: "Admin", value: "admin" },
+							{ name: "Member", value: "member" },
+						],
+						{ field: "role", flag: "--role" },
+					));
 				const client = getApiClient();
 				const _spinner = startSpinner("Assigning permissions...");
 				await client.user.assignPermissions.mutate({ userId, role } as any);

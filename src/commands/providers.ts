@@ -114,6 +114,11 @@ export function registerProvidersCommands(program: Command) {
 					const confirmed = await confirm(
 						`Remove provider "${gitProviderId}"?`,
 						false,
+						{
+							field: "confirm_remove_provider",
+							flag: "--yes",
+							context: { gitProviderId },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -323,7 +328,11 @@ export function registerProvidersCommands(program: Command) {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 				const name =
-					options.name || (await input("New name for this provider:"));
+					options.name ||
+					(await input("New name for this provider:", undefined, {
+						field: "provider_name",
+						flag: "--name",
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Updating provider...");
 				// Fetch to get gitProviderId
@@ -400,9 +409,17 @@ export function registerProvidersCommands(program: Command) {
 					if (!isLoggedIn()) throw new AuthError();
 					const applicationId =
 						options.applicationId ||
-						(await input("GitLab OAuth Application ID:"));
+						(await input("GitLab OAuth Application ID:", undefined, {
+							field: "gitlab_application_id",
+							flag: "--application-id",
+						}));
 					const secret =
-						options.secret || (await input("GitLab OAuth Secret:"));
+						options.secret ||
+						(await input("GitLab OAuth Secret:", undefined, {
+							field: "gitlab_oauth_secret",
+							flag: "--secret",
+							sensitive: true,
+						}));
 					const client = getApiClient();
 					const _spinner = startSpinner("Creating GitLab provider...");
 					const result = await client.gitlab.create.mutate({
@@ -615,7 +632,12 @@ export function registerProvidersCommands(program: Command) {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 				const appPassword =
-					options.secret || (await input("Bitbucket App Password or Secret:"));
+					options.secret ||
+					(await input("Bitbucket App Password or Secret:", undefined, {
+						field: "bitbucket_oauth_secret",
+						flag: "--secret",
+						sensitive: true,
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Creating Bitbucket provider...");
 				const result = await client.bitbucket.create.mutate({

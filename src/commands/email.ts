@@ -31,7 +31,10 @@ export function registerEmailCommands(program: Command) {
 		.action(async (options: { env?: string }) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const environmentId = options.env || (await input("Environment ID:"));
+				const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching email config...");
 				const data = await client.emailService.getConfig.query({
@@ -90,23 +93,48 @@ export function registerEmailCommands(program: Command) {
 			}) => {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
-					const environmentId = options.env || (await input("Environment ID:"));
+					const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
 					const provider =
 						options.provider ||
-						(await select("Email provider:", [
-							{ name: "Resend", value: "resend" },
-							{ name: "SendGrid", value: "sendgrid" },
-							{ name: "Mailgun", value: "mailgun" },
-							{ name: "Amazon SES", value: "ses" },
-						]));
-					const apiKey = options.apiKey || (await input("API Key:"));
+						(await select(
+							"Email provider:",
+							[
+								{ name: "Resend", value: "resend" },
+								{ name: "SendGrid", value: "sendgrid" },
+								{ name: "Mailgun", value: "mailgun" },
+								{ name: "Amazon SES", value: "ses" },
+							],
+							{ field: "email_provider", flag: "--provider" },
+						));
+					const apiKey =
+						options.apiKey ||
+						(await input("API Key:", undefined, {
+							field: "api_key",
+							flag: "--api-key",
+							sensitive: true,
+						}));
 					const fromDomain =
 						options.fromDomain ||
-						(await input("From domain (e.g. mail.example.com):"));
-					const fromName = options.fromName || (await input("From name:"));
+						(await input("From domain (e.g. mail.example.com):", undefined, {
+							field: "from_domain",
+							flag: "--from-domain",
+						}));
+					const fromName =
+						options.fromName ||
+						(await input("From name:", undefined, {
+							field: "from_name",
+							flag: "--from-name",
+						}));
 					const fromEmail =
 						options.fromEmail ||
-						(await input(`From email (e.g. hello@${fromDomain}):`));
+						(await input(
+							`From email (e.g. hello@${fromDomain}):`,
+							undefined,
+							{ field: "from_email", flag: "--from-email" },
+						));
 					const client = getApiClient();
 					const _spinner = startSpinner("Creating email config...");
 					const result = await client.emailService.createConfig.mutate({
@@ -179,6 +207,11 @@ export function registerEmailCommands(program: Command) {
 					const confirmed = await confirm(
 						`Delete email configuration "${emailServiceId}"?`,
 						false,
+						{
+							field: "confirm_delete_email_config",
+							flag: "--yes",
+							context: { emailServiceId },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -211,8 +244,16 @@ export function registerEmailCommands(program: Command) {
 		.action(async (options: { env?: string; domain?: string }) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const environmentId = options.env || (await input("Environment ID:"));
-				const domainName = options.domain || (await input("Domain to verify:"));
+				const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
+				const domainName =
+					options.domain ||
+					(await input("Domain to verify:", undefined, {
+						field: "domain",
+						flag: "--domain",
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Initiating domain verification...");
 				const result = await client.emailService.verifyDomain.mutate({
@@ -235,8 +276,16 @@ export function registerEmailCommands(program: Command) {
 		.action(async (options: { env?: string; domain?: string }) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const environmentId = options.env || (await input("Environment ID:"));
-				const domainName = options.domain || (await input("Domain name:"));
+				const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
+				const domainName =
+					options.domain ||
+					(await input("Domain name:", undefined, {
+						field: "domain",
+						flag: "--domain",
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Checking domain status...");
 				const data = await client.emailService.getDomainStatus.query({
@@ -271,8 +320,16 @@ export function registerEmailCommands(program: Command) {
 			async (options: { env?: string; domain?: string; type?: string }) => {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
-					const environmentId = options.env || (await input("Environment ID:"));
-					const domainName = options.domain || (await input("Domain name:"));
+					const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
+					const domainName =
+						options.domain ||
+						(await input("Domain name:", undefined, {
+							field: "domain",
+							flag: "--domain",
+						}));
 					const client = getApiClient();
 					const _spinner = startSpinner("Fetching DNS records...");
 					const data = await client.emailService.getDnsRecords.query({
@@ -321,7 +378,10 @@ export function registerEmailCommands(program: Command) {
 		.action(async (options: { env?: string; active?: boolean }) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const environmentId = options.env || (await input("Environment ID:"));
+				const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching templates...");
 				const list = await client.emailService.listTemplates.query({
@@ -363,7 +423,10 @@ export function registerEmailCommands(program: Command) {
 		.action(async (slug: string, options: { env?: string }) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const environmentId = options.env || (await input("Environment ID:"));
+				const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching template...");
 				const data = await client.emailService.getTemplateBySlug.query({
@@ -448,11 +511,28 @@ export function registerEmailCommands(program: Command) {
 			}) => {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
-					const environmentId = options.env || (await input("Environment ID:"));
-					const name = options.name || (await input("Template name:"));
-					const subject = options.subject || (await input("Email subject:"));
+					const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
+					const name =
+						options.name ||
+						(await input("Template name:", undefined, {
+							field: "template_name",
+							flag: "--name",
+						}));
+					const subject =
+						options.subject ||
+						(await input("Email subject:", undefined, {
+							field: "email_subject",
+							flag: "--subject",
+						}));
 					const htmlContent =
-						options.html || (await input("HTML content (or paste):"));
+						options.html ||
+						(await input("HTML content (or paste):", undefined, {
+							field: "html_content",
+							flag: "--html",
+						}));
 					const client = getApiClient();
 					const _spinner = startSpinner("Creating template...");
 					const result = await client.emailService.createTemplate.mutate({
@@ -536,6 +616,11 @@ export function registerEmailCommands(program: Command) {
 					const confirmed = await confirm(
 						`Delete template "${templateId}"?`,
 						false,
+						{
+							field: "confirm_delete_template",
+							flag: "--yes",
+							context: { templateId },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -562,7 +647,10 @@ export function registerEmailCommands(program: Command) {
 		.action(async (options: { env?: string }) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const environmentId = options.env || (await input("Environment ID:"));
+				const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Seeding templates...");
 				const result = await client.emailService.seedPrebuiltTemplates.mutate({
@@ -597,9 +685,22 @@ export function registerEmailCommands(program: Command) {
 			}) => {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
-					const environmentId = options.env || (await input("Environment ID:"));
-					const to = options.to || (await input("Recipient email:"));
-					const subject = options.subject || (await input("Subject:"));
+					const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
+					const to =
+						options.to ||
+						(await input("Recipient email:", undefined, {
+							field: "recipient_email",
+							flag: "--to",
+						}));
+					const subject =
+						options.subject ||
+						(await input("Subject:", undefined, {
+							field: "email_subject",
+							flag: "--subject",
+						}));
 					const html = options.html || options.text;
 					const client = getApiClient();
 					const _spinner = startSpinner("Sending email...");
@@ -637,10 +738,22 @@ export function registerEmailCommands(program: Command) {
 			}) => {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
-					const environmentId = options.env || (await input("Environment ID:"));
+					const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
 					const templateId =
-						options.templateId || (await input("Template ID:"));
-					const to = options.to || (await input("Recipient email:"));
+						options.templateId ||
+						(await input("Template ID:", undefined, {
+							field: "template_id",
+							flag: "--template-id",
+						}));
+					const to =
+						options.to ||
+						(await input("Recipient email:", undefined, {
+							field: "recipient_email",
+							flag: "--to",
+						}));
 					const variables = options.vars ? JSON.parse(options.vars) : {};
 					const client = getApiClient();
 					const _spinner = startSpinner("Sending templated email...");
@@ -676,7 +789,10 @@ export function registerEmailCommands(program: Command) {
 			}) => {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
-					const environmentId = options.env || (await input("Environment ID:"));
+					const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
 					const client = getApiClient();
 					const _spinner = startSpinner("Fetching logs...");
 					const logs = await client.emailService.getEmailLogs.query({
@@ -727,7 +843,10 @@ export function registerEmailCommands(program: Command) {
 		.action(async (options: { env?: string; start?: string; end?: string }) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const environmentId = options.env || (await input("Environment ID:"));
+				const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching stats...");
 				const stats = await client.emailService.getEmailStats.query({
@@ -769,7 +888,10 @@ export function registerEmailCommands(program: Command) {
 		.action(async (options: { env?: string }) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const environmentId = options.env || (await input("Environment ID:"));
+				const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching API keys...");
 				const list = await client.emailService.listApiKeys.query({
@@ -811,8 +933,16 @@ export function registerEmailCommands(program: Command) {
 		.action(async (options: { env?: string; name?: string; mode?: string }) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const environmentId = options.env || (await input("Environment ID:"));
-				const name = options.name || (await input("API key name:"));
+				const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
+				const name =
+					options.name ||
+					(await input("API key name:", undefined, {
+						field: "api_key_name",
+						flag: "--name",
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Creating API key...");
 				const result = await client.emailService.createApiKey.mutate({
@@ -842,7 +972,12 @@ export function registerEmailCommands(program: Command) {
 		.action(async (apiKeyId: string, options: { name?: string }) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const name = options.name || (await input("New name:"));
+				const name =
+					options.name ||
+					(await input("New name:", undefined, {
+						field: "new_name",
+						flag: "--name",
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Updating API key...");
 				await client.emailService.updateApiKey.mutate({
@@ -867,6 +1002,11 @@ export function registerEmailCommands(program: Command) {
 					const confirmed = await confirm(
 						`Revoke API key "${apiKeyId}"?`,
 						false,
+						{
+							field: "confirm_revoke_api_key",
+							flag: "--yes",
+							context: { apiKeyId },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -895,6 +1035,11 @@ export function registerEmailCommands(program: Command) {
 					const confirmed = await confirm(
 						`Delete API key "${apiKeyId}"?`,
 						false,
+						{
+							field: "confirm_delete_api_key",
+							flag: "--yes",
+							context: { apiKeyId },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");

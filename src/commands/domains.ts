@@ -156,6 +156,11 @@ export function registerDomainsCommands(program: Command) {
 					const confirmed = await confirm(
 						`Proceed to payment for ${domainName}?`,
 						false,
+						{
+							field: "confirm_register_domain",
+							flag: "--yes",
+							context: { domain: domainName },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -448,6 +453,11 @@ export function registerDomainsCommands(program: Command) {
 					const confirmed = await confirm(
 						`Are you sure you want to unlink "${domain.host}"?`,
 						false,
+						{
+							field: "confirm_unlink_domain",
+							flag: "--yes",
+							context: { domain: domain.host, domainId: domain.domainId },
+						},
 					);
 
 					if (!confirmed) {
@@ -847,6 +857,11 @@ export function registerDomainsCommands(program: Command) {
 					const confirmed = await confirm(
 						`Are you sure you want to delete DNS record "${recordId}"?`,
 						false,
+						{
+							field: "confirm_delete_dns_record",
+							flag: "--yes",
+							context: { recordId },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -1278,6 +1293,11 @@ export function registerDomainsCommands(program: Command) {
 					const confirmed = await confirm(
 						`Delete domain "${domainIdentifier}"?`,
 						false,
+						{
+							field: "confirm_delete_registered_domain",
+							flag: "--yes",
+							context: { domain: domainIdentifier },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -1430,7 +1450,12 @@ export function registerDomainsCommands(program: Command) {
 						throw new NotFoundError("Domain", domainIdentifier);
 					}
 					const targetRegistrar =
-						options.registrar || (await input("Target registrar name:"));
+						options.registrar ||
+						(await input("Target registrar name:", undefined, {
+							field: "target_registrar",
+							flag: "--registrar",
+							context: { domain: domainIdentifier },
+						}));
 					const _transferSpinner = startSpinner("Requesting transfer out...");
 					await client.domainRegistrar.requestTransferOut.mutate({
 						domainId: domain.domainId,
@@ -1743,9 +1768,20 @@ export function registerDomainsCommands(program: Command) {
 						failSpinner();
 						throw new NotFoundError("Domain", domainIdentifier);
 					}
-					const name = options.name || (await input("Rule name:"));
+					const name =
+						options.name ||
+						(await input("Rule name:", undefined, {
+							field: "firewall_rule_name",
+							flag: "--name",
+							context: { domain: domainIdentifier },
+						}));
 					const expression =
-						options.expression || (await input("Firewall expression:"));
+						options.expression ||
+						(await input("Firewall expression:", undefined, {
+							field: "firewall_expression",
+							flag: "--expression",
+							context: { domain: domainIdentifier },
+						}));
 					const action = options.action || "block";
 					const _createSpinner = startSpinner("Creating firewall rule...");
 					const result = await client.domainRegistrar.createFirewallRule.mutate(
@@ -1939,7 +1975,13 @@ export function registerDomainsCommands(program: Command) {
 					failSpinner();
 					throw new NotFoundError("Domain", domainIdentifier);
 				}
-				const ipAddress = options.ip || (await input("IP address:"));
+				const ipAddress =
+					options.ip ||
+					(await input("IP address:", undefined, {
+						field: "ip_address",
+						flag: "--ip",
+						context: { domain: domainIdentifier },
+					}));
 				const _setupSpinner = startSpinner("Setting up DNS records...");
 				await client.dns.setupCommonRecords.mutate({
 					registeredDomainId: domain.domainId,
@@ -2172,10 +2214,25 @@ export function registerDomainsCommands(program: Command) {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
 					const registeredDomainId =
-						options.registeredDomain || (await input("Registered domain ID:"));
+						options.registeredDomain ||
+						(await input("Registered domain ID:", undefined, {
+							field: "registered_domain_id",
+							flag: "--registered-domain",
+						}));
 					const subdomain =
-						options.subdomain || (await input("Subdomain (e.g. www):"));
-					const applicationId = options.app || (await input("Application ID:"));
+						options.subdomain ||
+						(await input("Subdomain (e.g. www):", undefined, {
+							field: "subdomain",
+							flag: "--subdomain",
+							context: { registeredDomainId },
+						}));
+					const applicationId =
+						options.app ||
+						(await input("Application ID:", undefined, {
+							field: "application_id",
+							flag: "--app",
+							context: { registeredDomainId, subdomain },
+						}));
 					const client = getApiClient();
 					const _spinner = startSpinner("Creating domain...");
 					const result = await client.domain.createWithRegisteredDomain.mutate({
@@ -2376,9 +2433,19 @@ export function registerDomainsCommands(program: Command) {
 			}) => {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
-					const domainId = options.domainId || (await input("Domain ID:"));
+					const domainId =
+						options.domainId ||
+						(await input("Domain ID:", undefined, {
+							field: "domain_id",
+							flag: "--domain-id",
+						}));
 					const applicationId =
-						options.appId || (await input("Application ID:"));
+						options.appId ||
+						(await input("Application ID:", undefined, {
+							field: "application_id",
+							flag: "--app-id",
+							context: { domainId },
+						}));
 					const client = getApiClient();
 					const _spinner = startSpinner("Linking domain...");
 					await client.domain.linkToApplication.mutate({

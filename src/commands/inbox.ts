@@ -156,6 +156,10 @@ export function registerInboxCommands(program: Command) {
 					const confirmed = await confirm(
 						"Clear all notifications? This cannot be undone.",
 						false,
+						{
+							field: "confirm_clear_notifications",
+							flag: "--yes",
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");

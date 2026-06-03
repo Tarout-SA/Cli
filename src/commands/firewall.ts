@@ -101,28 +101,65 @@ export function registerFirewallCommands(program: Command) {
 	fw.command("create")
 		.description("Create a new firewall template")
 		.option("-n, --name <name>", "Template name")
+		.option(
+			"--rules <json>",
+			"JSON array of rules: [{protocol,portRange,direction,sourceRanges}]",
+		)
 		.action(async (options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const name = options.name || (await input("Template name:"));
+				const name =
+					options.name ||
+					(await input("Template name:", undefined, {
+						field: "firewall_template_name",
+						flag: "--name",
+					}));
 				log("");
 				log("Add rules interactively (leave protocol empty to finish):");
 				const rules: any[] = [];
 				for (let i = 0; i < 10; i++) {
-					const protocol = await select(`Rule ${i + 1} protocol (or skip):`, [
-						{ name: "TCP", value: "tcp" },
-						{ name: "UDP", value: "udp" },
-						{ name: "ICMP", value: "icmp" },
-						{ name: "Done — no more rules", value: "__done__" },
-					]);
+					const protocol = await select(
+						`Rule ${i + 1} protocol (or skip):`,
+						[
+							{ name: "TCP", value: "tcp" },
+							{ name: "UDP", value: "udp" },
+							{ name: "ICMP", value: "icmp" },
+							{ name: "Done — no more rules", value: "__done__" },
+						],
+						{
+							field: `firewall_rule_${i}_protocol`,
+							flag: "--rules",
+							context: { ruleIndex: i },
+						},
+					);
 					if (protocol === "__done__") break;
-					const portRange = await input("Port range (e.g. 80 or 8080-8090):");
-					const direction = await select("Direction:", [
-						{ name: "Ingress (inbound)", value: "ingress" },
-						{ name: "Egress (outbound)", value: "egress" },
-					]);
+					const portRange = await input(
+						"Port range (e.g. 80 or 8080-8090):",
+						undefined,
+						{
+							field: `firewall_rule_${i}_port_range`,
+							flag: "--rules",
+							context: { ruleIndex: i },
+						},
+					);
+					const direction = await select(
+						"Direction:",
+						[
+							{ name: "Ingress (inbound)", value: "ingress" },
+							{ name: "Egress (outbound)", value: "egress" },
+						],
+						{
+							field: `firewall_rule_${i}_direction`,
+							flag: "--rules",
+							context: { ruleIndex: i },
+						},
+					);
 					const sourceRanges =
-						(await input("Source CIDR (default 0.0.0.0/0):")) || "0.0.0.0/0";
+						(await input("Source CIDR (default 0.0.0.0/0):", undefined, {
+							field: `firewall_rule_${i}_source_ranges`,
+							flag: "--rules",
+							context: { ruleIndex: i },
+						})) || "0.0.0.0/0";
 					rules.push({ protocol, portRange, direction, sourceRanges });
 				}
 				const client = getApiClient();
@@ -153,7 +190,13 @@ export function registerFirewallCommands(program: Command) {
 		.action(async (id, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const name = options.name || (await input("New name:"));
+				const name =
+					options.name ||
+					(await input("New name:", undefined, {
+						field: "firewall_template_name",
+						flag: "--name",
+						context: { templateId: id },
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Updating firewall template...");
 				const result = await client.firewallTemplate.update.mutate({
@@ -178,6 +221,11 @@ export function registerFirewallCommands(program: Command) {
 					const confirmed = await confirm(
 						`Delete firewall template "${id}"?`,
 						false,
+						{
+							field: "confirm_delete_firewall_template",
+							flag: "--yes",
+							context: { templateId: id },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -236,6 +284,11 @@ export function registerFirewallCommands(program: Command) {
 					const confirmed = await confirm(
 						`Remove firewall template from server ${serverId}?`,
 						false,
+						{
+							field: "confirm_remove_firewall_template",
+							flag: "--yes",
+							context: { templateId, serverId },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");

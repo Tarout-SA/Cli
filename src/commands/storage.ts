@@ -96,16 +96,23 @@ export function registerStorageCommands(program: Command) {
 				let plan = (options.plan || "FREE").toUpperCase();
 
 				if (!bucketName) {
-					bucketName = await input("Bucket name:");
+					bucketName = await input("Bucket name:", undefined, {
+						field: "name",
+						flag: "--name",
+					});
 				}
 
 				if (!options.plan && !shouldSkipConfirmation()) {
-					plan = await select("Storage plan:", [
-						{ name: "FREE (1 GB)", value: "FREE" },
-						{ name: "STARTER (10 GB)", value: "STARTER" },
-						{ name: "STANDARD (100 GB)", value: "STANDARD" },
-						{ name: "PRO (1 TB)", value: "PRO" },
-					]);
+					plan = await select(
+						"Storage plan:",
+						[
+							{ name: "FREE (1 GB)", value: "FREE" },
+							{ name: "STARTER (10 GB)", value: "STARTER" },
+							{ name: "STANDARD (100 GB)", value: "STANDARD" },
+							{ name: "PRO (1 TB)", value: "PRO" },
+						],
+						{ field: "plan", flag: "--plan" },
+					);
 				}
 
 				const client = getApiClient();
@@ -194,6 +201,11 @@ export function registerStorageCommands(program: Command) {
 					const confirmed = await confirm(
 						`Are you sure you want to delete bucket "${bucket.name}"?`,
 						false,
+						{
+							field: "confirm_delete_bucket",
+							flag: "--yes",
+							context: { bucketName: bucket.name },
+						},
 					);
 
 					if (!confirmed) {
@@ -391,6 +403,11 @@ export function registerStorageCommands(program: Command) {
 					const confirmed = await confirm(
 						`Delete file "${fileName}" from bucket "${bucket.name}"?`,
 						false,
+						{
+							field: "confirm_delete_file",
+							flag: "--yes",
+							context: { fileName, bucketName: bucket.name },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -527,7 +544,11 @@ export function registerStorageCommands(program: Command) {
 				}
 				const bucketId = bucket.bucketId || bucket.id;
 				const targetPlan =
-					options.plan || (await input("Target plan (standard/pro):"));
+					options.plan ||
+					(await input("Target plan (standard/pro):", undefined, {
+						field: "plan",
+						flag: "--plan",
+					}));
 				const _upgradeSpinner = startSpinner(
 					`Upgrading bucket to ${targetPlan}...`,
 				);

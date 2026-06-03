@@ -172,7 +172,10 @@ export function registerAiCommands(program: Command) {
 				const modelProvider = options.provider || "global";
 
 				if (!keyName) {
-					keyName = await input("Key name:");
+					keyName = await input("Key name:", undefined, {
+						field: "name",
+						flag: "--name",
+					});
 				}
 
 				if (!modelId) {
@@ -189,13 +192,22 @@ export function registerAiCommands(program: Command) {
 									name: m.name || m.displayName || m.id || m.modelId,
 									value: m.id || m.modelId,
 								})),
+								{
+									field: "model_id",
+									flag: "--model",
+									context: { keyName },
+								},
 							);
 						}
 					} catch {
 						// ignore
 					}
 					if (!modelId) {
-						modelId = await input("Model ID (e.g., gpt-4o):");
+						modelId = await input("Model ID (e.g., gpt-4o):", undefined, {
+							field: "model_id",
+							flag: "--model",
+							context: { keyName },
+						});
 					}
 				}
 
@@ -419,6 +431,11 @@ export function registerAiCommands(program: Command) {
 					const confirmed = await confirm(
 						`Permanently delete key "${keyId}"?`,
 						false,
+						{
+							field: "confirm_delete_ai_key",
+							flag: "--yes",
+							context: { keyId },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -643,9 +660,25 @@ export function registerAiCommands(program: Command) {
 		.action(async (options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const name = options.name || (await input("Provider name:"));
-				const apiUrl = options.url || (await input("Provider API URL:"));
-				const apiKey = options.key || (await input("Provider API key:"));
+				const name =
+					options.name ||
+					(await input("Provider name:", undefined, {
+						field: "name",
+						flag: "--name",
+					}));
+				const apiUrl =
+					options.url ||
+					(await input("Provider API URL:", undefined, {
+						field: "api_url",
+						flag: "--url",
+					}));
+				const apiKey =
+					options.key ||
+					(await input("Provider API key:", undefined, {
+						field: "api_key",
+						flag: "--key",
+						sensitive: true,
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Creating AI provider...");
 				const result = await client.ai.create.mutate({
@@ -698,6 +731,11 @@ export function registerAiCommands(program: Command) {
 					const ok = await confirm(
 						`Delete AI provider configuration "${aiId}"?`,
 						false,
+						{
+							field: "confirm_delete_ai_provider",
+							flag: "--yes",
+							context: { aiId },
+						},
 					);
 					if (!ok) {
 						log("Cancelled.");

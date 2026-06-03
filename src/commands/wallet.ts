@@ -135,6 +135,8 @@ export function registerWalletCommands(program: Command) {
 				} else {
 					const amountStr = await input(
 						"Amount in SAR (e.g., 50 for 50 SAR, leave blank for default):",
+						undefined,
+						{ field: "wallet_topup_amount_sar", flag: "--amount" },
 					);
 					if (amountStr) {
 						amountHalalas = Math.round(Number.parseFloat(amountStr) * 100);

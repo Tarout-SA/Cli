@@ -181,6 +181,11 @@ export function registerQueuesCommands(program: Command) {
 					const ok = await confirm(
 						`Retry all failed jobs in queue "${queueName}"?`,
 						false,
+						{
+							field: "confirm_retry_all_failed_jobs",
+							flag: "--yes",
+							context: { queueName },
+						},
 					);
 					if (!ok) {
 						log("Cancelled.");
@@ -213,7 +218,11 @@ export function registerQueuesCommands(program: Command) {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 				if (!shouldSkipConfirmation()) {
-					const ok = await confirm(`Pause queue "${queueName}"?`, false);
+					const ok = await confirm(`Pause queue "${queueName}"?`, false, {
+						field: "confirm_pause_queue",
+						flag: "--yes",
+						context: { queueName },
+					});
 					if (!ok) {
 						log("Cancelled.");
 						return;
@@ -263,14 +272,23 @@ export function registerQueuesCommands(program: Command) {
 				if (!isLoggedIn()) throw new AuthError();
 				const status =
 					options.status ||
-					(await select("Clean which jobs?", [
-						{ name: "Completed", value: "completed" },
-						{ name: "Failed", value: "failed" },
-					]));
+					(await select(
+						"Clean which jobs?",
+						[
+							{ name: "Completed", value: "completed" },
+							{ name: "Failed", value: "failed" },
+						],
+						{ field: "clean_job_status", flag: "--status" },
+					));
 				if (!shouldSkipConfirmation()) {
 					const ok = await confirm(
 						`Clean ${status} jobs from "${queueName}"?`,
 						false,
+						{
+							field: "confirm_clean_queue",
+							flag: "--yes",
+							context: { queueName, status },
+						},
 					);
 					if (!ok) {
 						log("Cancelled.");
@@ -309,6 +327,11 @@ export function registerQueuesCommands(program: Command) {
 					const ok = await confirm(
 						`Remove job "${jobId}" from queue "${queueName}"?`,
 						false,
+						{
+							field: "confirm_remove_job",
+							flag: "--yes",
+							context: { queueName, jobId },
+						},
 					);
 					if (!ok) {
 						log("Cancelled.");

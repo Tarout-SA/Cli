@@ -111,14 +111,21 @@ export function registerServersCommands(program: Command) {
 				let osType = options.os;
 
 				if (!serverName) {
-					serverName = await input("Server name:");
+					serverName = await input("Server name:", undefined, {
+						field: "server_name",
+						flag: "<name>",
+					});
 				}
 
 				if (!serverType) {
-					serverType = await select("Server type:", [
-						{ name: "CPU (general purpose)", value: "cpu" },
-						{ name: "GPU (for AI/ML workloads)", value: "gpu" },
-					]);
+					serverType = await select(
+						"Server type:",
+						[
+							{ name: "CPU (general purpose)", value: "cpu" },
+							{ name: "GPU (for AI/ML workloads)", value: "gpu" },
+						],
+						{ field: "server_type", flag: "--type" },
+					);
 				}
 
 				// Fetch available sizes
@@ -136,20 +143,29 @@ export function registerServersCommands(program: Command) {
 						name: `${s.name || s.id} - ${s.description || ""} ${s.priceHalalas ? `(${(s.priceHalalas / 100).toFixed(2)} SAR/hr)` : ""}`,
 						value: s.name || s.id || s.size,
 					}));
-					serverSize = await select("Server size:", sizeChoices);
+					serverSize = await select("Server size:", sizeChoices, {
+						field: "server_size",
+						flag: "--size",
+					});
 				} else if (!serverSize) {
 					serverSize = await input(
 						"Server size (e.g., n2-standard-2 for GCP, GPU-small for RunPod):",
+						undefined,
+						{ field: "server_size", flag: "--size" },
 					);
 				}
 
 				if (!osType) {
-					osType = await select("Operating system:", [
-						{ name: "Ubuntu 22.04 LTS", value: "ubuntu-22" },
-						{ name: "Ubuntu 24.04 LTS", value: "ubuntu-24" },
-						{ name: "Debian 12", value: "debian-12" },
-						{ name: "Rocky Linux 9", value: "rocky-linux-9" },
-					]);
+					osType = await select(
+						"Operating system:",
+						[
+							{ name: "Ubuntu 22.04 LTS", value: "ubuntu-22" },
+							{ name: "Ubuntu 24.04 LTS", value: "ubuntu-24" },
+							{ name: "Debian 12", value: "debian-12" },
+							{ name: "Rocky Linux 9", value: "rocky-linux-9" },
+						],
+						{ field: "os_type", flag: "--os" },
+					);
 				}
 
 				if (!shouldSkipConfirmation()) {
@@ -160,7 +176,11 @@ export function registerServersCommands(program: Command) {
 					log(`OS: ${osType}`);
 					log("");
 
-					const confirmed = await confirm("Create this server?", false);
+					const confirmed = await confirm("Create this server?", false, {
+						field: "confirm_create_server",
+						flag: "--yes",
+						context: { name: serverName, type: serverType, size: serverSize },
+					});
 
 					if (!confirmed) {
 						log("Cancelled.");
@@ -333,6 +353,11 @@ export function registerServersCommands(program: Command) {
 					const confirmed = await confirm(
 						`Stop server "${server.name || serverIdentifier}"?`,
 						false,
+						{
+							field: "confirm_stop_server",
+							flag: "--yes",
+							context: { server: server.name || serverIdentifier },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -436,6 +461,11 @@ export function registerServersCommands(program: Command) {
 					const confirmed = await confirm(
 						`Are you sure you want to delete server "${server.name || serverIdentifier}"?`,
 						false,
+						{
+							field: "confirm_delete_server",
+							flag: "--yes",
+							context: { server: server.name || serverIdentifier },
+						},
 					);
 
 					if (!confirmed) {
@@ -664,6 +694,8 @@ export function registerServersCommands(program: Command) {
 				if (!name) {
 					name = await input(
 						`Snapshot name (default: ${server.name}-snapshot-${Date.now()}):`,
+						undefined,
+						{ field: "snapshot_name", flag: "<snapshot-name>" },
 					);
 					if (!name) {
 						name = `${server.name || serverIdentifier}-snapshot-${Date.now()}`;
@@ -705,6 +737,11 @@ export function registerServersCommands(program: Command) {
 					const confirmed = await confirm(
 						`Delete snapshot "${snapshotId}"?`,
 						false,
+						{
+							field: "confirm_delete_snapshot",
+							flag: "--yes",
+							context: { snapshotId },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -816,7 +853,11 @@ export function registerServersCommands(program: Command) {
 
 				let portRange = options.port;
 				if (!portRange) {
-					portRange = await input("Port or range (e.g., 80, 443, 8000-9000):");
+					portRange = await input(
+						"Port or range (e.g., 80, 443, 8000-9000):",
+						undefined,
+						{ field: "port_range", flag: "--port" },
+					);
 				}
 
 				const _addSpinner = startSpinner("Adding firewall rule...");
@@ -858,6 +899,11 @@ export function registerServersCommands(program: Command) {
 					const confirmed = await confirm(
 						`Delete firewall rule "${ruleId}"?`,
 						false,
+						{
+							field: "confirm_delete_firewall_rule",
+							flag: "--yes",
+							context: { ruleId },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -1174,7 +1220,10 @@ export function registerServersCommands(program: Command) {
 
 				let name = options.name;
 				if (!name) {
-					name = await input("Volume name:");
+					name = await input("Volume name:", undefined, {
+						field: "volume_name",
+						flag: "--name",
+					});
 				}
 
 				const _createSpinner = startSpinner("Creating volume...");
@@ -1211,6 +1260,11 @@ export function registerServersCommands(program: Command) {
 					const confirmed = await confirm(
 						`Delete volume "${volumeId}"? This is irreversible.`,
 						false,
+						{
+							field: "confirm_delete_volume",
+							flag: "--yes",
+							context: { volumeId },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -1406,7 +1460,11 @@ export function registerServersCommands(program: Command) {
 				if (!isLoggedIn()) throw new AuthError();
 
 				if (!shouldSkipConfirmation()) {
-					const confirmed = await confirm(`Release IP "${ipId}"?`, false);
+					const confirmed = await confirm(`Release IP "${ipId}"?`, false, {
+						field: "confirm_release_ip",
+						flag: "--yes",
+						context: { ipId },
+					});
 					if (!confirmed) {
 						log("Cancelled.");
 						return;
@@ -1590,11 +1648,15 @@ export function registerServersCommands(program: Command) {
 
 				let metric = options.metric;
 				if (!metric) {
-					metric = await select("Alert metric:", [
-						{ name: "CPU Usage", value: "cpu" },
-						{ name: "Memory Usage", value: "memory" },
-						{ name: "Disk Usage", value: "disk" },
-					]);
+					metric = await select(
+						"Alert metric:",
+						[
+							{ name: "CPU Usage", value: "cpu" },
+							{ name: "Memory Usage", value: "memory" },
+							{ name: "Disk Usage", value: "disk" },
+						],
+						{ field: "alert_metric", flag: "--metric" },
+					);
 				}
 
 				const _setSpinner = startSpinner("Saving alert...");
@@ -1693,6 +1755,11 @@ export function registerServersCommands(program: Command) {
 					const confirmed = await confirm(
 						`Terminate server "${server.name || identifier}"?`,
 						false,
+						{
+							field: "confirm_terminate_server",
+							flag: "--yes",
+							context: { server: server.name || identifier },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -1804,6 +1871,11 @@ export function registerServersCommands(program: Command) {
 					const confirmed = await confirm(
 						`Cancel subscription for server "${server.name || identifier}"?`,
 						false,
+						{
+							field: "confirm_cancel_vm_subscription",
+							flag: "--yes",
+							context: { server: server.name || identifier },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -2089,12 +2161,27 @@ export function registerServersCommands(program: Command) {
 		.action(async (options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const sizeKey = options.size || (await input("Server size key:"));
-				const region = options.region || (await input("Region:"));
+				const sizeKey =
+					options.size ||
+					(await input("Server size key:", undefined, {
+						field: "server_size",
+						flag: "--size",
+					}));
+				const region =
+					options.region ||
+					(await input("Region:", undefined, {
+						field: "region",
+						flag: "--region",
+					}));
 				if (!shouldSkipConfirmation()) {
 					const confirmed = await confirm(
 						`Provision a dedicated server (${sizeKey} in ${region})?`,
 						false,
+						{
+							field: "confirm_provision_dedicated",
+							flag: "--yes",
+							context: { sizeKey, region },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -2132,6 +2219,11 @@ export function registerServersCommands(program: Command) {
 					const confirmed = await confirm(
 						`Decommission server "${id}"? Apps will be migrated first.`,
 						false,
+						{
+							field: "confirm_decommission_server",
+							flag: "--yes",
+							context: { id },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -2156,7 +2248,12 @@ export function registerServersCommands(program: Command) {
 		.action(async (id, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const sizeKey = options.size || (await input("New size key:"));
+				const sizeKey =
+					options.size ||
+					(await input("New size key:", undefined, {
+						field: "new_size",
+						flag: "--size",
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Starting upgrade...");
 				const result = await client.server.upgradeServer.mutate({
@@ -2178,7 +2275,12 @@ export function registerServersCommands(program: Command) {
 		.action(async (id, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const sizeKey = options.size || (await input("Target size:"));
+				const sizeKey =
+					options.size ||
+					(await input("Target size:", undefined, {
+						field: "target_size",
+						flag: "--size",
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Starting blue/green upgrade...");
 				const result = await client.server.upgradeBlueGreen.mutate({
@@ -2234,6 +2336,11 @@ export function registerServersCommands(program: Command) {
 					const confirmed = await confirm(
 						`Complete cutover for server "${id}"?`,
 						false,
+						{
+							field: "confirm_complete_cutover",
+							flag: "--yes",
+							context: { id },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -2294,6 +2401,10 @@ export function registerServersCommands(program: Command) {
 					const confirmed = await confirm(
 						"Migrate all shared apps to your dedicated server?",
 						false,
+						{
+							field: "confirm_migrate_to_dedicated",
+							flag: "--yes",
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -2352,7 +2463,10 @@ export function registerServersCommands(program: Command) {
 				if (!isLoggedIn()) throw new AuthError();
 				const message =
 					options.message ||
-					(await input("Requirements / message (optional):"));
+					(await input("Requirements / message (optional):", undefined, {
+						field: "enterprise_message",
+						flag: "--message",
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Submitting enterprise request...");
 				await client.server.requestEnterprise.mutate({ message } as any);

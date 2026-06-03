@@ -123,6 +123,7 @@ export function registerDbCommands(program: Command) {
 		.description("Create a new database")
 		.option("-t, --type <type>", "Database type (postgres, mysql)", "postgres")
 		.option("-d, --description <description>", "Database description")
+		.option("--name <name>", "Database name (alternative to positional argument)")
 		.action(async (name, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
@@ -131,18 +132,29 @@ export function registerDbCommands(program: Command) {
 				if (!profile) throw new AuthError();
 
 				// Interactive mode if no name provided
-				let dbName = name;
+				let dbName = name || options.name;
 				let dbType = options.type as DatabaseType;
 
 				if (!dbName) {
-					dbName = await input("Database name:");
+					dbName = await input("Database name:", undefined, {
+						field: "db_name",
+						flag: "--name",
+					});
 				}
 
 				if (!options.type && !shouldSkipConfirmation()) {
-					dbType = await select("Database type:", [
-						{ name: "PostgreSQL", value: "postgres" },
-						{ name: "MySQL", value: "mysql" },
-					]);
+					dbType = await select(
+						"Database type:",
+						[
+							{ name: "PostgreSQL", value: "postgres" },
+							{ name: "MySQL", value: "mysql" },
+						],
+						{
+							field: "db_type",
+							flag: "--type",
+							context: { name: dbName },
+						},
+					);
 				}
 
 				// Generate appName (URL-safe slug)
@@ -244,6 +256,11 @@ export function registerDbCommands(program: Command) {
 					const confirmed = await confirm(
 						`Are you sure you want to delete "${dbInfo.name}"? This cannot be undone.`,
 						false,
+						{
+							field: "confirm_delete_db",
+							flag: "--yes",
+							context: { id: dbInfo.id, name: dbInfo.name, type: dbInfo.type },
+						},
 					);
 
 					if (!confirmed) {
@@ -451,6 +468,11 @@ export function registerDbCommands(program: Command) {
 					const confirmed = await confirm(
 						`Stop database "${dbInfo.name}"?`,
 						false,
+						{
+							field: "confirm_stop_db",
+							flag: "--yes",
+							context: { id: dbInfo.id, name: dbInfo.name, type: dbInfo.type },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -719,7 +741,17 @@ export function registerDbCommands(program: Command) {
 					failSpinner();
 					throw new NotFoundError("Database", dbIdentifier);
 				}
-				const targetPlan = options.plan || (await input("Target plan:"));
+				const targetPlan =
+					options.plan ||
+					(await input("Target plan:", undefined, {
+						field: "target_plan",
+						flag: "--plan",
+						context: {
+							id: dbSummary.id,
+							name: dbSummary.name,
+							type: dbSummary.type,
+						},
+					}));
 				const _upgradeSpinner = startSpinner(`Upgrading to ${targetPlan}...`);
 				if (dbSummary.type === "postgres") {
 					await client.postgres.upgrade.mutate({

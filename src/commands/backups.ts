@@ -46,22 +46,42 @@ export function registerBackupsCommands(program: Command) {
 					dbType = "mysql";
 					dbId = options.mysqlId;
 				} else {
-					dbType = await select("Database type:", [
-						{ name: "PostgreSQL", value: "postgres" },
-						{ name: "MySQL", value: "mysql" },
-					]);
+					dbType = await select(
+						"Database type:",
+						[
+							{ name: "PostgreSQL", value: "postgres" },
+							{ name: "MySQL", value: "mysql" },
+						],
+						{
+							field: "database_type",
+							flag: "--postgres-id|--mysql-id",
+						},
+					);
 					dbId = await input(
 						`${dbType === "postgres" ? "PostgreSQL" : "MySQL"} database ID:`,
+						undefined,
+						{
+							field: "database_id",
+							flag: dbType === "postgres" ? "--postgres-id" : "--mysql-id",
+							context: { dbType },
+						},
 					);
 				}
 
 				let destinationId = options.destinationId;
 				if (!destinationId) {
-					destinationId = await input("Backup destination ID:");
+					destinationId = await input("Backup destination ID:", undefined, {
+						field: "destination_id",
+						flag: "--destination-id",
+					});
 				}
 
 				const database =
-					options.database || (await input("Database name to back up:"));
+					options.database ||
+					(await input("Database name to back up:", undefined, {
+						field: "database",
+						flag: "--database",
+					}));
 
 				const _spinner = startSpinner("Creating backup schedule...");
 
@@ -201,6 +221,11 @@ export function registerBackupsCommands(program: Command) {
 					const confirmed = await confirm(
 						`Delete backup schedule "${backupId}"?`,
 						false,
+						{
+							field: "confirm_delete_backup",
+							flag: "--yes",
+							context: { backupId },
+						},
 					);
 					if (!confirmed) {
 						log("Cancelled.");

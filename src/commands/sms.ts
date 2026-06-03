@@ -26,7 +26,10 @@ export function registerSmsCommands(program: Command) {
 		.action(async (options: { env?: string }) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const environmentId = options.env || (await input("Environment ID:"));
+				const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching SMS config...");
 				const data = await client.sms.getConfig.query({ environmentId });
@@ -72,21 +75,42 @@ export function registerSmsCommands(program: Command) {
 			}) => {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
-					const environmentId = options.env || (await input("Environment ID:"));
+					const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
 					const provider =
 						options.provider ||
-						(await select("SMS provider:", [
-							{ name: "Twilio", value: "twilio" },
-							{ name: "Vonage", value: "vonage" },
-							{ name: "Sinch", value: "sinch" },
-						]));
+						(await select(
+							"SMS provider:",
+							[
+								{ name: "Twilio", value: "twilio" },
+								{ name: "Vonage", value: "vonage" },
+								{ name: "Sinch", value: "sinch" },
+							],
+							{ field: "sms_provider", flag: "--provider" },
+						));
 					const apiKey =
-						options.apiKey || (await input("API Key / Account SID:"));
+						options.apiKey ||
+						(await input("API Key / Account SID:", undefined, {
+							field: "api_key",
+							flag: "--api-key",
+							sensitive: true,
+						}));
 					const apiSecret =
-						options.apiSecret || (await input("API Secret / Auth Token:"));
+						options.apiSecret ||
+						(await input("API Secret / Auth Token:", undefined, {
+							field: "api_secret",
+							flag: "--api-secret",
+							sensitive: true,
+						}));
 					const fromNumber =
 						options.from ||
-						(await input("From phone number (e.g. +1234567890):"));
+						(await input(
+							"From phone number (e.g. +1234567890):",
+							undefined,
+							{ field: "from_number", flag: "--from" },
+						));
 					const client = getApiClient();
 					const _spinner = startSpinner("Creating SMS config...");
 					const result = await client.sms.createConfig.mutate({
@@ -130,7 +154,10 @@ export function registerSmsCommands(program: Command) {
 			}) => {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
-					const environmentId = options.env || (await input("Environment ID:"));
+					const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
 					const isEnabled = options.enable
 						? true
 						: options.disable
@@ -166,9 +193,22 @@ export function registerSmsCommands(program: Command) {
 			async (options: { env?: string; to?: string; message?: string }) => {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
-					const environmentId = options.env || (await input("Environment ID:"));
-					const to = options.to || (await input("Recipient phone number:"));
-					const body = options.message || (await input("Message:"));
+					const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
+					const to =
+						options.to ||
+						(await input("Recipient phone number:", undefined, {
+							field: "recipient_phone",
+							flag: "--to",
+						}));
+					const body =
+						options.message ||
+						(await input("Message:", undefined, {
+							field: "message_body",
+							flag: "--message",
+						}));
 					const client = getApiClient();
 					const _spinner = startSpinner("Sending SMS...");
 					const result = await client.sms.send.mutate({
@@ -196,7 +236,10 @@ export function registerSmsCommands(program: Command) {
 			async (options: { env?: string; limit?: string; status?: string }) => {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
-					const environmentId = options.env || (await input("Environment ID:"));
+					const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
 					const client = getApiClient();
 					const _spinner = startSpinner("Fetching logs...");
 					const logs = await client.sms.getLogs.query({
@@ -246,7 +289,10 @@ export function registerSmsCommands(program: Command) {
 		.action(async (options: { env?: string; start?: string; end?: string }) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const environmentId = options.env || (await input("Environment ID:"));
+				const environmentId = options.env || (await input("Environment ID:", undefined, {
+						field: "environment_id",
+						flag: "--env",
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching stats...");
 				const stats = await client.sms.getStats.query({

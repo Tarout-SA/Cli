@@ -15,6 +15,7 @@ let globalOptions = {
 	verbose: false,
 	noColor: false,
 	yes: false,
+	nonInteractive: false,
 };
 
 export function setGlobalOptions(options: Partial<typeof globalOptions>): void {
@@ -39,6 +40,18 @@ export function isVerboseMode(): boolean {
 
 export function shouldSkipConfirmation(): boolean {
 	return globalOptions.yes;
+}
+
+/**
+ * `--non-interactive` strict mode: forces the agent-handoff path even when
+ * `--json` isn't set. Annotated prompts (`confirm/select/input/password`
+ * called with a descriptor) emit `needs_input` and exit `NEEDS_INPUT` (6)
+ * instead of falling back to the inquirer TTY prompt. Useful for shell
+ * scripts that want hard failure on missing input without committing to
+ * JSON output.
+ */
+export function isNonInteractiveMode(): boolean {
+	return globalOptions.nonInteractive;
 }
 
 // Color helpers that respect --no-color

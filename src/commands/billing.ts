@@ -1,4 +1,4 @@
-import type { Command } from "commander";
+import { type Command, InvalidArgumentError } from "commander";
 import open from "open";
 import { getApiClient } from "../lib/api.js";
 import { isLoggedIn } from "../lib/config.js";
@@ -135,12 +135,27 @@ export function registerBillingCommands(program: Command) {
 	// Upgrade / change plan
 	billing
 		.command("upgrade")
-		.argument("[plan]", "Plan key to switch to")
+		.argument("[plan]", "Plan key to switch to (alias: --plan)")
 		.description("Upgrade or change subscription plan")
+		.option(
+			"--plan <key>",
+			"Plan key (alias for the positional argument; useful for agent invocations)",
+		)
 		.option(
 			"-q, --quantity <n>",
 			"Plan quantity (for multi-slot plans)",
 			Number.parseInt,
+		)
+		.option(
+			"--billing-period <period>",
+			"Billing period: monthly or yearly (yearly = 10× monthly, 2 months free)",
+			parseBillingPeriod,
+		)
+		.option(
+			"--addon <key[:qty]>",
+			"Bundled addon to purchase with the plan change (repeatable, e.g. --addon db.standard:2)",
+			collectAddon,
+			[] as Array<{ addonKey: string; quantity: number }>,
 		)
 		.option(
 			"-w, --wait",
@@ -163,7 +178,17 @@ export function registerBillingCommands(program: Command) {
 				const client = getApiClient();
 
 				// Fetch catalog if no plan specified
-				let targetPlan = planKey;
+				let targetPlan: string | undefined = planKey || options.plan;
+				const billingPeriod = options.billingPeriod as
+					| "monthly"
+					| "yearly"
+					| undefined;
+				const addons:
+					| Array<{ addonKey: string; quantity: number }>
+					| undefined =
+					Array.isArray(options.addon) && options.addon.length > 0
+						? options.addon
+						: undefined;
 
 				if (!targetPlan) {
 					const _spinner = startSpinner("Fetching plans...");
@@ -176,13 +201,29 @@ export function registerBillingCommands(program: Command) {
 						return;
 					}
 
-					targetPlan = await select(
+					targetPlan = await select<string>(
 						"Select a plan:",
 						plans.map((p: any) => ({
 							name: `${p.planKey || p.key || p.name} ${p.priceHalalas ? `(${(p.priceHalalas / 100).toFixed(2)} SAR/mo)` : "(Free)"}`,
 							value: p.planKey || p.key || p.name,
 						})),
+						{
+							field: "plan",
+							flag: "--plan",
+							context: {
+								available: plans.map((p: any) => ({
+									key: p.planKey || p.key || p.name,
+									priceHalalas: p.priceHalalas ?? 0,
+								})),
+							},
+						},
 					);
+				}
+
+				if (!targetPlan) {
+					// Defensive — select() either returns a value or exits the
+					// process (NEEDS_INPUT path). This branch is unreachable.
+					throw new Error("No plan selected");
 				}
 
 				// Preview the change
@@ -192,6 +233,8 @@ export function registerBillingCommands(program: Command) {
 					preview = await client.subscription.previewPlanChange.query({
 						planKey: targetPlan,
 						planQuantity: options.quantity,
+						billingPeriod,
+						addons,
 					});
 					succeedSpinner();
 				} catch {
@@ -203,6 +246,14 @@ export function registerBillingCommands(program: Command) {
 					log("");
 					log(`Plan: ${colors.cyan(targetPlan)}`);
 					if (options.quantity) log(`Quantity: ${options.quantity}`);
+					if (billingPeriod) log(`Billing period: ${billingPeriod}`);
+					if (addons && addons.length > 0) {
+						log(
+							`Addons: ${addons
+								.map((a) => `${a.addonKey}×${a.quantity}`)
+								.join(", ")}`,
+						);
+					}
 					if (preview?.amountDue !== undefined) {
 						log(
 							`Amount due now: ${colors.bold(`${(preview.amountDue / 100).toFixed(2)} SAR`)}`,
@@ -213,6 +264,17 @@ export function registerBillingCommands(program: Command) {
 					const confirmed = await confirm(
 						`Switch to plan "${targetPlan}"?`,
 						false,
+						{
+							field: "confirm_upgrade",
+							flag: "--yes",
+							context: {
+								plan: targetPlan,
+								quantity: options.quantity,
+								billingPeriod,
+								addons,
+								amountDueHalalas: preview?.amountDue,
+							},
+						},
 					);
 
 					if (!confirmed) {
@@ -226,6 +288,8 @@ export function registerBillingCommands(program: Command) {
 				const result = await client.subscription.changePlan.mutate({
 					planKey: targetPlan,
 					planQuantity: options.quantity,
+					billingPeriod,
+					addons,
 				});
 
 				succeedSpinner("Plan changed!");
@@ -414,6 +478,14 @@ export function registerBillingCommands(program: Command) {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
+				if (isJsonMode()) {
+					outputJsonLine({
+						type: "event",
+						event: "checkout_polling_started",
+						orderId,
+						timeoutSeconds: options.timeout,
+					});
+				}
 				const final = await pollCheckoutUntilTerminal(client, orderId, {
 					timeoutMs: options.timeout * 1000,
 					intervalMs: 4000,
@@ -469,6 +541,7 @@ export function registerBillingCommands(program: Command) {
 					const confirmed = await confirm(
 						"Are you sure you want to cancel your subscription?",
 						false,
+						{ field: "confirm_cancel", flag: "--yes" },
 					);
 
 					if (!confirmed) {
@@ -551,6 +624,11 @@ export function registerBillingCommands(program: Command) {
 					const confirmed = await confirm(
 						`Add addon "${addonKey}" × ${quantity}?`,
 						false,
+						{
+							field: "confirm_addon_add",
+							flag: "--yes",
+							context: { addonKey, quantity },
+						},
 					);
 
 					if (!confirmed) {
@@ -595,7 +673,15 @@ export function registerBillingCommands(program: Command) {
 				if (!isLoggedIn()) throw new AuthError();
 
 				if (!shouldSkipConfirmation()) {
-					const confirmed = await confirm(`Remove addon "${addonKey}"?`, false);
+					const confirmed = await confirm(
+						`Remove addon "${addonKey}"?`,
+						false,
+						{
+							field: "confirm_addon_remove",
+							flag: "--yes",
+							context: { addonKey },
+						},
+					);
 					if (!confirmed) {
 						log("Cancelled.");
 						return;
@@ -706,7 +792,11 @@ export function registerBillingCommands(program: Command) {
 				const quantity = options.quantity || 1;
 				if (!shouldSkipConfirmation()) {
 					log(`\nPurchase ${quantity}× ${colors.cyan(addonKey)}?`);
-					const confirmed = await confirm("Proceed?", false);
+					const confirmed = await confirm("Proceed?", false, {
+						field: "confirm_addon_buy",
+						flag: "--yes",
+						context: { addonKey, quantity },
+					});
 					if (!confirmed) {
 						log("Cancelled.");
 						return;
@@ -740,6 +830,7 @@ export function registerBillingCommands(program: Command) {
 					const confirmed = await confirm(
 						"Cancel the pending plan change?",
 						false,
+						{ field: "confirm_pending_cancel", flag: "--yes" },
 					);
 					if (!confirmed) {
 						log("Cancelled.");
@@ -1063,6 +1154,49 @@ export async function pollCheckoutUntilTerminal(
 		failedAt: r.failedAt,
 		failureReason: r.failureReason,
 	};
+}
+
+/**
+ * Commander `--addon <key[:qty]>` accumulator. Repeated flags push onto the
+ * array; the optional `:qty` suffix is parsed as a positive integer
+ * (defaults to 1). Used by `tarout billing upgrade` to forward bundled
+ * addons into the same StreamPay checkout as the plan change.
+ *
+ * Throws `InvalidArgumentError` so Commander surfaces a clean
+ * `INVALID_ARGUMENTS` failure (exit 2) instead of leaking a Node stack
+ * trace — required for the agent JSON contract.
+ */
+function collectAddon(
+	value: string,
+	previous: Array<{ addonKey: string; quantity: number }>,
+): Array<{ addonKey: string; quantity: number }> {
+	const [rawKey, rawQty] = value.split(":");
+	const addonKey = (rawKey || "").trim();
+	if (!addonKey) {
+		throw new InvalidArgumentError(
+			`Invalid --addon value "${value}". Expected key[:qty] (e.g. db.standard:2).`,
+		);
+	}
+	const quantity = rawQty === undefined ? 1 : Number.parseInt(rawQty, 10);
+	if (!Number.isFinite(quantity) || quantity <= 0) {
+		throw new InvalidArgumentError(
+			`Invalid --addon quantity in "${value}". Expected a positive integer.`,
+		);
+	}
+	return [...previous, { addonKey, quantity }];
+}
+
+/**
+ * Commander argParser for `--billing-period`. Fails fast on unknown values
+ * via `InvalidArgumentError` so the CLI exits before the auth check —
+ * an agent doesn't have to be authenticated to discover a malformed flag.
+ */
+function parseBillingPeriod(raw: string): "monthly" | "yearly" {
+	const v = raw.toLowerCase();
+	if (v === "monthly" || v === "yearly") return v;
+	throw new InvalidArgumentError(
+		`Invalid --billing-period "${raw}". Expected "monthly" or "yearly".`,
+	);
 }
 
 function formatSubStatus(status: string): string {
