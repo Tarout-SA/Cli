@@ -9,6 +9,7 @@ import { registerAuthCommands } from "./commands/auth.js";
 import { registerBackupsCommands } from "./commands/backups.js";
 import { registerBillingCommands } from "./commands/billing.js";
 import { registerBuildCommand } from "./commands/build.js";
+import { registerCallCommand } from "./commands/call.js";
 import { registerDashboardCommands } from "./commands/dashboard.js";
 import { registerDbCommands } from "./commands/db.js";
 import {
@@ -105,6 +106,7 @@ registerSmsCommands(program);
 registerWhatsappCommands(program);
 registerFirewallCommands(program);
 registerQueuesCommands(program);
+registerCallCommand(program);
 
 // Configure Commander's stderr writer so parse-time failures (unknown
 // flags, bad argParser values, missing required arguments) emit a JSON

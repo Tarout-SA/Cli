@@ -123,11 +123,13 @@ export function getToken(): string | null {
 
 /**
  * Gets the API URL for the current profile.
+ * Honors the TAROUT_API_URL env var (for CI / agents / local dev) when there is
+ * no active profile, mirroring how getToken() falls back to TAROUT_TOKEN.
  * @returns {string} The API URL, defaults to https://tarout.sa
  */
 export function getApiUrl(): string {
 	const profile = getCurrentProfile();
-	return profile?.apiUrl || "https://tarout.sa";
+	return profile?.apiUrl || process.env.TAROUT_API_URL || "https://tarout.sa";
 }
 
 /**

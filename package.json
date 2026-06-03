@@ -4,7 +4,8 @@
 	"description": "Tarout CLI — the Saudi cloud platform for coding agents",
 	"type": "module",
 	"bin": {
-		"tarout": "./bin/tarout"
+		"tarout": "./bin/tarout",
+		"tarout-mcp": "./bin/tarout-mcp"
 	},
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
@@ -13,14 +14,15 @@
 		"dist"
 	],
 	"scripts": {
-		"build": "tsup src/index.ts --format esm --dts --clean",
-		"dev": "tsup src/index.ts --format esm --watch",
+		"build": "tsup src/index.ts src/mcp/stdio.ts --format esm --dts --clean",
+		"dev": "tsup src/index.ts src/mcp/stdio.ts --format esm --watch",
 		"typecheck": "tsc --noEmit",
 		"lint": "biome check src/",
 		"start": "node dist/index.js",
 		"prepublishOnly": "bun run build"
 	},
 	"dependencies": {
+		"@modelcontextprotocol/sdk": "^1.29.0",
 		"@trpc/client": "^10.45.2",
 		"@trpc/server": "^10.45.2",
 		"chalk": "^5.3.0",

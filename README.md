@@ -39,6 +39,28 @@ tarout deploy --wait --source upload
 # The first deploy prompts to create or link an app, and to create detected resources.
 ```
 
+## Call any API (`tarout call`)
+
+Beyond the curated commands, `tarout call` reaches **every** platform procedure
+directly — the same control surface exposed via REST and MCP:
+
+```bash
+tarout call --list                 # discover all callable procedures + type
+tarout call application.create --input '{"name":"my-app"}' --json
+tarout call deployment.all --input '{"applicationId":"app_123"}'
+```
+
+## MCP (agent access)
+
+Connect Claude Desktop / Cursor to Tarout via the bundled `tarout-mcp` bridge:
+
+```json
+{ "mcpServers": { "tarout": { "command": "tarout-mcp" } } }
+```
+
+Hosted agents can hit the Streamable-HTTP endpoint `/api/mcp` directly with an
+`x-api-key` header. See [`docs/MCP.md`](../docs/MCP.md).
+
 ## Commands
 
 ### Authentication
