@@ -6,9 +6,8 @@ import {
 	type ResourcePlan,
 	emitNeedsUpgrade,
 	isEntitlementError,
-	loadResourceTiers,
-	pickDefaultResourceTier,
 	promptEntitlementRemedy,
+	resolveDatabasePlanOrExit,
 } from "./deploy.js";
 import {
 	AuthError,
@@ -52,16 +51,14 @@ function normalizeDbPlan(value: string | undefined): ResourcePlan | undefined {
 	);
 }
 
-// An explicit --plan wins; otherwise default to the tier the org is actually
-// entitled to (postgres entitlements cover both Postgres and MySQL).
+// An explicit --plan wins; otherwise default to the org's subscribed tier and
+// auto-buy the plan-matched managed db add-on when there's no open slot (the
+// shared resolver handles Free/Starter/Pro + the Dedicated bundled-slot case).
 async function resolveDbPlan(
 	client: any,
 	explicit: string | undefined,
 ): Promise<ResourcePlan> {
-	const normalized = normalizeDbPlan(explicit);
-	if (normalized) return normalized;
-	const tiers = await loadResourceTiers(client, "database");
-	return pickDefaultResourceTier(tiers);
+	return resolveDatabasePlanOrExit(client, normalizeDbPlan(explicit));
 }
 
 export function registerDbCommands(program: Command) {

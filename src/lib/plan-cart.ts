@@ -35,6 +35,29 @@ export function isPaidFamily(planKey?: string | null): boolean {
 	return family === "SHARED" || family === "DEDICATED";
 }
 
+/**
+ * The standalone *managed* database addon a plan family can purchase on top of
+ * its subscription — mirrors the server's `getResourceAddonPolicyForPlan`
+ * (`src/lib/subscription-resource-addons.ts`): SHARED buys `db.standard`,
+ * DEDICATED buys `db.pro`; FREE/unknown can't buy a managed db addon.
+ *
+ * Distinct from {@link resourceAddonKeysForPlan} (the `db.starter` ESTIMATOR key
+ * used to bundle databases into a plan-onboarding checkout) — this is the key
+ * that passes the server's `assertResourceAddonsMatchPlan` for a standalone buy.
+ */
+export function dbAddonKeyForPlanFamily(
+	planKey?: string | null,
+): string | null {
+	switch (planFamily(planKey)) {
+		case "SHARED":
+			return "db.standard";
+		case "DEDICATED":
+			return "db.pro";
+		default:
+			return null;
+	}
+}
+
 export interface PlanResourceAddonKeys {
 	dbAddonKey: string | null;
 	storageAddonKey: string | null;

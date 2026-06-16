@@ -376,7 +376,7 @@ export function emitBillingResult(
 		case "payment_required":
 			outputData({
 				...envelope,
-				hint: `Open paymentUrl to complete checkout, then run \`${nextCommand}\` — or re-run with --wait.`,
+				hint: `Open paymentUrl to complete checkout, then run \`${nextCommand}\` — or re-run without --no-wait (waiting is the default).`,
 			});
 			box("Payment required", [
 				`${label}`,

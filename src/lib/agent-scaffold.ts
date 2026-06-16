@@ -45,8 +45,12 @@ don't hand-edit infrastructure.
 - **Run locally** with cloud env vars: \`tarout dev\`.
 - **Full agent guide:** https://tarout.sa/docs/for-ai/onboarding
 
-Run Tarout commands with \`--json\` for machine-readable output. On a \`NEEDS_UPGRADE\`
-error, surface it to the user and follow the upgrade flow instead of auto-retrying.
+Run Tarout commands with \`--json\` for machine-readable output. New apps and
+databases automatically use your org's **subscribed tier** — don't pass
+\`--plan free\` / \`--database-plan free\`. \`tarout login\` opens the browser for you;
+the user just signs in. A \`NEEDS_UPGRADE\` error means the org is out of slots for
+its tier: surface the two options (buy the add-on vs upgrade the plan) and let the
+user pick — the chosen command opens the payment page and waits until it's confirmed.
 Ask before destructive actions (delete, rollback, revealing secrets).
 ${BLOCK_END}`;
 

@@ -18,34 +18,42 @@ import {
 	isJsonMode,
 	log,
 	outputData,
-	outputError,
+	outputJsonLine,
 	success,
 } from "../lib/output.js";
-import { ExitCode, exit } from "../utils/exit-codes.js";
 import { input, promptOrEmit } from "../utils/prompts.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
 
 /**
- * Browser auth (`tarout login`, `tarout register`) needs a reachable GUI, and
- * a programmatic `--json` caller can't watch a browser at all. When neither
- * holds, emit a structured AUTH_BOOTSTRAP_REQUIRED error so the calling agent
- * surfaces the API-token path to its user instead of waiting on a
- * never-arriving browser callback.
+ * Browser auth (`tarout login`, `tarout register`) runs on the user's machine,
+ * so we always open the browser and wait on the local callback — even under
+ * `--json`/agent mode (the CLI is driven locally, so a browser is reachable).
+ * This just adds visibility: in `--json` it emits the auth URL as a structured
+ * event so the agent can show it to the user; on a genuinely headless host it
+ * points at the API-token fallback. It never refuses.
  */
-function refuseBrowserAuthForAgent(action: "login" | "register"): never {
-	const message = `tarout ${action} requires a browser. Agents should ask the user to run \`tarout token <api-token>\` or set TAROUT_TOKEN — generate one at https://tarout.sa/dashboard/settings/profile.`;
+export function announceAuthUrl(
+	authUrl: string,
+	callbackPort: number,
+	launched: boolean,
+): void {
 	if (isJsonMode()) {
-		outputError("AUTH_BOOTSTRAP_REQUIRED", message, {
-			action,
-			recommendedFlags: [
-				"export TAROUT_TOKEN=<token>",
-				"tarout token <api-token>",
-			],
+		outputJsonLine({
+			type: "event",
+			event: "auth_url",
+			authUrl,
+			browserLaunched: launched,
+			callbackPort,
 		});
-	} else {
-		process.stderr.write(`error: ${message}\n`);
+		return;
 	}
-	exit(ExitCode.AUTH_ERROR);
+	if (!canLaunchBrowser()) {
+		log(
+			colors.dim(
+				"On a remote/headless host? Run `tarout token <api-token>` instead — generate one at https://tarout.sa/dashboard/settings/profile.",
+			),
+		);
+	}
 }
 
 export function registerAuthCommands(program: Command) {
@@ -75,10 +83,6 @@ export function registerAuthCommands(program: Command) {
 					}
 				}
 
-				if (isJsonMode() || !canLaunchBrowser()) {
-					refuseBrowserAuthForAgent("login");
-				}
-
 				const apiUrl = options.apiUrl;
 				log("");
 				log("Opening browser to authenticate...");
@@ -92,9 +96,10 @@ export function registerAuthCommands(program: Command) {
 				// can complete auth by pasting it, while the callback server keeps
 				// waiting below.
 				const authUrl = `${apiUrl}/cli-authorize?callback=${encodeURIComponent(callbackUrl)}`;
-				await openInBrowser(authUrl, {
+				const launched = await openInBrowser(authUrl, {
 					hint: "If the browser didn't open, visit this URL to authenticate:",
 				});
+				announceAuthUrl(authUrl, authServer.port, launched);
 
 				const _spinner = startSpinner("Waiting for authentication...");
 
@@ -214,10 +219,6 @@ export function registerAuthCommands(program: Command) {
 					}
 				}
 
-				if (isJsonMode() || !canLaunchBrowser()) {
-					refuseBrowserAuthForAgent("register");
-				}
-
 				const apiUrl = options.apiUrl;
 				log("");
 				log("Opening browser to create your account...");
@@ -225,9 +226,10 @@ export function registerAuthCommands(program: Command) {
 					const authServer = await startAuthServer();
 					const callbackUrl = `http://localhost:${authServer.port}/callback?state=${encodeURIComponent(authServer.state)}`;
 				const authUrl = `${apiUrl}/cli-authorize?action=register&callback=${encodeURIComponent(callbackUrl)}`;
-				await openInBrowser(authUrl, {
+				const launched = await openInBrowser(authUrl, {
 					hint: "If the browser didn't open, visit this URL to create your account:",
 				});
+				announceAuthUrl(authUrl, authServer.port, launched);
 
 				const _spinner = startSpinner("Waiting for account creation...");
 

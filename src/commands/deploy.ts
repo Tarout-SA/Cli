@@ -26,9 +26,12 @@ import {
 } from "../lib/entitlement-remedy.js";
 import {
 	AGENT_BILLING_PERMISSION_HINT,
+	type BillingChangeResult,
+	emitBillingResult,
 	type PerformBillingChangeInput,
 	performBillingChange,
 } from "../lib/billing-upgrade.js";
+import { dbAddonKeyForPlanFamily } from "../lib/plan-cart.js";
 import {
 	isCredentialError,
 	resolveProfileFromCredential,
@@ -1630,8 +1633,8 @@ export async function emitNeedsUpgrade(
 
 	const hint =
 		options.length > 1
-			? `Two ways to resolve this — ask the user which they prefer, do not choose for them: (1) ${options[0]?.label}: \`${options[0]?.command}\`; (2) ${options[1]?.label}: \`${options[1]?.command}\`. Then retry: ${retryCommand}.`
-			: `${remedy.hint} Then retry: ${retryCommand}.`;
+			? `Two ways to resolve this — ask the user which they prefer, do not choose for them: (1) ${options[0]?.label}: \`${options[0]?.command}\`; (2) ${options[1]?.label}: \`${options[1]?.command}\`. The chosen command opens the payment page and waits until it's confirmed, then retry: ${retryCommand}.`
+			: `${remedy.hint} That command opens the payment page and waits until it's confirmed, then retry: ${retryCommand}.`;
 
 	outputError("NEEDS_UPGRADE", message, {
 		failedEntitlementKey: failedKey,
@@ -2190,6 +2193,102 @@ async function resolveResourcePlan(
 	});
 }
 
+/** The DB tier a managed db addon grants once purchased. */
+function dbTierForAddonKey(addonKey: string): ResourcePlan {
+	if (addonKey === "db.pro") return "PRO";
+	if (addonKey === "db.standard") return "STANDARD";
+	return "STARTER";
+}
+
+export type DbPlanResolution =
+	| { ok: true; plan: ResourcePlan }
+	| { ok: false; result: BillingChangeResult };
+
+/**
+ * Decide the tier for a NEW database, defaulting to the org's subscribed tier
+ * and AUTO-BUYING the plan-matched managed db add-on when the org has no open
+ * slot (Starter→`db.standard`, Pro→`db.pro`). Decision-only and unit-testable:
+ * never calls `process.exit`; returns `{ok:false, result}` when an auto-buy
+ * checkout didn't complete so the caller can surface it.
+ *
+ * Resolution order:
+ *  1. An explicit tier wins — except explicit `FREE` on a paid org (the server
+ *     rejects it), which is dropped so we resolve the org's real tier.
+ *  2. Any creatable/owned slot is used as-is via {@link pickDefaultResourceTier}
+ *     — this is what makes a Dedicated org use its BUNDLED `db.standard` slots
+ *     (→ STANDARD) with NO purchase, and keeps a free org on FREE.
+ *  3. A paid org with NO creatable slot buys the plan-matched add-on (Shared→
+ *     `db.standard`), then creates on the granted tier.
+ */
+export async function ensureDatabasePlan(
+	// biome-ignore lint/suspicious/noExplicitAny: untyped tRPC proxy client.
+	client: any,
+	requested: ResourcePlan | undefined,
+): Promise<DbPlanResolution> {
+	const currentPlanKey = await getCurrentPlanKeySafely(client);
+	const addonKey = dbAddonKeyForPlanFamily(currentPlanKey);
+	const orgIsPaid = addonKey !== null;
+
+	// Explicit tier wins, except explicit FREE on a paid org → drop and resolve.
+	if (requested && !(requested === "FREE" && orgIsPaid)) {
+		return { ok: true, plan: requested };
+	}
+
+	const tiers = await loadResourceTiers(client, "database");
+	const hasCreatable = tiers.some((t) => t.canCreate);
+	if (hasCreatable || !orgIsPaid) {
+		// Creatable/owned slot (incl. Dedicated's bundled db.standard) or a free
+		// org → existing tier picker default; no purchase.
+		return { ok: true, plan: pickDefaultResourceTier(tiers) };
+	}
+
+	// Paid org with no open DB slot → buy the plan-matched managed db add-on.
+	if (!isJsonMode()) {
+		log("");
+		log(
+			colors.dim(
+				`Your plan has no open database slot — adding the ${addonKey} add-on. Complete payment in the browser to continue.`,
+			),
+		);
+	}
+	const result = await performBillingChange(client, {
+		kind: "addon",
+		addonKey: addonKey as string,
+		quantity: 1,
+		wait: true,
+		timeoutMs: 600_000,
+		openBrowser: paymentBrowserOpener(),
+		onCheckoutOpened: ({ orderId, paymentUrl }) => {
+			if (!isJsonMode()) {
+				log("");
+				log("Open this URL to complete payment:");
+				log(`  ${colors.cyan(paymentUrl)}`);
+				log(`Order ID: ${colors.dim(orderId)}`);
+			}
+		},
+	});
+	if (result.status === "applied" || result.status === "paid") {
+		return { ok: true, plan: dbTierForAddonKey(addonKey as string) };
+	}
+	return { ok: false, result };
+}
+
+/**
+ * {@link ensureDatabasePlan} + surface-and-exit glue for the create call sites:
+ * on an incomplete auto-buy it emits the billing result and exits with the
+ * matching code (resumable for a pending checkout, error for a hard failure) so
+ * we never create a database the org couldn't pay for.
+ */
+export async function resolveDatabasePlanOrExit(
+	// biome-ignore lint/suspicious/noExplicitAny: untyped tRPC proxy client.
+	client: any,
+	requested: ResourcePlan | undefined,
+): Promise<ResourcePlan> {
+	const resolution = await ensureDatabasePlan(client, requested);
+	if (resolution.ok) return resolution.plan;
+	exit(emitBillingResult(resolution.result, { label: "Database add-on" }));
+}
+
 async function createAndAttachDatabase(
 	client: any,
 	profile: Profile,
@@ -2407,14 +2506,7 @@ async function resolveDatabaseProvisioning(
 	);
 
 	if (picked === "__create__") {
-		const plan =
-			requestedPlan ??
-			(await resolveResourcePlan(
-				client,
-				"database",
-				undefined,
-				"Database plan:",
-			));
+		const plan = await resolveDatabasePlanOrExit(client, requestedPlan);
 		return {
 			action: "create",
 			plan,
@@ -2925,9 +3017,7 @@ async function buildDatabaseCreateDecision(
 	kind: "postgres" | "mysql",
 	requestedPlan: ResourcePlan | undefined,
 ): Promise<Extract<DatabaseDecision, { action: "create" }>> {
-	const plan =
-		requestedPlan ??
-		(await resolveResourcePlan(client, "database", undefined, "Database plan:"));
+	const plan = await resolveDatabasePlanOrExit(client, requestedPlan);
 	return {
 		action: "create",
 		plan,
