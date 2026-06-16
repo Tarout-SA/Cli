@@ -10,7 +10,7 @@
  * @module lib/agent-setup
  */
 
-import { hasTaroutAllowlist, scaffoldAgentConfig } from "./agent-scaffold.js";
+import { hasTaroutAgentConfig, scaffoldAgentConfig } from "./agent-scaffold.js";
 import {
 	colors,
 	isJsonMode,
@@ -21,7 +21,7 @@ import {
 } from "./output.js";
 
 const SETUP_HINT =
-	"Run `tarout agent init` to allowlist Bash(tarout:*) so tarout commands run without per-command approval prompts.";
+	"Run `tarout agent init` to set up Tarout permissions: read-only commands run without prompts, and deploys/paid actions ask for in-editor approval instead of being blocked.";
 
 /** An agent (not a human at a TTY) is driving when JSON or non-interactive mode is on. */
 export function isAgentDriven(): boolean {
@@ -35,7 +35,7 @@ export function isAgentDriven(): boolean {
  * `disabled` comes from `--no-agent-setup`.
  */
 export function ensureAgentSetup(cwd: string, disabled = false): void {
-	if (disabled || !isAgentDriven() || hasTaroutAllowlist(cwd)) return;
+	if (disabled || !isAgentDriven() || hasTaroutAgentConfig(cwd)) return;
 
 	const result = scaffoldAgentConfig({ cwd, agent: "claude" });
 	if (isJsonMode()) {
@@ -57,7 +57,7 @@ export function ensureAgentSetup(cwd: string, disabled = false): void {
  * for humans and for already-configured projects.
  */
 export function emitAgentSetupHint(cwd: string): void {
-	if (!isAgentDriven() || hasTaroutAllowlist(cwd)) return;
+	if (!isAgentDriven() || hasTaroutAgentConfig(cwd)) return;
 
 	if (isJsonMode()) {
 		outputJsonLine({
