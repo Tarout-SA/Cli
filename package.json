@@ -44,14 +44,14 @@
 		"typescript": "^5.6.0"
 	},
 	"engines": {
-		"node": "^24.14.1"
+		"node": ">=18.0.0"
 	},
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/tarout/platform"
+		"url": "git+https://github.com/Tarout-SA/cli.git"
 	},
 	"bugs": {
-		"url": "https://github.com/tarout/platform/issues"
+		"url": "https://github.com/Tarout-SA/cli/issues"
 	},
 	"homepage": "https://tarout.sa",
 	"keywords": [

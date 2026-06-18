@@ -4,11 +4,6 @@ node_modules/
 # Build output
 dist/
 
-# Lock files (use parent's lock file)
-bun.lock
-package-lock.json
-yarn.lock
-
 # IDE
 .idea/
 .vscode/

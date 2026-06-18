@@ -59,7 +59,7 @@ Connect Claude Desktop / Cursor to Tarout via the bundled `tarout-mcp` bridge:
 ```
 
 Hosted agents can hit the Streamable-HTTP endpoint `/api/mcp` directly with an
-`x-api-key` header. See [`docs/MCP.md`](../docs/MCP.md).
+`x-api-key` header. See [`docs/MCP.md`](https://github.com/Tarout-SA/Platform/blob/main/docs/MCP.md).
 
 ## Commands
 
@@ -353,7 +353,7 @@ Configuration is stored at `~/.tarout/config.json`:
 ## Support
 
 - Documentation: [tarout.sa/docs](https://tarout.sa/docs)
-- Issues: [GitHub Issues](https://github.com/tarout/platform/issues)
+- Issues: [GitHub Issues](https://github.com/Tarout-SA/cli/issues)
 - Discord: [Join our community](https://discord.gg/2tBnJ3jDJc)
 
 ## License
