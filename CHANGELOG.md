@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0]
+
+### Changed
+
+- **`tarout up` / `tarout deploy` now auto-launch the browser login when not
+  signed in.** Instead of stopping with a "run `tarout login` yourself" hand-off,
+  the deploy opens the browser, waits for sign-in via the local callback server,
+  and then continues — in agent / `--json` mode too (the browser opens on the
+  user's machine). In `--json` mode it emits `auth_browser_opened` /
+  `authenticated` events so the agent can tell the user to complete sign-in.
+  A headless host with no display still falls back to the API-token prompt
+  (`--token` / `tarout login --token`).
+
 ## [0.14.0]
 
 ### Changed

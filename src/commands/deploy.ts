@@ -16,7 +16,11 @@ import open from "open";
 import { ensureAgentSetup } from "../lib/agent-setup.js";
 import { getApiClient, resetApiClient } from "../lib/api.js";
 import { startAuthServer } from "../lib/auth-server.js";
-import { openInBrowser, paymentBrowserOpener } from "../lib/browser.js";
+import {
+	canLaunchBrowser,
+	openInBrowser,
+	paymentBrowserOpener,
+} from "../lib/browser.js";
 import {
 	type Catalog,
 	type EntitlementRemedy,
@@ -173,6 +177,14 @@ export async function ensureAuthenticatedForDeploy(
 	}
 
 	if (!isLoggedIn()) {
+		// Zero-friction default: open the browser and sign in through the local
+		// callback server whenever a GUI is reachable. This runs in agent / --json
+		// mode too — the browser opens on the user's machine, we wait for sign-in,
+		// then continue the deploy. No "go run `tarout login` yourself" hand-off.
+		// Only a headless host (no display) falls back to the API-token prompt.
+		if (canLaunchBrowser()) {
+			return authenticateViaBrowser("login", apiUrl);
+		}
 		if (isJsonMode()) {
 			await promptOrEmit<never>(
 				{
@@ -218,6 +230,12 @@ export async function ensureAuthenticatedForDeploy(
 		return profile;
 	} catch (err) {
 		if (!isCredentialError(err)) throw err;
+		// Stored credential is bad — re-auth through the browser when a GUI is
+		// reachable (same auto-login as the not-logged-in path); headless falls
+		// back to a fresh token.
+		if (canLaunchBrowser()) {
+			return authenticateViaBrowser("login", apiUrl);
+		}
 		if (isJsonMode()) {
 			await promptOrEmit<never>(
 				{
@@ -292,6 +310,19 @@ async function authenticateViaBrowser(
 			? `${apiUrl}/cli-authorize?action=register&callback=${encodeURIComponent(callbackUrl)}`
 			: `${apiUrl}/cli-authorize?callback=${encodeURIComponent(callbackUrl)}`;
 
+	// Human output is suppressed in --json mode, so surface the auth URL through
+	// a structured event — that's the agent's signal to tell the user a browser
+	// opened (and to share the link if the launch didn't raise a window).
+	if (isJsonMode()) {
+		outputJsonLine({
+			type: "event",
+			event: "auth_browser_opened",
+			action,
+			url: authUrl,
+			hint: "A browser was opened to sign in. Complete sign-in there; the command continues automatically once authorized.",
+		});
+	}
+
 	log("");
 	log(
 		action === "register"
@@ -342,6 +373,15 @@ async function authenticateViaBrowser(
 		setProfile("default", profile);
 		setCurrentProfile("default");
 		resetApiClient();
+
+		if (isJsonMode()) {
+			outputJsonLine({
+				type: "event",
+				event: "authenticated",
+				userEmail: profile.userEmail,
+				organization: profile.organizationName,
+			});
+		}
 
 		log("");
 		success(`Logged in as ${colors.cyan(profile.userEmail)}`);
