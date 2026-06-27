@@ -40,6 +40,7 @@ import {
 	emitNeedsUpgrade,
 	ensureAuthenticatedForDeploy,
 	findApp,
+	hasExplicitResourceRequest,
 	inferSuggestedPlan,
 	inspectCurrentProject,
 	isEntitlementError,
@@ -411,6 +412,30 @@ export function registerUpCommand(program: Command): void {
 
 				if (!app) {
 					throw new Error("Failed to resolve the target application.");
+				}
+
+				// Redeploy of an existing app: honor an explicit --database/--storage
+				// (or --reuse-*) by attaching an existing project resource, or creating
+				// one only if none exists. Without an explicit flag a redeploy provisions
+				// nothing (unchanged). First-create is handled in the `!reused` block.
+				if (reused && hasExplicitResourceRequest(options)) {
+					emitEvent({ event: "provision_started", database: null, storage: null });
+					await configureOptionalResources(
+						client,
+						profile,
+						app,
+						{
+							database: options.database,
+							databasePlan: options.databasePlan,
+							storage: options.storage,
+							storagePlan: options.storagePlan,
+							reuseDatabase: options.reuseDatabase,
+							reuseStorage: options.reuseStorage,
+						},
+						inspection,
+						{ appReused: true },
+					);
+					emitEvent({ event: "provision_done" });
 				}
 
 				if (source === "github") {

@@ -572,11 +572,16 @@ function collectInspectableFiles(root: string): string[] {
 	const includedNames = new Set([
 		".env.example",
 		".env.sample",
+		"build.gradle",
+		"build.gradle.kts",
 		"drizzle.config.js",
 		"drizzle.config.mjs",
 		"drizzle.config.ts",
 		"package.json",
+		"pom.xml",
 		"schema.prisma",
+		"settings.gradle",
+		"settings.gradle.kts",
 	]);
 	const includedExtensions = [
 		".cjs",
@@ -587,6 +592,7 @@ function collectInspectableFiles(root: string): string[] {
 		".mjs",
 		".php",
 		".prisma",
+		".properties",
 		".py",
 		".rb",
 		".ts",
@@ -701,6 +707,15 @@ function detectDatabase(
 		}
 		if (/mysql:\/\/|MYSQL_HOST|MYSQL_/i.test(content)) {
 			mysqlReasons.push(`${label} mysql connection`);
+		}
+		// Java / Spring Boot (Maven `pom.xml`, Gradle, `application*.properties`):
+		// the JDBC scheme or the driver artifact, neither of which carries a `://`
+		// when the host comes from an env placeholder like `${PGHOST}`.
+		if (/jdbc:postgresql|org\.postgresql/i.test(content)) {
+			postgresReasons.push(`${label} postgresql driver`);
+		}
+		if (/jdbc:mysql|mysql-connector|org\.mariadb|mariadb-java-client/i.test(content)) {
+			mysqlReasons.push(`${label} mysql driver`);
 		}
 		if (/DATABASE_URL/i.test(content)) {
 			postgresReasons.push(`${label} DATABASE_URL`);
@@ -1994,15 +2009,54 @@ async function openGitProviderSetup(): Promise<void> {
 	await open(url);
 }
 
+/** True when the user explicitly asked for a DB/storage resource via flags. */
+export function hasExplicitResourceRequest(options: DeployOptions): boolean {
+	return Boolean(
+		options.database ||
+			options.storage ||
+			options.reuseDatabase ||
+			options.reuseStorage,
+	);
+}
+
+/**
+ * The DB kind to provision for a REUSED app: only what the flags explicitly
+ * asked for. We deliberately do NOT fall back to project detection here — a
+ * redeploy shouldn't silently spin up a database just because the source looks
+ * like it uses one. (First-create still uses detection via resolveDatabaseChoice.)
+ */
+function explicitDatabaseKind(
+	options: DeployOptions,
+	inspection: ProjectInspection,
+): DatabaseKind {
+	if (options.database) return normalizeDatabaseKind(options.database) ?? "none";
+	if (options.reuseDatabase) {
+		return inspection.database !== "none" ? inspection.database : "postgres";
+	}
+	return "none";
+}
+
+function explicitStorageRequested(options: DeployOptions): boolean {
+	return options.storage === true || Boolean(options.reuseStorage);
+}
+
 export async function configureOptionalResources(
 	client: any,
 	profile: Profile,
 	app: AppSummary,
 	options: DeployOptions,
 	inspection: ProjectInspection,
+	opts?: { appReused?: boolean },
 ): Promise<void> {
-	const database = await resolveDatabaseChoice(options, inspection);
+	const appReused = opts?.appReused ?? false;
 	const createdResources: string[] = [];
+
+	// On a redeploy of an existing app act ONLY on explicit flags (and reuse the
+	// existing resource rather than creating a duplicate). On first creation,
+	// fall back to project detection as before.
+	const database = appReused
+		? explicitDatabaseKind(options, inspection)
+		: await resolveDatabaseChoice(options, inspection);
 
 	if (database !== "none") {
 		const decision = await resolveDatabaseProvisioning(
@@ -2011,11 +2065,12 @@ export async function configureOptionalResources(
 			app,
 			database,
 			options,
+			{ preferExisting: appReused },
 		);
 		if (decision.action === "reuse") {
 			await attachExistingDatabase(client, app, database, decision);
 			createdResources.push(
-				`${formatDatabaseKind(database)} reused — ${decision.name} (${decision.plan})`,
+				`${formatDatabaseKind(database)} ${appReused ? "attached" : "reused"} — ${decision.name} (${decision.plan})`,
 			);
 		} else {
 			await createAndAttachDatabase(client, profile, app, {
@@ -2029,17 +2084,22 @@ export async function configureOptionalResources(
 		}
 	}
 
-	if (await resolveStorageChoice(options, inspection)) {
+	const wantStorage = appReused
+		? explicitStorageRequested(options)
+		: await resolveStorageChoice(options, inspection);
+
+	if (wantStorage) {
 		const decision = await resolveStorageProvisioning(
 			client,
 			profile,
 			app,
 			options,
+			{ preferExisting: appReused },
 		);
 		if (decision.action === "reuse") {
 			await attachExistingStorage(client, app, decision);
 			createdResources.push(
-				`Storage reused — ${decision.name} (${decision.plan})`,
+				`Storage ${appReused ? "attached" : "reused"} — ${decision.name} (${decision.plan})`,
 			);
 		} else {
 			await createAndAttachStorage(client, app, {
@@ -2088,13 +2148,17 @@ async function deployResolvedTarget(
 				sourcePreference,
 			);
 
-			if (createdApp) {
+			// Provision on first creation (detection-driven), or on a redeploy when
+			// the user explicitly asked for a resource — the latter reuses an
+			// existing project resource instead of creating a duplicate.
+			if (createdApp || hasExplicitResourceRequest(options)) {
 				await configureOptionalResources(
 					client,
 					profile,
 					app,
 					options,
 					inspection,
+					{ appReused: !createdApp },
 				);
 			}
 
@@ -2641,6 +2705,7 @@ async function resolveDatabaseProvisioning(
 	app: AppSummary,
 	kind: "postgres" | "mysql",
 	options: DeployOptions,
+	opts?: { preferExisting?: boolean },
 ): Promise<DatabaseDecision> {
 	const candidates = await listDatabaseCandidates(client, kind, profile);
 	const requestedPlan = normalizeResourcePlan(options.databasePlan);
@@ -2661,7 +2726,26 @@ async function resolveDatabaseProvisioning(
 		);
 	}
 
-	if (candidates.length === 0 || isJsonMode() || shouldSkipConfirmation()) {
+	if (candidates.length === 0) {
+		return buildDatabaseCreateDecision(client, app, kind, requestedPlan);
+	}
+
+	// Redeploy of an EXISTING app: a project DB already exists, so attach it
+	// rather than creating a duplicate (billable) one. This is what makes an
+	// explicit `--database` honored on a redeploy without spawning a new DB each
+	// time. First-create flows (preferExisting=false) keep creating.
+	if (opts?.preferExisting) {
+		const picked = mostRecentDatabaseCandidate(candidates);
+		return finalizeDatabaseReuse(
+			client,
+			picked,
+			kind,
+			requestedPlan,
+			planExplicit,
+		);
+	}
+
+	if (isJsonMode() || shouldSkipConfirmation()) {
 		return buildDatabaseCreateDecision(client, app, kind, requestedPlan);
 	}
 
@@ -2720,6 +2804,7 @@ async function resolveStorageProvisioning(
 	profile: Profile,
 	app: AppSummary,
 	options: DeployOptions,
+	opts?: { preferExisting?: boolean },
 ): Promise<StorageDecision> {
 	const candidates = await listStorageCandidates(client, profile);
 	const requestedPlan = normalizeResourcePlan(options.storagePlan);
@@ -2730,7 +2815,18 @@ async function resolveStorageProvisioning(
 		return finalizeStorageReuse(client, picked, requestedPlan, planExplicit);
 	}
 
-	if (candidates.length === 0 || isJsonMode() || shouldSkipConfirmation()) {
+	if (candidates.length === 0) {
+		return buildStorageCreateDecision(client, app, requestedPlan);
+	}
+
+	// Redeploy of an EXISTING app → attach the existing bucket instead of
+	// creating a duplicate (see resolveDatabaseProvisioning).
+	if (opts?.preferExisting) {
+		const picked = mostRecentStorageCandidate(candidates);
+		return finalizeStorageReuse(client, picked, requestedPlan, planExplicit);
+	}
+
+	if (isJsonMode() || shouldSkipConfirmation()) {
 		return buildStorageCreateDecision(client, app, requestedPlan);
 	}
 
@@ -2770,6 +2866,28 @@ async function resolveStorageProvisioning(
 		throw new Error(`Unable to resolve picked storage bucket (id=${picked}).`);
 	}
 	return finalizeStorageReuse(client, candidate, requestedPlan, planExplicit);
+}
+
+/** Newest-first by createdAt (epoch), so a redeploy reuses the latest resource. */
+function byCreatedAtDesc(
+	a: { createdAt?: string | Date | null },
+	b: { createdAt?: string | Date | null },
+): number {
+	const at = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+	const bt = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+	return bt - at;
+}
+
+function mostRecentDatabaseCandidate(
+	candidates: DatabaseCandidate[],
+): DatabaseCandidate {
+	return [...candidates].sort(byCreatedAtDesc)[0] ?? candidates[0]!;
+}
+
+function mostRecentStorageCandidate(
+	candidates: StorageCandidate[],
+): StorageCandidate {
+	return [...candidates].sort(byCreatedAtDesc)[0] ?? candidates[0]!;
 }
 
 async function listDatabaseCandidates(

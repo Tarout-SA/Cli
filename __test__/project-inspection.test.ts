@@ -119,6 +119,65 @@ describe("Tarout deploy project inspection", () => {
 		expect(inspection.storageReasons.join(" ")).toContain("storage");
 	});
 
+	it("detects a Spring Boot + Postgres app (Maven pom.xml + application.properties)", () => {
+		const root = createFixture("spring-maven-postgres", {
+			"pom.xml": [
+				'<?xml version="1.0" encoding="UTF-8"?>',
+				"<project><dependencies>",
+				"  <dependency>",
+				"    <groupId>org.postgresql</groupId>",
+				"    <artifactId>postgresql</artifactId>",
+				"    <scope>runtime</scope>",
+				"  </dependency>",
+				"</dependencies></project>",
+			].join("\n"),
+			"src/main/resources/application.properties": [
+				"spring.datasource.url=jdbc:postgresql://${PGHOST:localhost}:5432/${PGDATABASE:app}",
+				"spring.datasource.username=${PGUSER:postgres}",
+				"spring.datasource.driver-class-name=org.postgresql.Driver",
+			].join("\n"),
+			"src/main/java/com/example/App.java": "class App {}\n",
+		});
+
+		const inspection = inspectCurrentProject(root);
+
+		expect(inspection.database).toBe("postgres");
+		expect(inspection.databaseReasons.join(" ").toLowerCase()).toContain(
+			"postgres",
+		);
+	});
+
+	it("detects a Spring Boot + MySQL app via Gradle build file", () => {
+		const root = createFixture("spring-gradle-mysql", {
+			"build.gradle": [
+				"dependencies {",
+				"  runtimeOnly 'com.mysql:mysql-connector-j'",
+				"}",
+			].join("\n"),
+			"src/main/resources/application.properties":
+				"spring.datasource.url=jdbc:mysql://${MYSQL_HOST:localhost}:3306/app\n",
+		});
+
+		const inspection = inspectCurrentProject(root);
+
+		expect(inspection.database).toBe("mysql");
+		expect(inspection.databaseReasons.join(" ").toLowerCase()).toContain(
+			"mysql",
+		);
+	});
+
+	it("leaves a Spring Boot app with no datasource on 'none'", () => {
+		const root = createFixture("spring-no-db", {
+			"pom.xml":
+				'<?xml version="1.0"?>\n<project><dependencies>\n  <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>\n</dependencies></project>\n',
+			"src/main/resources/application.properties": "server.port=8080\n",
+		});
+
+		const inspection = inspectCurrentProject(root);
+
+		expect(inspection.database).toBe("none");
+	});
+
 	it("detects a GitHub-backed Rails-style project without requiring GitHub", () => {
 		const root = createFixture("rails-github", {
 			"Gemfile": 'gem "rails"\ngem "pg"\n',

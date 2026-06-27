@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0]
+
+### Fixed
+
+- **Database detection now understands Java / Spring Boot projects.** Project
+  inspection previously only read `package.json` and a JS-centric file set
+  (`.properties`, `pom.xml`, `build.gradle` were never inspected), so a Spring
+  Boot + Postgres/MySQL app was detected as having no database — and a hands-free
+  deploy provisioned none. Inspection now reads `pom.xml`, `build.gradle(.kts)`,
+  and `application*.properties`, and recognizes JDBC/driver signals
+  (`jdbc:postgresql`, `org.postgresql`, `jdbc:mysql`, `mysql-connector`,
+  `org.mariadb`).
+- **`--database` / `--storage` are now honored on redeploys.** Resource
+  provisioning only ran on first app creation, so an explicit `--database postgres`
+  on a redeploy of an existing app was silently ignored. It now provisions on a
+  reused app too — **attaching the existing project database when one exists**
+  (never creating a duplicate billable DB) and creating one only when none exists.
+  A redeploy with no resource flag still provisions nothing.
+
 ## [0.15.0]
 
 ### Changed
