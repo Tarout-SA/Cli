@@ -7,6 +7,7 @@ import {
 	buildConfigFromOptions,
 	buildRemedyOptions,
 	formatPlanPrice,
+	inferAppSlotKey,
 	inferSuggestedPlan,
 	isEntitlementError,
 	pickDefaultResourceTier,
@@ -288,6 +289,101 @@ describe("buildRemedyOptions", () => {
 		const opts = buildRemedyOptions(remedy, undefined, catalog, "shared");
 		expect(opts[0]?.command).toBe("tarout billing plan:quantity 3 --wait");
 		expect(opts[1]?.command).toBe("tarout billing upgrade dedicated_small --wait");
+	});
+
+	it("Starter app-slot gate → add-slot + upgrade + per-app reuse options", () => {
+		const remedy: EntitlementRemedy = {
+			kind: "plan_quantity",
+			failedKey: "app.shared.slots",
+			targetKey: "shared",
+			targetName: "Starter",
+			command: "tarout billing plan:quantity 3 --wait",
+			hint: "",
+		};
+		const apps = [
+			{ id: "7f3a2b00", name: "api" },
+			{ id: "9c1d4e00", name: "web" },
+		];
+		const opts = buildRemedyOptions(remedy, "shared", catalog, "shared", apps);
+		expect(opts.map((o) => o.action)).toEqual([
+			"add_app_slot",
+			"upgrade_plan",
+			"reuse_app",
+			"reuse_app",
+		]);
+		expect(opts[2]?.command).toBe("tarout up --app 7f3a2b00");
+		expect(opts[3]?.label).toBe('Reuse "web"');
+	});
+
+	it("Dedicated app-slot gate → upgrade (no add-slot) + reuse options", () => {
+		const remedy: EntitlementRemedy = {
+			kind: "plan",
+			failedKey: "app.dedicated.slots",
+			targetKey: "dedicated_medium",
+			targetName: "Pro Medium",
+			command: "tarout billing upgrade dedicated_medium --wait",
+			hint: "",
+		};
+		const opts = buildRemedyOptions(remedy, undefined, catalog, "dedicated_small", [
+			{ id: "abc12345", name: "api" },
+		]);
+		expect(opts.map((o) => o.action)).toEqual(["upgrade_plan", "reuse_app"]);
+		expect(opts[1]?.command).toBe("tarout up --app abc12345");
+	});
+
+	it("caps reuse options at 5 and points the rest at `apps list`", () => {
+		const remedy: EntitlementRemedy = {
+			kind: "plan_quantity",
+			failedKey: "app.shared.slots",
+			targetKey: "shared",
+			command: "tarout billing plan:quantity 2 --wait",
+			hint: "",
+		};
+		const many = Array.from({ length: 7 }, (_, i) => ({
+			id: `id${i}`,
+			name: `app${i}`,
+		}));
+		const opts = buildRemedyOptions(remedy, undefined, catalog, "shared", many);
+		const reuse = opts.filter((o) => o.action === "reuse_app");
+		expect(reuse).toHaveLength(6); // 5 apps + 1 "list the rest" pointer
+		expect(reuse[5]?.command).toBe("tarout apps list");
+	});
+
+	it("non-app gate (db addon) never adds reuse options, even with apps present", () => {
+		const remedy: EntitlementRemedy = {
+			kind: "addon",
+			failedKey: "db.standard.slots",
+			targetKey: "db.standard",
+			targetName: "Standard database",
+			command: "tarout billing addon:buy db.standard --wait",
+			hint: "",
+		};
+		const opts = buildRemedyOptions(remedy, "shared", catalog, "shared", [
+			{ id: "x", name: "api" },
+		]);
+		expect(opts.some((o) => o.action === "reuse_app")).toBe(false);
+	});
+});
+
+describe("inferAppSlotKey", () => {
+	it("maps the legacy keyless app-slot gate to the org's plan-family key", () => {
+		const err = new Error(
+			"No app slots available on your current plan. Upgrade to add more.",
+		);
+		expect(inferAppSlotKey(err, "shared")).toBe("app.shared.slots");
+		expect(inferAppSlotKey(err, "dedicated_small")).toBe("app.dedicated.slots");
+		expect(inferAppSlotKey(err, "free")).toBe("app.free.slots");
+		expect(inferAppSlotKey(err, undefined)).toBe("app.free.slots");
+	});
+
+	it("returns undefined for non app-slot errors", () => {
+		expect(
+			inferAppSlotKey(
+				new Error("Plan limit reached for db.standard.slots: 1/1."),
+				"shared",
+			),
+		).toBeUndefined();
+		expect(inferAppSlotKey(new Error("boom"), "shared")).toBeUndefined();
 	});
 });
 
