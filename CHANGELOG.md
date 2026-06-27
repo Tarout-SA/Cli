@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.3]
+
+### Changed
+
+- **The app-slot gate now offers add-a-slot, upgrade, AND reuse — not just
+  "upgrade".** Hitting the app cap previously surfaced only a single plan-upgrade
+  option (e.g. Starter → Pro), because the server's gate message carried no
+  entitlement key and the CLI fell back to a generic upgrade. Now the
+  `NEEDS_UPGRADE` envelope (and the interactive deploy picker) presents the real
+  choices: on **Starter** — add one app slot (`plan:quantity` bump) **or** upgrade
+  **or** reuse an existing app; on **Pro/Dedicated** — upgrade to a bigger host
+  **or** reuse. Reuse options list the org's existing apps with ready
+  `tarout up --app <id>` commands (capped, with a `tarout apps list` pointer for
+  the rest) so no charge is required to proceed. A fallback infers the app-slot
+  tier from the org's plan even against older servers that send the legacy
+  keyless gate message.
+
 ## [0.18.2]
 
 ### Fixed

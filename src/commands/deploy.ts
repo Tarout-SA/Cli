@@ -35,7 +35,7 @@ import {
 	type PerformBillingChangeInput,
 	performBillingChange,
 } from "../lib/billing-upgrade.js";
-import { dbAddonKeyForPlanFamily } from "../lib/plan-cart.js";
+import { dbAddonKeyForPlanFamily, planFamily } from "../lib/plan-cart.js";
 import {
 	isCredentialError,
 	resolveProfileFromCredential,
@@ -1369,14 +1369,17 @@ export async function promptEntitlementRemedy(
 	err: unknown,
 	requestedPlan?: string,
 ): Promise<boolean> {
-	const failedKey = extractEntitlementKeyFromError(err);
-	const [catalog, currentPlanKey] = await Promise.all([
+	const [catalog, currentPlanKey, currentSharedQuantity] = await Promise.all([
 		fetchCatalogSafely(client) as Promise<Catalog | null>,
 		getCurrentPlanKeySafely(client),
+		getCurrentPlanQuantitySafely(client),
 	]);
+	const failedKey =
+		extractEntitlementKeyFromError(err) ?? inferAppSlotKey(err, currentPlanKey);
 	const remedy = resolveEntitlementRemedy(failedKey, catalog, {
 		requestedPlan,
 		currentPlanKey,
+		currentSharedQuantity,
 	});
 
 	// No cheaper targeted action — only a full plan change unlocks these.
@@ -1607,6 +1610,26 @@ export function extractEntitlementKeyFromError(
 }
 
 /**
+ * Fallback app-slot key for the LEGACY keyless gate message
+ * ("No app slots available on your current plan.") that older servers still
+ * send. Newer servers name the key directly (`Plan limit reached for
+ * app.<tier>.slots`), which {@link extractEntitlementKeyFromError} parses — so
+ * this only kicks in when that returns nothing, deriving the tier from the org's
+ * current plan family. Returns undefined when the error isn't the app-slot gate.
+ */
+export function inferAppSlotKey(
+	err: unknown,
+	currentPlanKey?: string,
+): string | undefined {
+	const msg = (err instanceof Error ? err.message : "").toLowerCase();
+	if (!msg.includes("no app slots available")) return undefined;
+	const family = planFamily(currentPlanKey);
+	if (family === "SHARED") return "app.shared.slots";
+	if (family === "DEDICATED") return "app.dedicated.slots";
+	return "app.free.slots";
+}
+
+/**
  * Emit the structured NEEDS_UPGRADE envelope for an entitlement gate. When a
  * cheaper targeted action exists (buy a single addon, or add one app slot), the
  * envelope carries BOTH that option AND the full plan upgrade in an `options`
@@ -1615,23 +1638,30 @@ export function extractEntitlementKeyFromError(
  * single upgrade option. Pairs with ExitCode.PERMISSION_DENIED at the call site.
  */
 export interface RemedyOption {
-	action: "buy_addon" | "add_app_slot" | "upgrade_plan";
+	action: "buy_addon" | "add_app_slot" | "upgrade_plan" | "reuse_app";
 	label: string;
 	command: string;
 }
+
+/** Max per-app reuse options listed before falling back to `tarout apps list`. */
+const MAX_REUSE_OPTIONS = 5;
 
 /**
  * The list of concrete actions that clear an entitlement gate. A targeted
  * remedy (addon / app-slot) is paired with the full plan upgrade so the caller
  * can present BOTH and let the human choose; a plan-only remedy yields the
- * single upgrade action.
+ * single upgrade action. For an APP-slot gate, the org's existing apps are also
+ * offered as `reuse_app` options — reusing one avoids any charge.
  */
 export function buildRemedyOptions(
 	remedy: EntitlementRemedy,
 	requestedPlan: string | undefined,
 	catalog: Catalog | null,
 	currentPlanKey?: string,
+	existingApps?: Array<{ id: string; name: string }>,
 ): RemedyOption[] {
+	const options: RemedyOption[] = [];
+
 	if (remedy.kind === "addon" || remedy.kind === "plan_quantity") {
 		// The "upgrade the plan" alternative follows the current-plan ladder
 		// (free → shared, shared → dedicated_small, …) when we know the org's
@@ -1640,7 +1670,7 @@ export function buildRemedyOptions(
 		const planDef = (catalog?.plans ?? []).find(
 			(p) => (p.planKey ?? p.key) === upgradePlan,
 		);
-		return [
+		options.push(
 			{
 				action: remedy.kind === "addon" ? "buy_addon" : "add_app_slot",
 				label:
@@ -1654,15 +1684,49 @@ export function buildRemedyOptions(
 				label: `Upgrade to ${planDef?.name ?? upgradePlan}`,
 				command: `tarout billing upgrade ${upgradePlan} --wait`,
 			},
-		];
-	}
-	return [
-		{
+		);
+	} else {
+		options.push({
 			action: "upgrade_plan",
 			label: `Upgrade to ${remedy.targetName ?? remedy.targetKey}`,
 			command: remedy.command,
-		},
-	];
+		});
+	}
+
+	// App-slot gate → reusing an existing app is the no-charge alternative. List
+	// the org's apps as ready-to-run options (capped; the rest via `apps list`).
+	if (remedy.failedKey?.startsWith("app.") && existingApps?.length) {
+		for (const app of existingApps.slice(0, MAX_REUSE_OPTIONS)) {
+			options.push({
+				action: "reuse_app",
+				label: `Reuse "${app.name}"`,
+				command: `tarout up --app ${app.id}`,
+			});
+		}
+		if (existingApps.length > MAX_REUSE_OPTIONS) {
+			options.push({
+				action: "reuse_app",
+				label: `…and ${existingApps.length - MAX_REUSE_OPTIONS} more existing app(s)`,
+				command: "tarout apps list",
+			});
+		}
+	}
+
+	return options;
+}
+
+/** Map the org's apps to `{id,name}` for reuse options. Best-effort: [] on error. */
+async function listAppsSafely(
+	// biome-ignore lint/suspicious/noExplicitAny: untyped tRPC proxy client.
+	client: any,
+): Promise<Array<{ id: string; name: string }>> {
+	try {
+		const apps: AppSummary[] =
+			await client.application.allByOrganization.query();
+		return (apps ?? []).map((a) => ({ id: a.applicationId, name: a.name }));
+	} catch {
+		return [];
+	}
 }
 
 export async function emitNeedsUpgrade(
@@ -1672,25 +1736,34 @@ export async function emitNeedsUpgrade(
 	retryCommand: string,
 ): Promise<void> {
 	const message = err instanceof Error ? err.message : "Plan upgrade required";
-	const failedKey = extractEntitlementKeyFromError(err);
-	const [catalog, currentPlanKey] = await Promise.all([
-		fetchCatalogSafely(client) as Promise<Catalog | null>,
-		getCurrentPlanKeySafely(client),
-	]);
+	const [catalog, currentPlanKey, existingApps, currentSharedQuantity] =
+		await Promise.all([
+			fetchCatalogSafely(client) as Promise<Catalog | null>,
+			getCurrentPlanKeySafely(client),
+			listAppsSafely(client),
+			getCurrentPlanQuantitySafely(client),
+		]);
+	// Newer servers name the key in the message; older ones send a keyless
+	// app-slot gate, so fall back to inferring it from the org's plan family.
+	const failedKey =
+		extractEntitlementKeyFromError(err) ?? inferAppSlotKey(err, currentPlanKey);
 	const remedy = resolveEntitlementRemedy(failedKey, catalog, {
 		requestedPlan,
 		currentPlanKey,
+		currentSharedQuantity,
 	});
 	const options = buildRemedyOptions(
 		remedy,
 		requestedPlan,
 		catalog,
 		currentPlanKey,
+		existingApps,
 	);
 
+	const hasReuse = options.some((o) => o.action === "reuse_app");
 	const hint =
 		options.length > 1
-			? `Two ways to resolve this — ask the user which they prefer, do not choose for them: (1) ${options[0]?.label}: \`${options[0]?.command}\`; (2) ${options[1]?.label}: \`${options[1]?.command}\`. The chosen command opens the payment page and waits until it's confirmed, then retry: ${retryCommand}.`
+			? `Multiple ways to resolve this — present the options to the user and let them choose; do not choose for them. Billing options (add_app_slot / buy_addon / upgrade_plan) open the payment page and wait until it's confirmed, then retry: ${retryCommand}.${hasReuse ? " reuse_app options deploy to an existing app instead (no charge)." : ""}`
 			: `${remedy.hint} That command opens the payment page and waits until it's confirmed, then retry: ${retryCommand}.`;
 
 	outputError("NEEDS_UPGRADE", message, {
@@ -2233,12 +2306,15 @@ async function deployResolvedTarget(
 	inspection: ProjectInspection,
 	sourcePreference: SourcePreference,
 ): Promise<void> {
+	// May be reassigned when the user clears an app-slot gate by choosing to
+	// reuse an existing app instead of creating a new one.
+	let currentAppIdentifier = appIdentifier;
 	for (let attempt = 0; ; attempt++) {
 		try {
 			const target = await resolveDeploymentTarget(
 				client,
 				profile,
-				appIdentifier,
+				currentAppIdentifier,
 				options,
 				sourcePreference,
 			);
@@ -2314,9 +2390,20 @@ async function deployResolvedTarget(
 			// Clear a gate inline only ONCE — a second gate after a fresh upgrade is
 			// handed off rather than looping on the payment page.
 			if (attempt === 0) {
-				// Returns once the plan is active (the prompt waits for payment);
-				// exits the process for a non-interactive caller or a user cancel.
-				await clearDeployEntitlementGate(client, err, options);
+				// Returns once the plan is active (the prompt waits for payment) or
+				// the user chose to reuse an existing app; exits the process for a
+				// non-interactive caller or a user cancel.
+				const resolution = await clearDeployEntitlementGate(
+					client,
+					err,
+					options,
+				);
+				// Reuse switches the target to an existing app (precedence over
+				// --new-app in resolveDeploymentTarget), so the next loop deploys to
+				// it instead of re-hitting the slot gate.
+				if (resolution.action === "reuse") {
+					currentAppIdentifier = resolution.appIdentifier;
+				}
 				continue;
 			}
 			await emitNeedsUpgrade(client, err, options.plan, "tarout deploy");
@@ -2326,18 +2413,28 @@ async function deployResolvedTarget(
 }
 
 /**
+ * How an interactive deploy-time gate was cleared: `retry` (a billing change
+ * applied — re-resolve the target on the new plan) or `reuse` (the user chose an
+ * existing app instead of paying for a new slot — switch the deploy to it).
+ */
+type GateResolution =
+	| { action: "retry" }
+	| { action: "reuse"; appIdentifier: string };
+
+/**
  * Clear a deploy-time entitlement gate. Interactive TTY: print the failed-slot
- * context, prompt the upgrade (arrow-key picker), and wait — the billing engine
- * opens the hosted checkout and polls until payment is confirmed — then return
- * so the caller resumes the deploy on the new plan. Non-interactive (JSON / no
- * TTY / --yes) or a user cancel: emit the NEEDS_UPGRADE envelope and exit.
+ * context, then offer the remedies — for an app-slot gate with existing apps,
+ * reusing one (no charge) is offered alongside add-slot / upgrade; the billing
+ * engine opens the hosted checkout and polls until payment is confirmed — then
+ * return so the caller resumes the deploy. Non-interactive (JSON / no TTY /
+ * --yes) or a user cancel: emit the NEEDS_UPGRADE envelope and exit.
  */
 async function clearDeployEntitlementGate(
 	// biome-ignore lint/suspicious/noExplicitAny: untyped tRPC proxy client.
 	client: any,
 	err: unknown,
 	options: DeployOptions,
-): Promise<void> {
+): Promise<GateResolution> {
 	if (isJsonMode() || isNonInteractiveMode() || shouldSkipConfirmation()) {
 		await emitNeedsUpgrade(client, err, options.plan, "tarout deploy");
 		exit(ExitCode.PERMISSION_DENIED);
@@ -2349,9 +2446,45 @@ async function clearDeployEntitlementGate(
 
 	// Free DB/storage slots are 1-per-org and granted only by the free plan, so
 	// "buy an addon" is a dead end. Name what's holding the slot first.
-	const failedKey = extractEntitlementKeyFromError(err);
+	const failedKey =
+		extractEntitlementKeyFromError(err) ??
+		inferAppSlotKey(err, await getCurrentPlanKeySafely(client));
 	if (failedKey === "db.free.slots" || failedKey === "storage.free.slots") {
 		await explainFreeResourceSlotExhaustion(client, failedKey);
+	}
+
+	// App-slot gate → offer reusing an existing app (the no-charge path) next to
+	// the billing remedies, so the user isn't forced to pay to proceed.
+	if (failedKey?.startsWith("app.")) {
+		const apps = await listAppsSafely(client);
+		if (apps.length > 0) {
+			const REMEDY = "__remedy__";
+			const CANCEL = "__cancel__";
+			const choice = await select<string>(
+				"No app slots left on your plan — how do you want to proceed?",
+				[
+					...apps.slice(0, MAX_REUSE_OPTIONS).map((a) => ({
+						name: `Reuse ${a.name} ${colors.dim(`(${a.id.slice(0, 8)})`)}`,
+						value: a.id,
+					})),
+					{ name: "Add an app slot / upgrade the plan", value: REMEDY },
+					{ name: "Cancel", value: CANCEL },
+				],
+				{
+					field: "app_slot_gate",
+					flag: "--app <id|name> to reuse an existing app, or tarout billing plan:quantity / upgrade to add capacity",
+					context: { apps: apps.map((a) => ({ id: a.id, name: a.name })) },
+				},
+			);
+			if (choice === CANCEL) {
+				await emitNeedsUpgrade(client, err, options.plan, "tarout deploy");
+				exit(ExitCode.PERMISSION_DENIED);
+			}
+			if (choice !== REMEDY) {
+				return { action: "reuse", appIdentifier: choice };
+			}
+			// REMEDY → fall through to the add-slot / upgrade picker below.
+		}
 	}
 
 	const upgraded = await promptEntitlementRemedy(client, err, options.plan);
@@ -2362,6 +2495,7 @@ async function clearDeployEntitlementGate(
 
 	log("");
 	log(colors.success("Plan updated — continuing the deployment..."));
+	return { action: "retry" };
 }
 
 async function resolveDatabaseChoice(
