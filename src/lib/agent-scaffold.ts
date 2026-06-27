@@ -115,6 +115,18 @@ or \`--app\` so it doesn't stop to ask which app) and read the JSON result's
 \`success\` / \`data.url\`. Paid or destructive
 commands (\`tarout billing …\`, \`tarout wallet …\`, \`tarout undeploy\`) still pop a
 quick approval prompt — run them directly and let the user approve in place.
+
+**If auto mode holds or denies a deploy, that's not a failure — fall back, don't
+abandon it.** The trust block clears most deploys, but the auto-mode classifier is a
+judgment layer and may still hold one for approval or refuse a blind \`--yes\`. When it
+does: (1) **scope the command** — pass \`--new-app\` or \`--app <id|name>\` so it targets
+one specific app instead of a blind apply (scoped deploys are denied far less); (2) tell
+the user a one-tap approval may appear and ask them to approve it in place — don't
+silently retry the same command; (3) if it's still refused, show them the inspected plan
+(every deploy emits an \`inspect_done\` with the detected database/storage before it
+applies) and ask them to confirm or pick an option, then re-run the scoped deploy they
+chose. Read-only steps (inspect, listing apps, logs) are never gated, so you can always
+get far enough to show the user what will happen and let them drive.
 ${BLOCK_END}`;
 
 export type FileAction =

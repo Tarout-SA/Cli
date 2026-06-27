@@ -67,6 +67,22 @@ describe("scaffoldAgentConfig — claude", () => {
 		expect(result.nextSteps).toContain("tarout up --json --yes");
 	});
 
+	it("tells the agent how to survive an auto-mode deploy denial", () => {
+		scaffoldAgentConfig({ cwd: dir, agent: "claude" });
+		const md = readFileSync(join(dir, "CLAUDE.md"), "utf-8");
+
+		// Hands-free stays the happy path, but the block now also defines a fallback
+		// for when the auto-mode classifier holds/denies a deploy anyway: scope the
+		// command, have the user approve in place, then drop to the inspected plan +
+		// create-vs-reuse options instead of dead-ending.
+		expect(md).toContain("Deploys run hands-free");
+		expect(md).toContain("fall back");
+		expect(md).toContain("scope the command");
+		expect(md).toContain("approve it in place");
+		// Must not resurrect the removed hard-deny / buy-add-on paragraph.
+		expect(md).not.toContain("Denied by auto mode classifier");
+	});
+
 	it("runs deploys hands-free (no ask rule) but gates paid/destructive commands", () => {
 		scaffoldAgentConfig({ cwd: dir, agent: "claude" });
 		const settings = readJson(settingsPath());

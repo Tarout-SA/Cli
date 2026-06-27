@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0]
+
+### Changed
+
+- **Scaffolded `CLAUDE.md` now tells agents how to survive an auto-mode denial.**
+  The `tarout agent init` guidance promised "deploys run hands-free" but said nothing
+  about what to do when Claude Code's auto-mode classifier holds or refuses a deploy
+  anyway (which it can, despite the trust block). The block now adds a fallback for the
+  deploy step: scope the command (`--new-app` / `--app <id|name>`), ask the user to
+  approve the one-tap prompt in place, and otherwise drop to the inspected plan +
+  create-vs-reuse options rather than dead-ending. Hands-free stays the happy path, and
+  read-only commands (never gated) are unaffected.
+
 ## [0.18.3]
 
 ### Changed
