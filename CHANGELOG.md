@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Every command auto-recovers authentication instead of dead-ending on "Run `tarout login`".**
+  Previously only `deploy`/`init`/`up` opened a browser when logged out; every other
+  command (`whoami`, `apps`, `storage`, `db`, `keys`, `env`, …) threw a bare `AuthError`
+  that just told the user — or the agent driving the CLI — to go run `tarout login`
+  themselves. Now a single `preAction` gate routes any logged-out, auth-requiring command
+  through a shared recovery: a human at a real terminal gets an arrow-selectable menu
+  whose default opens the browser; an agent / non-TTY / `--json` run gets the browser
+  opened for it automatically (emitting an `auth_browser_opened` event) and waits on the
+  local sign-in callback; a headless host with no display falls back to an API-token
+  prompt (`needs_input`, exit 6). The auth commands themselves, the self-authing
+  `deploy`/`init`/`up`, and the `agent` scaffolding namespace stay exempt. Adds the
+  `TAROUT_NO_BROWSER` env var to suppress real browser launches (headless safety / tests).
+
+## [0.19.0]
 ## [0.20.1]
 
 ### Changed

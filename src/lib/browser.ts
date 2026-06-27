@@ -2,6 +2,18 @@ import open from "open";
 import { colors, isJsonMode, isNonInteractiveMode, log } from "./output.js";
 
 /**
+ * Escape hatch to suppress every real browser launch while leaving the rest of
+ * the flow intact (the URL is still printed, structured events still fire, the
+ * local callback server still waits). Set `TAROUT_NO_BROWSER=1` for headless
+ * safety or to let an automated test observe which auth path was chosen without
+ * a window actually popping open.
+ */
+export function browserLaunchSuppressed(): boolean {
+	const v = process.env.TAROUT_NO_BROWSER;
+	return v !== undefined && v !== "" && v !== "0" && v.toLowerCase() !== "false";
+}
+
+/**
  * Whether a browser can plausibly be launched from this process. A non-TTY
  * shell (an agent's Bash tool, a piped session) does NOT imply the browser is
  * unreachable — browser-based flows (OAuth login, hosted checkout) are driven
@@ -35,7 +47,8 @@ export async function openInBrowser(
 		);
 		log(`  ${colors.cyan(url)}`);
 	}
-	if (opts?.noOpen || !canLaunchBrowser()) return false;
+	if (opts?.noOpen || browserLaunchSuppressed() || !canLaunchBrowser())
+		return false;
 	try {
 		await open(url);
 		return true;

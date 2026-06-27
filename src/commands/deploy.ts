@@ -16,6 +16,7 @@ import open from "open";
 import { ensureAgentSetup } from "../lib/agent-setup.js";
 import { getApiClient, resetApiClient } from "../lib/api.js";
 import { startAuthServer } from "../lib/auth-server.js";
+import { selectAuthStrategy } from "../lib/auth-strategy.js";
 import {
 	canLaunchBrowser,
 	openInBrowser,
@@ -265,6 +266,74 @@ export async function ensureAuthenticatedForDeploy(
 	}
 	// Unreachable: both branches above either return or exit via promptOrEmit.
 	throw new AuthError();
+}
+
+/**
+ * Generic auth gate for every command that needs a signed-in account. Unlike
+ * {@link ensureAuthenticatedForDeploy} (which also resolves a deploy-shaped
+ * Profile and revalidates stored credentials), this just guarantees the user
+ * ends up authenticated, then returns — the caller's existing `isLoggedIn()`
+ * guard then passes. The whole point is to never dead-end on "go run
+ * `tarout login` yourself": a human at a terminal gets an arrow menu, an agent
+ * gets the browser opened for them, a headless host gets an API-token prompt.
+ * Already-signed-in callers return immediately (the per-command API call still
+ * revalidates the token, so a stale credential surfaces there as usual).
+ */
+export async function ensureAuthenticated(opts?: {
+	apiUrl?: string;
+	token?: string;
+}): Promise<void> {
+	const strategy = selectAuthStrategy({
+		loggedIn: isLoggedIn(),
+		hasToken: Boolean(opts?.token?.trim()),
+		json: isJsonMode(),
+		nonInteractive: isNonInteractiveMode(),
+		canLaunchBrowser: canLaunchBrowser(),
+	});
+
+	if (strategy === "already-authenticated") return;
+
+	const apiUrl = (opts?.apiUrl || getApiUrl()).replace(/\/+$/, "");
+
+	switch (strategy) {
+		case "token-auth":
+			await authenticateViaApiToken(
+				(opts?.token ?? "").trim(),
+				apiUrl,
+				{ persist: true, showSuccess: true },
+			);
+			return;
+		case "browser-menu":
+			// Human at a TTY: offer the arrow menu (its default opens the browser).
+			await promptForCredentials(apiUrl, "You're not signed in to Tarout.");
+			return;
+		case "browser-auto":
+			// Agent / non-TTY / JSON: a menu can't render, so open the browser
+			// straight away and wait on the local callback.
+			await authenticateViaBrowser("login", apiUrl);
+			return;
+		case "token-headless":
+			await promptOrEmit<never>(
+				{
+					field: "token",
+					kind: "password",
+					question: `Paste a Tarout API token to authenticate. Create one at ${apiUrl}/dashboard/agent/keys`,
+					flag: "--token",
+					sensitive: true,
+					context: {
+						step: "auth",
+						reason: "not_logged_in",
+						generateUrl: `${apiUrl}/dashboard/agent/keys`,
+					},
+				},
+				// Unreachable: promptOrEmit exits in JSON/non-interactive mode, and
+				// this branch is only chosen when one of those is true.
+				async () => {
+					throw new AuthError();
+				},
+			);
+			return;
+	}
 }
 
 async function promptForCredentials(

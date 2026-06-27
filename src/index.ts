@@ -14,6 +14,7 @@ import { registerCallCommand } from "./commands/call.js";
 import { registerDashboardCommands } from "./commands/dashboard.js";
 import { registerDbCommands } from "./commands/db.js";
 import {
+	ensureAuthenticated,
 	registerDeployCommands,
 	registerLogsCommand,
 } from "./commands/deploy.js";
@@ -39,10 +40,54 @@ import { registerTicketsCommands } from "./commands/tickets.js";
 import { registerUpCommand } from "./commands/up.js";
 import { registerWalletCommands } from "./commands/wallet.js";
 import { emitAgentSetupHint } from "./lib/agent-setup.js";
+import { handleError } from "./lib/errors.js";
 import { outputError, setGlobalOptions } from "./lib/output.js";
 import { ExitCode } from "./utils/exit-codes.js";
 
 const program = new Command();
+
+/**
+ * Commands that must run WITHOUT first forcing a sign-in. Everything else gets
+ * the auto-auth recovery in the preAction hook so a logged-out invocation opens
+ * the browser (or offers the arrow menu) instead of dead-ending on an AuthError.
+ *
+ * - `login`/`register`/`token`/`logout`: the auth flow itself.
+ * - `up`/`deploy`/`init`: self-manage auth (browser auto-open + `--token`) via
+ *   `ensureAuthenticatedForDeploy`; pre-authing here would double-handle it.
+ * - the whole `agent` namespace: project scaffolding that works signed-out.
+ */
+const AUTH_EXEMPT_LEAF = new Set([
+	"login",
+	"register",
+	"token",
+	"logout",
+	"up",
+	"deploy",
+	"init",
+]);
+
+/**
+ * Whether the about-to-run command should be gated behind authentication.
+ * Walks the command ancestry so nested commands (and the `agent` namespace at
+ * any depth) are classified correctly, and never gates the bare root program.
+ */
+function commandRequiresAuth(
+	actionCommand: Command | undefined,
+	root: Command,
+): boolean {
+	if (!actionCommand || actionCommand === root) return false;
+	const names: string[] = [];
+	for (
+		let cur: Command | null | undefined = actionCommand;
+		cur && cur !== root;
+		cur = cur.parent
+	) {
+		names.push(cur.name());
+	}
+	if (names.includes("agent")) return false;
+	const leaf = names[0];
+	return Boolean(leaf) && !AUTH_EXEMPT_LEAF.has(leaf);
+}
 
 // CLI metadata
 program
@@ -58,7 +103,7 @@ program
 	.option("-q, --quiet", "Minimal output")
 	.option("-v, --verbose", "Extra debug information")
 	.option("--no-color", "Disable colored output")
-	.hook("preAction", (thisCommand, actionCommand) => {
+	.hook("preAction", async (thisCommand, actionCommand) => {
 		const opts = thisCommand.opts();
 		// Auto-detect non-interactive sessions: when stdin is not a TTY (agent
 		// background runs, pipes, CI), inquirer can't prompt — falling through
@@ -85,6 +130,20 @@ program
 		const autoRunsSetup = !!sub && ["up", "deploy", "init"].includes(sub);
 		if (!isAgentNamespace && !autoRunsSetup) {
 			emitAgentSetupHint(process.cwd());
+		}
+
+		// Auto-recover authentication for any command that needs it, so a
+		// logged-out invocation opens the browser (or, on a real terminal, shows
+		// an arrow menu whose default opens the browser) instead of dead-ending
+		// on "Run `tarout login`". The command's own `isLoggedIn()` guard then
+		// passes. Exempt commands (the auth flow itself, the self-authing
+		// up/deploy/init, and the agent scaffolding namespace) are skipped.
+		if (commandRequiresAuth(actionCommand, thisCommand)) {
+			const cmdOpts = actionCommand?.opts() ?? {};
+			await ensureAuthenticated({
+				apiUrl: typeof cmdOpts.apiUrl === "string" ? cmdOpts.apiUrl : undefined,
+				token: typeof cmdOpts.token === "string" ? cmdOpts.token : undefined,
+			});
 		}
 	});
 
@@ -160,5 +219,9 @@ program.configureOutput({
 	},
 });
 
-// Parse and execute
-program.parse();
+// Parse and execute. parseAsync (not parse) so the async preAction hook —
+// which may open a browser and wait for sign-in — is awaited before the
+// command action runs. Errors thrown from the hook (e.g. a cancelled or failed
+// auth recovery) surface here; the command actions handle their own errors
+// internally and exit, so this catch is the hook's safety net.
+program.parseAsync().catch((err) => handleError(err));
