@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.1]
+
+### Fixed
+
+- **`tarout billing upgrade/addon:buy/addon:add/plan:quantity --wait` failed with
+  "unknown option '--wait'".** Those commands only defined `--no-wait`, but the
+  CLI's own entitlement-remedy hints (and users) pass `--wait`. They now accept
+  `--wait` as an explicit alias of the default wait-until-confirmed behavior.
+
 ## [0.18.0]
 
 ### Changed

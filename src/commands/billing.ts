@@ -236,6 +236,10 @@ export function registerBillingCommands(program: Command) {
 			[] as Array<{ addonKey: string; quantity: number }>,
 		)
 		.option(
+			"--wait",
+			"Wait/poll until the hosted checkout is confirmed (this is the default)",
+		)
+		.option(
 			"--no-wait",
 			"Return as soon as the hosted checkout opens, without polling for confirmation (default: wait until paid)",
 		)
@@ -628,6 +632,10 @@ export function registerBillingCommands(program: Command) {
 		.argument("<addon>", "Addon key to add")
 		.option("-q, --quantity <n>", "Addon quantity", Number.parseInt)
 		.option(
+			"--wait",
+			"Wait/poll until the hosted checkout is confirmed (this is the default)",
+		)
+		.option(
 			"--no-wait",
 			"Return as soon as the hosted checkout opens, without polling for confirmation (default: wait until paid)",
 		)
@@ -772,6 +780,10 @@ export function registerBillingCommands(program: Command) {
 		.command("plan:quantity")
 		.argument("<quantity>", "New plan quantity", Number.parseInt)
 		.option(
+			"--wait",
+			"Wait/poll until the hosted checkout is confirmed (this is the default)",
+		)
+		.option(
 			"--no-wait",
 			"Return as soon as the hosted checkout opens, without polling for confirmation (default: wait until paid)",
 		)
@@ -874,6 +886,10 @@ export function registerBillingCommands(program: Command) {
 		.command("addon:buy")
 		.argument("<addon>", "Addon key")
 		.option("-q, --quantity <n>", "Quantity", Number.parseInt)
+		.option(
+			"--wait",
+			"Wait/poll until the hosted checkout is confirmed (this is the default)",
+		)
 		.option(
 			"--no-wait",
 			"Return as soon as the hosted checkout opens, without polling for confirmation (default: wait until paid)",
