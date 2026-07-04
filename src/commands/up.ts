@@ -37,6 +37,7 @@ import {
 	type AppSummary,
 	configureOptionalResources,
 	createAppFromCurrentDirectory,
+	type DeployOptions,
 	emitNeedsUpgrade,
 	ensureAuthenticatedForDeploy,
 	findApp,
@@ -44,6 +45,7 @@ import {
 	inferSuggestedPlan,
 	inspectCurrentProject,
 	isEntitlementError,
+	type ProjectInspection,
 	promptEntitlementRemedy,
 	streamDeploymentWithLogs,
 	uploadCurrentDirectorySource,
@@ -53,6 +55,60 @@ import {
 // `cli/src/commands/up` continue to resolve after they were lifted into
 // `deploy.ts` for sharing with the `tarout deploy` command.
 export { inferSuggestedPlan, isEntitlementError };
+
+/**
+ * On `tarout up` REUSE (`--app`, or picking an existing app), decide which
+ * backing services still need provisioning. `up` is the "make it work" command:
+ * a prior run can create the app but be interrupted before provisioning (e.g. a
+ * billing gate on the 1-app limit or a DB slot), leaving the app to deploy with
+ * no database/storage and boot broken (Postgres falls back to localhost, storage
+ * reports unconfigured).
+ *
+ * We detect what's ALREADY wired in from the injected connection env vars
+ * (`DATABASE_URL` for a DB, `STORAGE_BUCKET` for storage — set server-side by
+ * `*.attachToApplication`) and provision only DETECTED-or-requested resources
+ * the app is MISSING. Attach is idempotent server-side, so re-provisioning a
+ * present resource would be harmless — but we skip it to avoid needless work.
+ *
+ * Returns the effective options to hand to `configureOptionalResources({
+ * appReused: true })`, or null when nothing needs doing (a genuine redeploy of a
+ * fully-provisioned app stays a no-op).
+ */
+export function computeReuseProvisionOptions(
+	existingEnvKeys: Set<string>,
+	options: DeployOptions,
+	inspection: ProjectInspection,
+): DeployOptions | null {
+	const hasDb = existingEnvKeys.has("DATABASE_URL");
+	const hasStorage = existingEnvKeys.has("STORAGE_BUCKET");
+
+	const needDetectedDb =
+		!options.skipDatabase && inspection.database !== "none" && !hasDb;
+	const needDetectedStorage =
+		!options.skipStorage && inspection.storage === true && !hasStorage;
+
+	// Explicit --database/--storage/--reuse-* still runs the reuse provisioning
+	// path (unchanged behavior); otherwise only act when a DETECTED backend is
+	// actually missing.
+	if (
+		!needDetectedDb &&
+		!needDetectedStorage &&
+		!hasExplicitResourceRequest(options)
+	) {
+		return null;
+	}
+
+	// Promote a detected-but-missing resource to an explicit request so the reuse
+	// provisioning path acts on it, without disturbing the user's own flags.
+	const effective: DeployOptions = { ...options };
+	if (needDetectedDb && !options.database && !options.reuseDatabase) {
+		effective.database = inspection.database; // "postgres" | "mysql"
+	}
+	if (needDetectedStorage && options.storage !== true && !options.reuseStorage) {
+		effective.storage = true;
+	}
+	return effective;
+}
 
 const DEFAULT_REGION = "me-central2";
 
@@ -417,30 +473,63 @@ export function registerUpCommand(program: Command): void {
 					throw new Error("Failed to resolve the target application.");
 				}
 
-				// Redeploy of an existing app: honor an explicit --database/--storage
-				// (or --reuse-*) by attaching an existing project resource, or creating
-				// one only if none exists. Without an explicit flag a redeploy provisions
-				// nothing (unchanged). First-create is handled in the `!reused` block.
-				if (reused && hasExplicitResourceRequest(options)) {
-					emitEvent({ event: "provision_started", database: null, storage: null });
-					await configureOptionalResources(
-						client,
-						profile,
-						app,
-						{
-							database: options.database,
-							databasePlan: options.databasePlan,
-							storage: options.storage,
-							storagePlan: options.storagePlan,
-							reuseDatabase: options.reuseDatabase,
-							reuseStorage: options.reuseStorage,
-							skipDatabase: options.skipDatabase,
-							skipStorage: options.skipStorage,
-						},
-						inspection,
-						{ appReused: true },
-					);
-					emitEvent({ event: "provision_done" });
+				// `tarout up` ensures a REUSED app has the backend the project needs.
+				// A prior run may have created the app but been interrupted before
+				// provisioning (e.g. a billing gate on the app or DB slot), leaving it
+				// to deploy with no DB/storage and boot broken. Detect what's already
+				// wired in from the injected connection env vars and provision only
+				// what's missing; an explicit --database/--storage/--reuse-* is still
+				// honored. Attach is idempotent, so this never duplicates a resource
+				// that's already attached. First-create is handled in the `!reused`
+				// block above.
+				if (reused) {
+					const baseOptions: DeployOptions = {
+						database: options.database,
+						databasePlan: options.databasePlan,
+						storage: options.storage,
+						storagePlan: options.storagePlan,
+						reuseDatabase: options.reuseDatabase,
+						reuseStorage: options.reuseStorage,
+						skipDatabase: options.skipDatabase,
+						skipStorage: options.skipStorage,
+					};
+					let existingKeys: Set<string> | null = new Set<string>();
+					try {
+						const existingVars = await client.envVariable.list.query({
+							applicationId: app.applicationId,
+							includeValues: false,
+						});
+						existingKeys = new Set(
+							(Array.isArray(existingVars) ? existingVars : []).map(
+								(v: { key: string }) => v.key,
+							),
+						);
+					} catch {
+						// Couldn't read env vars → don't guess about attachment; fall back
+						// to the prior explicit-flags-only behavior.
+						existingKeys = null;
+					}
+					const provisionOptions = existingKeys
+						? computeReuseProvisionOptions(existingKeys, baseOptions, inspection)
+						: hasExplicitResourceRequest(baseOptions)
+							? baseOptions
+							: null;
+					if (provisionOptions) {
+						emitEvent({
+							event: "provision_started",
+							database: null,
+							storage: null,
+						});
+						await configureOptionalResources(
+							client,
+							profile,
+							app,
+							provisionOptions,
+							inspection,
+							{ appReused: true },
+						);
+						emitEvent({ event: "provision_done" });
+					}
 				}
 
 				if (source === "github") {
