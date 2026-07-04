@@ -459,10 +459,7 @@ export function registerDbCommands(program: Command) {
 				) {
 					const host =
 						dbDetails.poolerHost || dbDetails.directHost || "localhost";
-					const port =
-						dbDetails.poolerPort ||
-						dbDetails.directPort ||
-						(dbSummary.type === "postgres" ? 5432 : 3306);
+					const port = userFacingDbPort(dbSummary.type, dbDetails);
 					log(`  Host: ${colors.cyan(host)}`);
 					log(`  Port: ${port}`);
 					log(`  Database: ${dbDetails.databaseName}`);
@@ -472,6 +469,23 @@ export function registerDbCommands(program: Command) {
 					log(`  ${colors.dim("Not yet deployed")}`);
 				}
 				log("");
+
+				// External access (Postgres) — surface current state so
+				// `external-access` edits are informed (it preserves unspecified
+				// fields; without this the allowlist is invisible).
+				if (dbSummary.type === "postgres") {
+					const cidrs: string[] = dbDetails.externalAllowedCidrs || [];
+					log(`${colors.bold("External Access")}`);
+					log(
+						`  Enabled: ${dbDetails.externalAccessEnabled ? colors.success("yes") : "no"}`,
+					);
+					log(
+						`  Public (0.0.0.0/0): ${dbDetails.externalPublicAccess ? colors.warn("yes") : "no"}`,
+					);
+					log(`  Require SSL: ${dbDetails.externalSslRequired ? "yes" : "no"}`);
+					log(`  Allowed CIDRs: ${cidrs.length ? cidrs.join(", ") : colors.dim("none")}`);
+					log("");
+				}
 
 				// Connection string
 				if (
@@ -950,10 +964,17 @@ export function registerDbCommands(program: Command) {
 	// ── External access (Postgres) ────────────────────────────────────────────────
 	db.command("external-access")
 		.argument("<db>", "Postgres database ID or name")
-		.description("Configure external access CIDRs (Postgres only)")
+		.description("Configure external access for a Postgres database")
 		.option("--enable", "Enable external access")
 		.option("--disable", "Disable external access")
-		.option("--cidrs <list>", "Comma-separated list of allowed CIDRs")
+		.option(
+			"--cidrs <list>",
+			"Comma-separated allowlist (REPLACES the current list)",
+		)
+		.option("--public", "Allow the whole internet (0.0.0.0/0)")
+		.option("--private", "Restrict to the CIDR allowlist (disable public)")
+		.option("--require-ssl", "Require SSL/TLS")
+		.option("--allow-insecure", "Do not require SSL/TLS")
 		.action(async (dbIdentifier, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
@@ -971,19 +992,53 @@ export function registerDbCommands(program: Command) {
 						ExitCode.INVALID_ARGUMENTS,
 					);
 				}
-				const enabled = options.enable ? true : !options.disable;
+				// The server REPLACES the stored allowlist/public/ssl with whatever
+				// this call sends (an omitted field is wiped to its default). Load the
+				// current state and preserve every field the user didn't explicitly
+				// change — matching the dashboard, which edits the loaded values in
+				// place instead of clearing them.
+				const current: any = await client.postgres.one.query({
+					postgresId: dbSummary.id,
+				});
+				const enabled = options.enable
+					? true
+					: options.disable
+						? false
+						: (current.externalAccessEnabled ?? false);
 				const allowedCidrs = options.cidrs
-					? options.cidrs.split(",").map((c: string) => c.trim())
-					: undefined;
+					? options.cidrs
+							.split(",")
+							.map((c: string) => c.trim())
+							.filter(Boolean)
+					: (current.externalAllowedCidrs ?? []);
+				const isPublic = options.public
+					? true
+					: options.private
+						? false
+						: (current.externalPublicAccess ?? false);
+				const requireSsl = options.requireSsl
+					? true
+					: options.allowInsecure
+						? false
+						: (current.externalSslRequired ?? false);
 				const _updateSpinner = startSpinner("Updating external access...");
 				await client.postgres.updateExternalAccess.mutate({
 					postgresId: dbSummary.id,
 					enabled,
 					allowedCidrs,
+					public: isPublic,
+					requireSsl,
 				} as any);
 				succeedSpinner("External access updated.");
 				if (isJsonMode())
-					outputData({ updated: true, id: dbSummary.id, enabled });
+					outputData({
+						updated: true,
+						id: dbSummary.id,
+						enabled,
+						public: isPublic,
+						requireSsl,
+						allowedCidrs,
+					});
 			} catch (err) {
 				handleError(err);
 			}
@@ -1312,6 +1367,23 @@ function getTypeLabel(type: DatabaseType): string {
 	return labels[type] || type;
 }
 
+// A pooled DB's stored poolerPort is the INTERNAL pgbouncer listen port (used by
+// backups / app env injection); clients always reach the pooler on the standard
+// Postgres/MySQL port. Only non-pooled DBs use the stored direct port. Mirrors
+// the dashboard (show-general-postgres.tsx).
+function userFacingDbPort(type: DatabaseType, details: any): number {
+	const standard = type === "postgres" ? 5432 : 3306;
+	return details.poolerPort ? standard : details.directPort || standard;
+}
+
+// POOLED postgres speaks the pgbouncer protocol (?pgbouncer=true); direct
+// connections request TLS (?sslmode=require).
+function postgresSslParam(details: any): string {
+	return details.connectionMode === "POOLED"
+		? "?pgbouncer=true"
+		: "?sslmode=require";
+}
+
 function getConnectionString(type: DatabaseType, details: any): string {
 	const host = details.poolerHost || details.directHost || "localhost";
 	const user = details.databaseUser || "user";
@@ -1319,11 +1391,11 @@ function getConnectionString(type: DatabaseType, details: any): string {
 
 	switch (type) {
 		case "postgres": {
-			const pgPort = details.poolerPort || details.directPort || 5432;
-			return `postgresql://${user}:****@${host}:${pgPort}/${dbName}`;
+			const pgPort = userFacingDbPort("postgres", details);
+			return `postgresql://${user}:****@${host}:${pgPort}/${dbName}${postgresSslParam(details)}`;
 		}
 		case "mysql": {
-			const myPort = details.poolerPort || details.directPort || 3306;
+			const myPort = userFacingDbPort("mysql", details);
 			return `mysql://${user}:****@${host}:${myPort}/${dbName}`;
 		}
 		default:
@@ -1348,7 +1420,7 @@ function getConnectCommand(
 					"-h",
 					host,
 					"-p",
-					String(details.poolerPort || details.directPort || 5432),
+					String(userFacingDbPort("postgres", details)),
 					"-U",
 					user,
 					"-d",
@@ -1363,7 +1435,7 @@ function getConnectCommand(
 					"-h",
 					host,
 					"-P",
-					String(details.poolerPort || details.directPort || 3306),
+					String(userFacingDbPort("mysql", details)),
 					"-u",
 					user,
 					`-p${password}`,

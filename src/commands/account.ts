@@ -512,9 +512,9 @@ export function registerAccountCommands(program: Command) {
 				table(
 					["ID", "NAME", "EMAIL", "ROLE"],
 					list.map((m: any) => [
-						colors.cyan((m.id || m.userId || "").slice(0, 8)),
-						m.name || "-",
-						m.email || "-",
+						colors.cyan((m.userId || m.user?.id || m.id || "").slice(0, 8)),
+						m.user?.name || "-",
+						m.user?.email || "-",
 						m.role || "-",
 					]),
 				);

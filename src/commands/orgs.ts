@@ -416,7 +416,7 @@ export function registerOrgsCommands(program: Command) {
 					organizationId: org.id,
 					organizationName: org.name,
 					environmentId: defaultEnv?.environmentId,
-					environmentName: defaultEnv?.name || "production",
+					environmentName: envLabel(defaultEnv) || "production",
 				});
 
 				succeedSpinner(`Switched to ${org.name}`);
@@ -426,13 +426,20 @@ export function registerOrgsCommands(program: Command) {
 						organizationId: org.id,
 						organizationName: org.name,
 						environmentId: defaultEnv?.environmentId,
-						environmentName: defaultEnv?.name,
+						environmentName: envLabel(defaultEnv),
 					});
 				} else {
 					quietOutput(org.id);
 					log("");
 					log(`Organization: ${colors.bold(org.name)}`);
-					log(`Environment: ${colors.bold(defaultEnv?.name || "production")}`);
+					log(
+						`Environment: ${colors.bold(envLabel(defaultEnv) || "production")}`,
+					);
+					log(
+						colors.dim(
+							"Note: this updates local CLI defaults only — your API key stays bound to its organization server-side, so resource commands still target that org.",
+						),
+					);
 					log("");
 				}
 			} catch (err) {

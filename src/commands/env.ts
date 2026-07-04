@@ -181,6 +181,9 @@ export function registerEnvCommands(program: Command) {
 					outputData({ key, updated: !!existingVar });
 				} else {
 					quietOutput(key);
+					// create/update persist the value but do not push it to the
+					// running container — it takes effect on the next deploy.
+					log(colors.dim(`Applies on next deploy: tarout deploy ${appIdentifier}`));
 				}
 			} catch (err) {
 				handleError(err);
@@ -192,7 +195,11 @@ export function registerEnvCommands(program: Command) {
 		.command("unset")
 		.argument("<key>", "Variable key to remove")
 		.description("Remove an environment variable")
-		.action(async (key, _options, command) => {
+		.option(
+			"--restart",
+			"Restart the app to apply now (default: apply on next restart)",
+		)
+		.action(async (key, options, command) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
@@ -214,17 +221,24 @@ export function registerEnvCommands(program: Command) {
 					throw new NotFoundError("Application", appIdentifier, suggestions);
 				}
 
+				// Default restart:false to match the dashboard (which never
+				// auto-restarts on an env change); opt in with --restart.
 				await client.envVariable.delete.mutate({
 					applicationId: app.applicationId,
 					key,
+					restart: !!options.restart,
 				});
 
 				succeedSpinner(`Removed ${key}`);
 
 				if (isJsonMode()) {
-					outputData({ key, deleted: true });
+					outputData({ key, deleted: true, restarted: !!options.restart });
 				} else {
 					quietOutput(key);
+					if (!options.restart)
+						log(
+							colors.dim(`Apply now with: tarout apps restart ${appIdentifier}`),
+						);
 				}
 			} catch (err) {
 				handleError(err);
@@ -308,6 +322,10 @@ export function registerEnvCommands(program: Command) {
 		.description("Upload environment variables from .env file")
 		.option("-i, --input <file>", "Input file path", ".env")
 		.option("--replace", "Replace all existing variables (default: merge)")
+		.option(
+			"--restart",
+			"Restart the app to apply now (default: apply on next restart)",
+		)
 		.action(async (options, command) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
@@ -343,6 +361,7 @@ export function registerEnvCommands(program: Command) {
 					content,
 					format: "dotenv",
 					merge: !options.replace,
+					restart: !!options.restart,
 				});
 
 				succeedSpinner(`Imported ${result.imported} variables`);
@@ -354,6 +373,10 @@ export function registerEnvCommands(program: Command) {
 					if (result.skipped > 0) {
 						log(colors.dim(`Skipped ${result.skipped} (already exist)`));
 					}
+					if (!options.restart)
+						log(
+							colors.dim(`Apply now with: tarout apps restart ${appIdentifier}`),
+						);
 				}
 			} catch (err) {
 				handleError(err);
@@ -530,13 +553,25 @@ export function registerEnvCommands(program: Command) {
 					failSpinner();
 					throw new NotFoundError("Application", appIdentifier);
 				}
-				const v = await client.envVariable.getAsString.query({
+				// getAsString returns the FULL env set (the server ignores a `key`
+				// input). Scope to the requested key client-side so this command
+				// doesn't dump every secret when the user asked for one.
+				const raw = await client.envVariable.getAsString.query({
 					applicationId: (app as any).applicationId,
-					key,
 				} as any);
 				succeedSpinner();
-				if (isJsonMode()) outputData(v);
-				else log(typeof v === "string" ? v : JSON.stringify(v));
+				const text = typeof raw === "string" ? raw : String(raw ?? "");
+				const line = text
+					.split("\n")
+					.find((l) => l.trimStart().startsWith(`${key}=`));
+				if (!line) {
+					throw new NotFoundError("Environment variable", key);
+				}
+				if (isJsonMode()) {
+					outputData({ key, value: line.slice(line.indexOf("=") + 1) });
+				} else {
+					log(line.trim());
+				}
 			} catch (err) {
 				handleError(err);
 			}
@@ -569,17 +604,32 @@ export function registerEnvCommands(program: Command) {
 					outputData(result);
 					return;
 				}
-				const list = Array.isArray(result)
-					? result
-					: (result as any)?.variables || [];
+				// Server returns an object keyed by var name; each value is an array
+				// of per-environment records (not a flat array).
+				const byKey =
+					result && typeof result === "object" ? (result as any) : {};
+				const rows: Array<{ key: string; env: string; value: any }> = [];
+				for (const [key, records] of Object.entries(byKey)) {
+					for (const r of Array.isArray(records) ? records : []) {
+						rows.push({
+							key,
+							env:
+								(r as any).environmentName ||
+								(r as any).environmentSlug ||
+								(r as any).environmentId ||
+								"-",
+							value: (r as any).value,
+						});
+					}
+				}
+				if (!rows.length) {
+					log("\nNo environment variables found.\n");
+					return;
+				}
 				log("");
 				table(
 					["KEY", "ENV", "VALUE"],
-					list.map((v: any) => [
-						colors.cyan(v.key || "-"),
-						v.environmentName || v.environment || "-",
-						maskValue(v.value),
-					]),
+					rows.map((v) => [colors.cyan(v.key), v.env, maskValue(v.value)]),
 				);
 				log("");
 			} catch (err) {
@@ -593,6 +643,10 @@ export function registerEnvCommands(program: Command) {
 		.argument("<app>", "App ID or name")
 		.description("Bulk create/update environment variables from a JSON object")
 		.option("--vars <json>", "JSON object of key-value pairs")
+		.option(
+			"--restart",
+			"Restart the app to apply now (default: apply on next restart)",
+		)
 		.action(async (appIdentifier, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
@@ -621,9 +675,18 @@ export function registerEnvCommands(program: Command) {
 						key,
 						value,
 					})),
+					restart: !!options.restart,
 				} as any);
 				succeedSpinner(`Bulk set ${Object.keys(vars).length} variable(s)!`);
-				if (isJsonMode()) outputData({ updated: Object.keys(vars).length });
+				if (isJsonMode())
+					outputData({
+						updated: Object.keys(vars).length,
+						restarted: !!options.restart,
+					});
+				else if (!options.restart)
+					log(
+						colors.dim(`Apply now with: tarout apps restart ${appIdentifier}`),
+					);
 			} catch (err) {
 				handleError(err);
 			}

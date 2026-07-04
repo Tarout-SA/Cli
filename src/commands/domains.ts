@@ -1199,8 +1199,10 @@ export function registerDomainsCommands(program: Command) {
 				const r = result as any;
 				log("");
 				log(colors.bold("Renewal Payment Created"));
-				if (r.checkoutUrl) log(`  Checkout: ${colors.cyan(r.checkoutUrl)}`);
-				if (r.orderId) log(`  Order ID: ${colors.dim(r.orderId)}`);
+				if (r.amount !== undefined) log(`  Amount: ${r.amount} SAR`);
+				if (r.paymentUrl) log(`  Payment URL: ${colors.cyan(r.paymentUrl)}`);
+				log("");
+				log("Open the payment URL above to complete the renewal.");
 				log("");
 			} catch (err) {
 				failSpinner();
@@ -1970,7 +1972,7 @@ export function registerDomainsCommands(program: Command) {
 					await client.dns.update.mutate({
 						recordId,
 						name: options.name,
-						value: options.content,
+						content: options.content,
 						ttl: options.ttl ? Number.parseInt(options.ttl) : undefined,
 					} as any);
 					succeedSpinner("DNS record updated.");

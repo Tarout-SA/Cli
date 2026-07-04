@@ -115,7 +115,7 @@ export function registerMonitorCommands(program: Command) {
 						m.name,
 						truncate(m.url || "", 35),
 						m.checkInterval || "5m",
-						formatMonitorStatus(m.status),
+						formatMonitorStatus(m.lastStatus),
 						m.enabled !== false ? colors.success("yes") : colors.dim("no"),
 					]),
 				);
@@ -254,23 +254,25 @@ export function registerMonitorCommands(program: Command) {
 				if (details) {
 					log(colors.bold(details.name));
 					log(`  URL: ${colors.cyan(details.url)}`);
-					log(`  Status: ${formatMonitorStatus(details.status)}`);
+					log(`  Status: ${formatMonitorStatus(details.lastStatus)}`);
 					log("");
 				}
 
 				if (stats) {
 					log(colors.bold("Uptime Statistics"));
-					if (stats.uptime24h !== undefined) {
-						log(`  24h uptime: ${formatUptime(stats.uptime24h)}`);
+					if (stats.uptimePercentage24h !== undefined) {
+						log(`  24h uptime: ${formatUptime(stats.uptimePercentage24h)}`);
 					}
-					if (stats.uptime7d !== undefined) {
-						log(`  7d uptime: ${formatUptime(stats.uptime7d)}`);
+					if (stats.uptimePercentage7d !== undefined) {
+						log(`  7d uptime: ${formatUptime(stats.uptimePercentage7d)}`);
 					}
-					if (stats.uptime30d !== undefined) {
-						log(`  30d uptime: ${formatUptime(stats.uptime30d)}`);
+					if (stats.uptimePercentage30d !== undefined) {
+						log(`  30d uptime: ${formatUptime(stats.uptimePercentage30d)}`);
 					}
-					if (stats.avgResponseTime !== undefined) {
-						log(`  Avg response: ${colors.cyan(`${stats.avgResponseTime}ms`)}`);
+					if (stats.averageResponseTime !== undefined) {
+						log(
+							`  Avg response: ${colors.cyan(`${stats.averageResponseTime}ms`)}`,
+						);
 					}
 					if (stats.totalChecks !== undefined) {
 						log(`  Total checks: ${stats.totalChecks}`);
@@ -445,12 +447,10 @@ export function registerMonitorCommands(program: Command) {
 					["TIME", "STATUS", "CODE", "RESPONSE TIME", "ERROR"],
 					items.map((l: any) => [
 						formatDateTime(l.checkedAt || l.createdAt),
-						l.isUp || l.status === "up"
-							? colors.success("up")
-							: colors.error("down"),
+						l.success ? colors.success("up") : colors.error("down"),
 						String(l.statusCode || l.httpStatus || "-"),
 						l.responseTime ? `${l.responseTime}ms` : colors.dim("-"),
-						l.error || l.errorMessage || colors.dim("-"),
+						l.errorMessage || l.error || colors.dim("-"),
 					]),
 				);
 				log("");
