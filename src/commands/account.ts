@@ -420,8 +420,13 @@ export function registerAccountCommands(program: Command) {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching container metrics...");
-				const metrics = await client.user.getContainerMetrics.query({
+				// getContainerMetrics keys on the Coolify appName slug, not the
+				// application id — resolve the app record first.
+				const app = await client.application.one.query({
 					applicationId: appId,
+				});
+				const metrics = await client.user.getContainerMetrics.query({
+					appName: (app as any)?.appName,
 				} as any);
 				succeedSpinner();
 				if (isJsonMode()) {
@@ -444,13 +449,18 @@ export function registerAccountCommands(program: Command) {
 	// Check user organizations
 	account
 		.command("check-orgs")
-		.description("Check which organizations the current user belongs to")
-		.action(async () => {
+		.argument("[user-id]", "User ID to check (defaults to the current user)")
+		.description("Check which organizations a user belongs to (org owner only)")
+		.action(async (userIdArg) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
 				const _spinner = startSpinner("Checking organizations...");
-				const result = await client.user.checkUserOrganizations.query();
+				// Server requires a userId; default to the signed-in user.
+				const userId = userIdArg || (await client.user.get.query())?.id;
+				const result = await client.user.checkUserOrganizations.query({
+					userId,
+				} as any);
 				succeedSpinner();
 				if (isJsonMode()) {
 					outputData(result);
@@ -570,7 +580,10 @@ export function registerAccountCommands(program: Command) {
 					));
 				const client = getApiClient();
 				const _spinner = startSpinner("Assigning permissions...");
-				await client.user.assignPermissions.mutate({ userId, role } as any);
+				await client.user.assignPermissions.mutate({
+					id: userId,
+					role,
+				} as any);
 				succeedSpinner("Permissions updated!");
 				if (isJsonMode()) outputData({ userId, role });
 			} catch (err) {
@@ -578,37 +591,11 @@ export function registerAccountCommands(program: Command) {
 			}
 		});
 
-	// Send org invitation (org owner)
-	account
-		.command("invite")
-		.argument("<email>", "Email address to invite")
-		.option(
-			"--role <role>",
-			"Role for the invited user: admin, member",
-			"member",
-		)
-		.description("Send an organization invitation (org owner only)")
-		.action(async (email, options) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-				const client = getApiClient();
-				const _spinner = startSpinner("Sending invitation...");
-				await client.user.sendInvitation.mutate({
-					email,
-					role: options.role,
-				} as any);
-				succeedSpinner("Invitation sent!");
-				if (isJsonMode())
-					outputData({ invited: true, email, role: options.role });
-				else {
-					log("");
-					log(colors.success(`Invitation sent to ${email}.`));
-					log("");
-				}
-			} catch (err) {
-				handleError(err);
-			}
-		});
+	// NOTE: `account invite` was removed. Creating an organization invitation
+	// goes through better-auth (`authClient.organization.inviteMember`), which is
+	// not reachable over the CLI's x-api-key transport, and `user.sendInvitation`
+	// only *re-sends* an existing invitation. Invite members from the dashboard.
+	// TODO(platform): expose an API-key-callable invite mutation for CLI parity.
 
 	// Get user backups (org owner)
 	account

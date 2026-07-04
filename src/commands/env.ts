@@ -697,10 +697,14 @@ export function registerEnvCommands(program: Command) {
 					}
 				}
 				const _spinner = startSpinner("Copying variables...");
+				// Server contract (apiCopyEnvVariables) is app-to-app with optional
+				// env scoping. The CLI copies within one app between two envs, so
+				// source and target application are the same.
 				await client.envVariable.copy.mutate({
-					applicationId: (app as any).applicationId,
-					fromEnvironmentId: fromEnvId,
-					toEnvironmentId: toEnvId,
+					sourceApplicationId: (app as any).applicationId,
+					targetApplicationId: (app as any).applicationId,
+					sourceEnvironmentId: fromEnvId,
+					targetEnvironmentId: toEnvId,
 				} as any);
 				succeedSpinner("Variables copied!");
 				if (isJsonMode()) outputData({ copied: true });

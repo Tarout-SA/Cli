@@ -6,6 +6,7 @@ import {
 	AuthError,
 	findSimilar,
 	handleError,
+	InvalidArgumentError,
 	NotFoundError,
 } from "../lib/errors.js";
 import {
@@ -575,7 +576,7 @@ export function registerAppsCommands(program: Command) {
 					owner,
 					buildPath: options.buildPath || "/",
 					githubId: githubId || "",
-					watchPaths: null,
+					watchPaths: [],
 					enableSubmodules: false,
 				});
 
@@ -605,6 +606,11 @@ export function registerAppsCommands(program: Command) {
 		.option("-r, --repo <namespace/repo>", "Repository path")
 		.option("-b, --branch <branch>", "Branch to deploy", "main")
 		.option("--provider-id <id>", "GitLab connection ID")
+		.option(
+			"--project-id <id>",
+			"GitLab numeric project ID (auto-resolved if omitted)",
+			(v) => Number.parseInt(v, 10),
+		)
 		.option("--build-path <path>", "Build path", "/")
 		.action(async (appIdentifier, options) => {
 			try {
@@ -655,6 +661,36 @@ export function registerAppsCommands(program: Command) {
 					}
 				}
 
+				// gitlabProjectId is a REQUIRED number server-side (the repo's
+				// numeric GitLab id). Resolve it from the connection's repo list
+				// (mirrors the dashboard, which sends the selected repo's id).
+				let gitlabProjectId: number | null = options.projectId ?? null;
+				if (gitlabProjectId == null && gitlabId) {
+					try {
+						const repos = await client.gitlab.getGitlabRepositories.query({
+							gitlabId,
+						});
+						const list = Array.isArray(repos)
+							? repos
+							: (repos as any)?.repositories || [];
+						const match = list.find(
+							(r: any) =>
+								r.path_with_namespace === repo ||
+								r.pathWithNamespace === repo ||
+								r.name === gitlabRepository ||
+								r.path === gitlabRepository,
+						);
+						if (match) gitlabProjectId = match.id ?? match.projectId ?? null;
+					} catch {
+						// fall through to the explicit error below
+					}
+				}
+				if (gitlabProjectId == null) {
+					throw new InvalidArgumentError(
+						"Could not resolve the GitLab project id. Pass it with --project-id <id> (shown on your GitLab project page).",
+					);
+				}
+
 				const _configSpinner = startSpinner("Connecting GitLab repository...");
 
 				await client.application.saveGitlabProvider.mutate({
@@ -664,9 +700,9 @@ export function registerAppsCommands(program: Command) {
 					gitlabBranch: options.branch || "main",
 					gitlabBuildPath: options.buildPath || "/",
 					gitlabId: gitlabId || "",
-					gitlabProjectId: null,
+					gitlabProjectId,
 					gitlabPathNamespace: repo,
-					watchPaths: null,
+					watchPaths: [],
 					enableSubmodules: false,
 				});
 
@@ -789,8 +825,10 @@ export function registerAppsCommands(program: Command) {
 					customGitUrl: gitUrl,
 					customGitBranch: options.branch || "main",
 					customGitBuildPath: options.buildPath || "/",
-					customGitSSHKeyId: options.sshKey || null,
-					watchPaths: null,
+					// customGitSSHKeyId is optional (string) — omit it entirely when
+					// unset; sending null fails validation (optional ≠ nullable).
+					...(options.sshKey ? { customGitSSHKeyId: options.sshKey } : {}),
+					watchPaths: [],
 					enableSubmodules: false,
 				});
 
@@ -879,6 +917,8 @@ export function registerAppsCommands(program: Command) {
 			"Build type: nixpacks, dockerfile, dockercompose, static",
 		)
 		.option("--dockerfile <path>", "Path to Dockerfile (for dockerfile type)")
+		.option("--docker-context <path>", "Docker build context path")
+		.option("--railpack-version <version>", "Railpack version (nixpacks builds)")
 		.option("--publish-dir <dir>", "Publish directory (for static sites)")
 		.option("--static", "Mark as a static SPA")
 		.action(async (appIdentifier, options) => {
@@ -919,6 +959,11 @@ export function registerAppsCommands(program: Command) {
 					applicationId: app.applicationId,
 					buildType,
 					dockerfile: options.dockerfile || "/Dockerfile",
+					// dockerContextPath + railpackVersion are required server-side;
+					// mirror the dashboard's defaults so non-Docker build types still
+					// validate.
+					dockerContextPath: options.dockerContext || "",
+					railpackVersion: options.railpackVersion || "0.2.2",
 					publishDirectory: options.publishDir || "/",
 					isStaticSpa: options.static || false,
 				});
@@ -1012,7 +1057,7 @@ export function registerAppsCommands(program: Command) {
 					bitbucketBranch: options.branch || "main",
 					bitbucketBuildPath: options.buildPath || "/",
 					bitbucketId: bitbucketId || "",
-					watchPaths: null,
+					watchPaths: [],
 					enableSubmodules: false,
 				});
 
@@ -1081,7 +1126,7 @@ export function registerAppsCommands(program: Command) {
 					giteaBranch: options.branch || "main",
 					giteaBuildPath: options.buildPath || "/",
 					giteaId,
-					watchPaths: null,
+					watchPaths: [],
 					enableSubmodules: false,
 				});
 
@@ -1991,14 +2036,28 @@ export function registerAppsCommands(program: Command) {
 			}
 		});
 
-	// Save environment settings for an application
+	// NOTE: `apps save-env-settings` was removed. It advertised port /
+	// health-check / restart-policy knobs the platform does not support —
+	// application.saveEnvironment only persists env vars + build args (which the
+	// CLI already manages via `tarout env`). Neither surface exposes those knobs.
+
+	// Get a pre-signed upload URL for drag-and-drop deployment
 	apps
-		.command("save-env-settings")
+		.command("upload-url")
 		.argument("<app>", "App ID or name")
-		.option("--port <port>", "Application port", Number.parseInt)
-		.option("--health-path <path>", "Health check path")
-		.option("--restart <policy>", "Restart policy: always, on-failure, never")
-		.description("Save environment/runtime settings for an application")
+		.requiredOption(
+			"--file-name <name>",
+			"Name of the file to upload (e.g. source.zip)",
+		)
+		.requiredOption("--file-size <bytes>", "Size of the file in bytes", (v) =>
+			Number.parseInt(v, 10),
+		)
+		.option(
+			"--content-type <type>",
+			"MIME type of the upload",
+			"application/zip",
+		)
+		.description("Get a pre-signed URL to upload a zip/tar for deployment")
 		.action(async (appIdentifier, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
@@ -2013,43 +2072,12 @@ export function registerAppsCommands(program: Command) {
 					failSpinner();
 					throw new NotFoundError("Application", appIdentifier);
 				}
-				const _saveSpinner = startSpinner("Saving environment settings...");
-				await client.application.saveEnvironment.mutate({
-					applicationId: app.applicationId,
-					port: options.port,
-					healthCheckPath: options.healthPath,
-					restartPolicy: options.restart,
-				} as any);
-				succeedSpinner("Environment settings saved!");
-				if (isJsonMode())
-					outputData({ saved: true, applicationId: app.applicationId });
-			} catch (err) {
-				handleError(err);
-			}
-		});
-
-	// Get a pre-signed upload URL for drag-and-drop deployment
-	apps
-		.command("upload-url")
-		.argument("<app>", "App ID or name")
-		.description("Get a pre-signed URL to upload a zip/tar for deployment")
-		.action(async (appIdentifier) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-				const client = getApiClient();
-				const _spinner = startSpinner("Fetching apps...");
-				const apps2 = await client.application.allByOrganization.query();
-				const appList = Array.isArray(apps2)
-					? apps2
-					: (apps2 as any)?.applications || [];
-				const app = findApp(appList, appIdentifier);
-				if (!app) {
-					failSpinner();
-					throw new NotFoundError("Application", appIdentifier);
-				}
 				const _urlSpinner = startSpinner("Getting upload URL...");
-				const result = await client.application.getDropUploadUrl.query({
+				const result = await client.application.getDropUploadUrl.mutate({
 					applicationId: app.applicationId,
+					fileName: options.fileName,
+					fileSize: options.fileSize,
+					contentType: options.contentType,
 				} as any);
 				succeedSpinner();
 				if (isJsonMode()) {
@@ -2060,6 +2088,8 @@ export function registerAppsCommands(program: Command) {
 				log("");
 				log(colors.bold("Upload URL"));
 				log(`  URL: ${colors.cyan(r.uploadUrl || r.url || "-")}`);
+				if (r.objectName)
+					log(`  Object: ${colors.dim(r.objectName)} (pass to complete-upload)`);
 				if (r.expiresAt) log(`  Expires: ${r.expiresAt}`);
 				log("");
 			} catch (err) {
@@ -2071,9 +2101,17 @@ export function registerAppsCommands(program: Command) {
 	apps
 		.command("complete-upload")
 		.argument("<app>", "App ID or name")
-		.argument("<upload-key>", "Upload key returned from the upload URL")
+		.requiredOption(
+			"--object-name <name>",
+			"Object name returned by `upload-url`",
+		)
+		.requiredOption("--file-name <name>", "Uploaded file name")
+		.requiredOption("--file-size <bytes>", "Uploaded file size in bytes", (v) =>
+			Number.parseInt(v, 10),
+		)
+		.option("--build-path <path>", "Build path within the archive", "/")
 		.description("Finalize a drag-and-drop upload and trigger deployment")
-		.action(async (appIdentifier, uploadKey) => {
+		.action(async (appIdentifier, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
@@ -2090,7 +2128,10 @@ export function registerAppsCommands(program: Command) {
 				const _completeSpinner = startSpinner("Completing upload...");
 				const result = await client.application.completeDropUpload.mutate({
 					applicationId: app.applicationId,
-					uploadKey,
+					objectName: options.objectName,
+					fileName: options.fileName,
+					fileSize: options.fileSize,
+					dropBuildPath: options.buildPath || "/",
 				} as any);
 				succeedSpinner("Upload complete — deployment triggered!");
 				if (isJsonMode()) outputData(result);

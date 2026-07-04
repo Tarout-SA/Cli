@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import { getApiClient } from "../lib/api.js";
 import { isLoggedIn } from "../lib/config.js";
-import { AuthError, handleError } from "../lib/errors.js";
+import { AuthError, handleError, InvalidArgumentError } from "../lib/errors.js";
 import {
 	colors,
 	isJsonMode,
@@ -102,11 +102,11 @@ export function registerDestinationsCommands(program: Command) {
 		.option("-n, --name <name>", "Destination name")
 		.option(
 			"-p, --provider <provider>",
-			"Storage provider (s3, gcs, r2, wasabi, minio)",
+			"Storage provider (s3, gcs, cloudflare-r2, wasabi, minio)",
 		)
 		.option("-b, --bucket <bucket>", "Bucket name")
 		.option("-r, --region <region>", "Region")
-		.option("-e, --endpoint <url>", "Custom endpoint URL")
+		.option("-e, --endpoint <url>", "Endpoint URL")
 		.option("--access-key <key>", "Access key ID")
 		.option("--secret-key <secret>", "Secret access key")
 		.action(
@@ -134,7 +134,7 @@ export function registerDestinationsCommands(program: Command) {
 							[
 								{ name: "S3 (AWS)", value: "s3" },
 								{ name: "GCS (Google Cloud)", value: "gcs" },
-								{ name: "R2 (Cloudflare)", value: "r2" },
+								{ name: "R2 (Cloudflare)", value: "cloudflare-r2" },
 								{ name: "Wasabi", value: "wasabi" },
 								{ name: "MinIO (custom)", value: "minio" },
 							],
@@ -149,20 +149,26 @@ export function registerDestinationsCommands(program: Command) {
 							field: "bucket",
 							flag: "--bucket",
 						}));
+					// region and endpoint are REQUIRED by the server (z.string().min(1)).
+					// Prompt/validate instead of coercing blanks to undefined.
 					const region =
 						options.region ||
-						(await input("Region (or leave blank):", undefined, {
+						(await input("Region (e.g. auto, us-east-1):", undefined, {
 							field: "region",
 							flag: "--region",
-						})) ||
-						undefined;
+						}));
+					if (!region) {
+						throw new InvalidArgumentError("--region is required.");
+					}
 					const endpoint =
 						options.endpoint ||
-						(await input("Custom endpoint URL (or leave blank):", undefined, {
+						(await input("Endpoint URL:", undefined, {
 							field: "endpoint",
 							flag: "--endpoint",
-						})) ||
-						undefined;
+						}));
+					if (!endpoint) {
+						throw new InvalidArgumentError("--endpoint is required.");
+					}
 					const accessKey =
 						options.accessKey ||
 						(await input("Access Key ID:", undefined, {
@@ -325,16 +331,39 @@ export function registerDestinationsCommands(program: Command) {
 					if (!isLoggedIn()) throw new AuthError();
 					const provider =
 						options.provider ||
-						(await input("Storage provider (s3/gcs/r2):", undefined, {
-							field: "provider",
-							flag: "--provider",
-						}));
+						(await input(
+							"Storage provider (s3/gcs/cloudflare-r2):",
+							undefined,
+							{
+								field: "provider",
+								flag: "--provider",
+							},
+						));
 					const bucket =
 						options.bucket ||
 						(await input("Bucket name:", undefined, {
 							field: "bucket",
 							flag: "--bucket",
 						}));
+					// region and endpoint are REQUIRED by testCredentials (z.string()).
+					const region =
+						options.region ||
+						(await input("Region (e.g. auto, us-east-1):", undefined, {
+							field: "region",
+							flag: "--region",
+						}));
+					if (!region) {
+						throw new InvalidArgumentError("--region is required.");
+					}
+					const endpoint =
+						options.endpoint ||
+						(await input("Endpoint URL:", undefined, {
+							field: "endpoint",
+							flag: "--endpoint",
+						}));
+					if (!endpoint) {
+						throw new InvalidArgumentError("--endpoint is required.");
+					}
 					const accessKey =
 						options.accessKey ||
 						(await input("Access Key ID:", undefined, {
@@ -354,8 +383,8 @@ export function registerDestinationsCommands(program: Command) {
 					const result = await client.destination.testCredentials.mutate({
 						provider,
 						bucket,
-						region: options.region,
-						endpoint: options.endpoint,
+						region,
+						endpoint,
 						accessKey,
 						secretAccessKey,
 					} as any);

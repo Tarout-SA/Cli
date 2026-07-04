@@ -5,6 +5,7 @@ import {
 	AuthError,
 	findSimilar,
 	handleError,
+	InvalidArgumentError,
 	NotFoundError,
 } from "../lib/errors.js";
 import {
@@ -218,9 +219,10 @@ export function registerOrgsCommands(program: Command) {
 				const client = getApiClient();
 				const _spinner = startSpinner("Transferring ownership...");
 
+				// Server derives the org from the session and takes only the new
+				// owner's id (`{ newOwnerId }`).
 				await client.organization.transferOwnership.mutate({
-					organizationId: profile.organizationId,
-					userId,
+					newOwnerId: userId,
 				});
 
 				succeedSpinner("Ownership transferred!");
@@ -544,7 +546,7 @@ export function registerEnvsCommands(program: Command) {
 					["ID", "NAME", "ACTIVE"],
 					environments.map((env: any) => [
 						colors.cyan(env.environmentId.slice(0, 8)),
-						env.name,
+						envLabel(env),
 						env.environmentId === profile?.environmentId
 							? colors.success("*")
 							: "",
@@ -577,10 +579,21 @@ export function registerEnvsCommands(program: Command) {
 				}
 
 				const client = getApiClient();
+				// Server requires a project scope + displayName (validations/
+				// environment.ts `apiCreateEnvironment`); it derives the org from
+				// the session and generates a slug from displayName.
+				const profile = getCurrentProfile();
+				const projectId = profile?.projectId;
+				if (!projectId) {
+					throw new InvalidArgumentError(
+						"No active project. Select one with `tarout projects use <project>` before creating an environment.",
+					);
+				}
 				const _spinner = startSpinner("Creating environment...");
 
 				const env = await client.environment.create.mutate({
-					name: envName,
+					projectId,
+					displayName: envName,
 				});
 
 				succeedSpinner(`Environment "${envName}" created!`);
@@ -592,10 +605,10 @@ export function registerEnvsCommands(program: Command) {
 
 				box("Environment Created", [
 					`ID: ${colors.cyan(env.environmentId)}`,
-					`Name: ${env.name}`,
+					`Name: ${envLabel(env)}`,
 				]);
 
-				log(`Switch to it: ${colors.dim(`tarout envs switch ${env.name}`)}`);
+				log(`Switch to it: ${colors.dim(`tarout envs switch ${envLabel(env)}`)}`);
 				log("");
 			} catch (err) {
 				handleError(err);
@@ -622,7 +635,7 @@ export function registerEnvsCommands(program: Command) {
 					failSpinner();
 					const suggestions = findSimilar(
 						envIdentifier,
-						environments.map((e: any) => e.name),
+						environments.map((e: any) => envLabel(e)),
 					);
 					throw new NotFoundError("Environment", envIdentifier, suggestions);
 				}
@@ -631,7 +644,7 @@ export function registerEnvsCommands(program: Command) {
 
 				if (!shouldSkipConfirmation()) {
 					log("");
-					log(`Environment: ${colors.bold(env.name)}`);
+					log(`Environment: ${colors.bold(envLabel(env))}`);
 					log(`ID: ${colors.dim(env.environmentId)}`);
 					log("");
 					log(
@@ -640,14 +653,14 @@ export function registerEnvsCommands(program: Command) {
 					log("");
 
 					const confirmed = await confirm(
-						`Delete environment "${env.name}"?`,
+						`Delete environment "${envLabel(env)}"?`,
 						false,
 						{
 							field: "confirm_delete_environment",
 							flag: "--yes",
 							context: {
 								environmentId: env.environmentId,
-								environmentName: env.name,
+								environmentName: envLabel(env),
 							},
 						},
 					);
@@ -694,7 +707,7 @@ export function registerEnvsCommands(program: Command) {
 					failSpinner();
 					const suggestions = findSimilar(
 						envIdentifier,
-						environments.map((e: any) => e.name),
+						environments.map((e: any) => envLabel(e)),
 					);
 					throw new NotFoundError("Environment", envIdentifier, suggestions);
 				}
@@ -703,20 +716,20 @@ export function registerEnvsCommands(program: Command) {
 				// In full implementation, this would call a tRPC endpoint to update session
 				updateProfile({
 					environmentId: env.environmentId,
-					environmentName: env.name,
+					environmentName: envLabel(env),
 				});
 
-				succeedSpinner(`Switched to ${env.name}`);
+				succeedSpinner(`Switched to ${envLabel(env)}`);
 
 				if (isJsonMode()) {
 					outputData({
 						environmentId: env.environmentId,
-						environmentName: env.name,
+						environmentName: envLabel(env),
 					});
 				} else {
 					quietOutput(env.environmentId);
 					log("");
-					log(`Environment: ${colors.bold(env.name)}`);
+					log(`Environment: ${colors.bold(envLabel(env))}`);
 					log("");
 				}
 			} catch (err) {
@@ -750,7 +763,7 @@ export function registerEnvsCommands(program: Command) {
 				}
 				const e = data as any;
 				log("");
-				log(colors.bold(e.name || envIdentifier));
+				log(colors.bold(e.displayName || e.slug || envIdentifier));
 				log(`  Slug:       ${e.slug || "-"}`);
 				log(`  Protected:  ${e.isProtected ? colors.warn("yes") : "no"}`);
 				log(`  Default:    ${e.isDefault ? colors.success("yes") : "no"}`);
@@ -824,7 +837,7 @@ export function registerEnvsCommands(program: Command) {
 				await client.environment.setDefault.mutate({
 					environmentId: env.environmentId,
 				});
-				succeedSpinner(`${env.name} is now the default environment.`);
+				succeedSpinner(`${envLabel(env)} is now the default environment.`);
 				if (isJsonMode()) {
 					outputData({ default: true, environmentId: env.environmentId });
 				}
@@ -859,7 +872,7 @@ export function registerEnvsCommands(program: Command) {
 				}
 				const s = data as any;
 				log("");
-				log(colors.bold(env.name));
+				log(colors.bold(envLabel(env)));
 				log(`  Applications: ${colors.cyan(String(s.applications || 0))}`);
 				log(`  Databases:    ${colors.cyan(String(s.databases || 0))}`);
 				log(`  Domains:      ${colors.cyan(String(s.domains || 0))}`);
@@ -888,7 +901,7 @@ export function registerEnvsCommands(program: Command) {
 				const e = data as any;
 				log("");
 				log(colors.bold("Active Environment"));
-				log(`  Name: ${e.name || "-"}`);
+				log(`  Name: ${e.displayName || e.slug || "-"}`);
 				log(`  Slug: ${e.slug || "-"}`);
 				log(`  ID:   ${colors.dim(e.environmentId || "-")}`);
 				log("");
@@ -928,8 +941,8 @@ export function registerEnvsCommands(program: Command) {
 					["ID", "NAME", "TYPE"],
 					envList.map((e: any) => [
 						colors.cyan((e.environmentId || "").slice(0, 8)),
-						e.name || "-",
-						e.type || e.slug || "-",
+						envLabel(e) || "-",
+						e.slug || "-",
 					]),
 				);
 				log("");
@@ -961,9 +974,9 @@ export function registerEnvsCommands(program: Command) {
 				await client.environment.setActive.mutate({
 					environmentId: env.environmentId,
 				} as any);
-				succeedSpinner(`Environment "${env.name}" is now active!`);
+				succeedSpinner(`Environment "${envLabel(env)}" is now active!`);
 				if (isJsonMode())
-					outputData({ environmentId: env.environmentId, name: env.name });
+					outputData({ environmentId: env.environmentId, name: envLabel(env) });
 			} catch (err) {
 				handleError(err);
 			}
@@ -1000,13 +1013,20 @@ function findOrg(orgs: any[], identifier: string) {
 	);
 }
 
+// Environment rows expose `displayName` and `slug` (there is no `name` field);
+// use this everywhere a human-readable environment label is shown.
+function envLabel(env: any): string {
+	return env?.displayName || env?.slug || env?.environmentId || "";
+}
+
 function findEnv(envs: any[], identifier: string) {
 	const lowerIdentifier = identifier.toLowerCase();
 
 	return envs.find(
 		(env) =>
 			env.environmentId === identifier ||
-			env.environmentId.startsWith(identifier) ||
-			env.name.toLowerCase() === lowerIdentifier,
+			env.environmentId?.startsWith(identifier) ||
+			env.slug?.toLowerCase() === lowerIdentifier ||
+			env.displayName?.toLowerCase() === lowerIdentifier,
 	);
 }

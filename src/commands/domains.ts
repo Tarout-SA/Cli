@@ -31,6 +31,55 @@ import {
 	updateSpinner,
 } from "../utils/spinner.js";
 
+// `createRegistrationPayment` requires a full registrant `contact`
+// (registrantContactSchema). Build it from `--contact <json>`, individual
+// `--first-name/...` flags, or interactive prompts for any missing field.
+// address2 is the only optional field.
+async function collectRegistrantContact(options: any) {
+	let base: Record<string, any> = {};
+	if (options.contact) {
+		try {
+			base = JSON.parse(options.contact);
+		} catch {
+			throw new InvalidArgumentError("--contact must be valid JSON.");
+		}
+	}
+	const contact: Record<string, any> = {
+		firstName: base.firstName ?? options.firstName,
+		lastName: base.lastName ?? options.lastName,
+		email: base.email ?? options.email,
+		phone: base.phone ?? options.phone,
+		address1: base.address1 ?? options.address1,
+		address2: base.address2 ?? options.address2,
+		city: base.city ?? options.city,
+		state: base.state ?? options.state,
+		zip: base.zip ?? options.zip,
+		country: base.country ?? options.country,
+	};
+	const required: Array<[string, string, string]> = [
+		["firstName", "First name:", "--first-name"],
+		["lastName", "Last name:", "--last-name"],
+		["email", "Email:", "--email"],
+		["phone", "Phone (e.g. +966500000000):", "--phone"],
+		["address1", "Address line 1:", "--address1"],
+		["city", "City:", "--city"],
+		["state", "State/Region:", "--state"],
+		["zip", "Postal/ZIP code:", "--zip"],
+		["country", "Country (2-letter ISO, e.g. SA):", "--country"],
+	];
+	for (const [key, prompt, flag] of required) {
+		if (!contact[key]) {
+			contact[key] = await input(prompt, undefined, {
+				field: `registrant_${key}`,
+				flag,
+			});
+		}
+	}
+	if (contact.country) contact.country = String(contact.country).toUpperCase();
+	if (!contact.address2) contact.address2 = undefined;
+	return contact;
+}
+
 export function registerDomainsCommands(program: Command) {
 	const domains = program
 		.command("domains")
@@ -106,7 +155,29 @@ export function registerDomainsCommands(program: Command) {
 		.command("register")
 		.argument("<domain>", "Domain name to register (e.g., example.com)")
 		.description("Purchase a domain via Name.com")
-		.action(async (domainName) => {
+		.option(
+			"--years <n>",
+			"Registration length in years (1-10)",
+			(v) => Number.parseInt(v, 10),
+			1,
+		)
+		.option("--no-privacy", "Disable WHOIS privacy protection")
+		.option("--no-auto-renew", "Disable auto-renewal")
+		.option(
+			"--contact <json>",
+			"Registrant contact as JSON: {firstName,lastName,email,phone,address1,address2?,city,state,zip,country}",
+		)
+		.option("--first-name <name>", "Registrant first name")
+		.option("--last-name <name>", "Registrant last name")
+		.option("--email <email>", "Registrant email")
+		.option("--phone <phone>", "Registrant phone (e.g. +966500000000)")
+		.option("--address1 <address>", "Registrant address line 1")
+		.option("--address2 <address>", "Registrant address line 2")
+		.option("--city <city>", "Registrant city")
+		.option("--state <state>", "Registrant state/region")
+		.option("--zip <zip>", "Registrant postal/ZIP code")
+		.option("--country <code>", "Registrant country (2-letter ISO code, e.g. SA)")
+		.action(async (domainName, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
@@ -168,14 +239,17 @@ export function registerDomainsCommands(program: Command) {
 					}
 				}
 
+				const contact = await collectRegistrantContact(options);
+
 				const _paySpinner = startSpinner("Creating payment link...");
 
 				const payment =
 					await client.domainRegistrar.createRegistrationPayment.mutate({
 						domainName,
-						years: 1,
-						privacyEnabled: true,
-						autoRenew: true,
+						years: options.years ?? 1,
+						privacyEnabled: options.privacy !== false,
+						autoRenew: options.autoRenew !== false,
+						contact,
 					});
 
 				succeedSpinner();

@@ -3,6 +3,7 @@ import { getApiClient } from "../lib/api.js";
 import { getCurrentProfile, isLoggedIn } from "../lib/config.js";
 import {
 	AuthError,
+	CliError,
 	findSimilar,
 	handleError,
 	NotFoundError,
@@ -113,7 +114,6 @@ export function registerStorageCommands(program: Command) {
 			"-p, --plan <plan>",
 			"Plan: free, starter, standard, or pro (defaults to this project's entitled tier)",
 		)
-		.option("--public", "Enable public read access")
 		.option("-d, --description <text>", "Bucket description")
 		.action(async (name, options) => {
 			try {
@@ -169,11 +169,13 @@ export function registerStorageCommands(program: Command) {
 
 				const _spinner = startSpinner("Creating storage bucket...");
 
+				// Managed shared storage is always private — the server rejects
+				// publicAccess:true (use signed URLs / a gateway endpoint instead).
 				const bucket = await client.storage.create.mutate({
 					name: bucketName,
 					plan,
 					description: options.description,
-					publicAccess: options.public || false,
+					publicAccess: false,
 				});
 
 				succeedSpinner("Storage bucket created!");
@@ -191,7 +193,7 @@ export function registerStorageCommands(program: Command) {
 					`ID: ${colors.cyan(bucketId)}`,
 					`Name: ${bucket.name}`,
 					`Plan: ${plan}`,
-					`Access: ${options.public ? colors.warn("public") : "private"}`,
+					"Access: private",
 				]);
 
 				log(
@@ -594,12 +596,24 @@ export function registerStorageCommands(program: Command) {
 					throw new NotFoundError("Storage bucket", bucketIdentifier);
 				}
 				const bucketId = bucket.bucketId || bucket.id;
-				const targetPlan =
+				const rawPlan =
 					options.plan ||
-					(await input("Target plan (standard/pro):", undefined, {
+					(await input("Target plan (STARTER/STANDARD/PRO):", undefined, {
 						field: "plan",
 						flag: "--plan",
 					}));
+				// upgrade input is { bucketId, targetPlan: enum STARTER/STANDARD/PRO }.
+				const targetPlan = String(rawPlan).trim().toUpperCase();
+				if (
+					targetPlan !== "STARTER" &&
+					targetPlan !== "STANDARD" &&
+					targetPlan !== "PRO"
+				) {
+					failSpinner();
+					throw new CliError(
+						`Invalid target plan "${rawPlan}". Must be one of: STARTER, STANDARD, PRO.`,
+					);
+				}
 				const _upgradeSpinner = startSpinner(
 					`Upgrading bucket to ${targetPlan}...`,
 				);
@@ -619,9 +633,7 @@ export function registerStorageCommands(program: Command) {
 		.description("Update bucket settings")
 		.option("-n, --name <name>", "New name")
 		.option("--description <text>", "New description")
-		.option("--public", "Make bucket public")
 		.option("--private", "Make bucket private")
-		.option("--storage-limit <bytes>", "Storage limit in bytes")
 		.action(async (bucketIdentifier, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
@@ -634,20 +646,17 @@ export function registerStorageCommands(program: Command) {
 					throw new NotFoundError("Storage bucket", bucketIdentifier);
 				}
 				const bucketId = bucket.bucketId || bucket.id;
-				const publicAccess = options.public
-					? true
-					: options.private
-						? false
-						: undefined;
+				// update input is .strict() and only accepts
+				// { bucketId, name?, description?, publicAccess? }. It rejects
+				// publicAccess:true (managed storage is private), so only expose
+				// --private; there is no storageLimit field on this procedure.
+				const publicAccess = options.private ? false : undefined;
 				const _updateSpinner = startSpinner("Updating bucket...");
 				await client.storage.update.mutate({
 					bucketId,
 					name: options.name,
 					description: options.description,
 					publicAccess,
-					storageLimit: options.storageLimit
-						? Number.parseInt(options.storageLimit)
-						: undefined,
 				} as any);
 				succeedSpinner("Bucket updated.");
 				if (isJsonMode()) outputData({ updated: true, bucketId });
@@ -716,11 +725,22 @@ export function registerStorageCommands(program: Command) {
 					throw new NotFoundError("Storage bucket", bucketIdentifier);
 				}
 				const bucketId = bucket.bucketId || bucket.id;
+				// getUploadUrl requires a positive fileSizeBytes — the server
+				// reserves that much quota up front, so --size is mandatory.
+				const fileSizeBytes = options.size
+					? Number.parseInt(options.size)
+					: Number.NaN;
+				if (!Number.isInteger(fileSizeBytes) || fileSizeBytes <= 0) {
+					failSpinner();
+					throw new CliError(
+						"A positive --size <bytes> is required to generate an upload URL.",
+					);
+				}
 				const _urlSpinner = startSpinner("Generating upload URL...");
 				const result = await client.storage.getUploadUrl.mutate({
 					bucketId,
 					fileName,
-					fileSizeBytes: options.size ? Number.parseInt(options.size) : 0,
+					fileSizeBytes,
 					contentType: options.contentType,
 					expiresIn: Number.parseInt(options.expires || "3600"),
 				} as any);
@@ -748,8 +768,8 @@ export function registerStorageCommands(program: Command) {
 		.argument("<bucket>", "Bucket name or ID")
 		.argument("<filename>", "Uploaded file name")
 		.description("Notify the platform that a file upload completed")
-		.option("--size <bytes>", "Actual uploaded size in bytes", "0")
-		.option("--expected-size <bytes>", "Expected size in bytes", "0")
+		.option("--size <bytes>", "Size that existed before this upload, in bytes", "0")
+		.option("--expected-size <bytes>", "Expected uploaded size in bytes")
 		.action(async (bucketIdentifier, fileName, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
@@ -762,11 +782,22 @@ export function registerStorageCommands(program: Command) {
 					throw new NotFoundError("Storage bucket", bucketIdentifier);
 				}
 				const bucketId = bucket.bucketId || bucket.id;
+				// completeUpload requires a positive expectedSizeBytes; existing
+				// (pre-upload) size may be 0.
+				const expectedSizeBytes = options.expectedSize
+					? Number.parseInt(options.expectedSize)
+					: Number.NaN;
+				if (!Number.isInteger(expectedSizeBytes) || expectedSizeBytes <= 0) {
+					failSpinner();
+					throw new CliError(
+						"A positive --expected-size <bytes> is required to complete an upload.",
+					);
+				}
 				const _completeSpinner = startSpinner("Completing upload...");
 				await client.storage.completeUpload.mutate({
 					bucketId,
 					fileName,
-					expectedSizeBytes: Number.parseInt(options.expectedSize || "0"),
+					expectedSizeBytes,
 					existingSizeBytes: Number.parseInt(options.size || "0"),
 				} as any);
 				succeedSpinner("Upload completed.");

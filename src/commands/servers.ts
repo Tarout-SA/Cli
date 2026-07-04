@@ -3,6 +3,7 @@ import { getApiClient } from "../lib/api.js";
 import { isLoggedIn } from "../lib/config.js";
 import {
 	AuthError,
+	CliError,
 	findSimilar,
 	handleError,
 	NotFoundError,
@@ -200,7 +201,11 @@ export function registerServersCommands(program: Command) {
 
 				succeedSpinner("Server creation started!");
 
-				const serverId = result.id || result.serverId;
+				// Server returns { server, privateKey, privateKeyFormatted, sshCommand }.
+				// The real id lives on result.server.id and the private key is shown
+				// ONCE — it is never stored server-side.
+				const created = result as any;
+				const serverId = created.server?.id || created.server?.serverId;
 
 				if (isJsonMode()) {
 					outputData(result);
@@ -217,6 +222,25 @@ export function registerServersCommands(program: Command) {
 					`Status: ${colors.info("provisioning")}`,
 				]);
 
+				const sshCommand = created.sshCommand;
+				if (sshCommand) {
+					log("");
+					log(`SSH: ${colors.cyan(sshCommand)}`);
+				}
+
+				const privateKey = created.privateKeyFormatted || created.privateKey;
+				if (privateKey) {
+					log("");
+					log(
+						colors.warn(
+							"Save this private key now — it will NOT be shown again:",
+						),
+					);
+					log("");
+					log(privateKey);
+				}
+
+				log("");
 				log(
 					`Check status: ${colors.dim(`tarout servers info ${(serverId || "").slice(0, 8)}`)}`,
 				);
@@ -1010,7 +1034,7 @@ export function registerServersCommands(program: Command) {
 
 				await client.virtualMachine.resize.mutate({
 					id: server.id || server.serverId,
-					serverType: size,
+					newServerSize: size,
 				} as any);
 
 				succeedSpinner("Server resize initiated!");
@@ -1037,8 +1061,9 @@ export function registerServersCommands(program: Command) {
 	servers
 		.command("rescue")
 		.argument("<server>", "Server ID or name")
-		.description("Toggle rescue mode for a server")
-		.action(async (serverIdentifier) => {
+		.description("Enable or disable rescue mode for a server")
+		.option("--disable", "Disable rescue mode (default: enable)")
+		.action(async (serverIdentifier, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
@@ -1060,19 +1085,32 @@ export function registerServersCommands(program: Command) {
 
 				succeedSpinner();
 
-				const _rescueSpinner = startSpinner("Toggling rescue mode...");
+				const enable = !options.disable;
+				const _rescueSpinner = startSpinner(
+					`${enable ? "Enabling" : "Disabling"} rescue mode...`,
+				);
 
+				// Server requires an explicit `enable` boolean (rescueMode input is
+				// { id, enable }); there is no server-side toggle.
 				await client.virtualMachine.rescueMode.mutate({
 					id: server.id || server.serverId,
+					enable,
 				} as any);
 
-				succeedSpinner("Rescue mode toggled!");
+				succeedSpinner(`Rescue mode ${enable ? "enabled" : "disabled"}!`);
 
 				if (isJsonMode()) {
-					outputData({ rescue: true, serverId: server.id || server.serverId });
+					outputData({
+						rescue: enable,
+						serverId: server.id || server.serverId,
+					});
 				} else {
 					log("");
-					log(colors.warn("Rescue mode has been toggled for this server."));
+					log(
+						colors.warn(
+							`Rescue mode has been ${enable ? "enabled" : "disabled"} for this server.`,
+						),
+					);
 					log("");
 				}
 			} catch (err) {
@@ -1276,7 +1314,7 @@ export function registerServersCommands(program: Command) {
 				const _spinner = startSpinner("Deleting volume...");
 
 				await client.virtualMachine.deleteVolume.mutate({
-					id: volumeId,
+					volumeId,
 				} as any);
 
 				succeedSpinner("Volume deleted!");
@@ -1316,9 +1354,10 @@ export function registerServersCommands(program: Command) {
 
 				const _attachSpinner = startSpinner("Attaching volume...");
 
+				// attachVolume input is { volumeId } only — the volume already
+				// carries its target server association server-side.
 				await client.virtualMachine.attachVolume.mutate({
-					id: volumeId,
-					serverId: server.id || server.serverId,
+					volumeId,
 				} as any);
 
 				succeedSpinner("Volume attached!");
@@ -1347,7 +1386,7 @@ export function registerServersCommands(program: Command) {
 				const _spinner = startSpinner("Detaching volume...");
 
 				await client.virtualMachine.detachVolume.mutate({
-					id: volumeId,
+					volumeId,
 				} as any);
 
 				succeedSpinner("Volume detached!");
@@ -1416,17 +1455,32 @@ export function registerServersCommands(program: Command) {
 		.command("reserve")
 		.description("Reserve a new IP address")
 		.option("-r, --region <region>", "Region for the IP")
-		.option("--provider <provider>", "Cloud provider")
+		.option("-n, --name <name>", "Name for the reserved IP")
 		.action(async (options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
 				const client = getApiClient();
+
+				// Server requires both { name, region }. Prompt for region when
+				// missing; derive a deterministic name from the region when no
+				// --name is given (pass --name to reserve several IPs per region).
+				let region = options.region;
+				if (!region) {
+					region = await input("Region for the IP:", undefined, {
+						field: "region",
+						flag: "--region",
+					});
+				}
+
+				const name =
+					options.name || `ip-${String(region).toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+
 				const _spinner = startSpinner("Reserving IP...");
 
 				const result = await client.virtualMachine.reserveIp.mutate({
-					region: options.region,
-					providerId: options.provider,
+					name,
+					region,
 				} as any);
 
 				succeedSpinner("IP reserved!");
@@ -1474,7 +1528,7 @@ export function registerServersCommands(program: Command) {
 				const client = getApiClient();
 				const _spinner = startSpinner("Releasing IP...");
 
-				await client.virtualMachine.releaseIp.mutate({ id: ipId } as any);
+				await client.virtualMachine.releaseIp.mutate({ ipId } as any);
 
 				succeedSpinner("IP released!");
 
@@ -1514,7 +1568,7 @@ export function registerServersCommands(program: Command) {
 				const _assignSpinner = startSpinner("Assigning IP...");
 
 				await client.virtualMachine.assignIp.mutate({
-					id: ipId,
+					ipId,
 					serverId: server.id || server.serverId,
 				} as any);
 
@@ -1543,7 +1597,7 @@ export function registerServersCommands(program: Command) {
 				const client = getApiClient();
 				const _spinner = startSpinner("Unassigning IP...");
 
-				await client.virtualMachine.unassignIp.mutate({ id: ipId } as any);
+				await client.virtualMachine.unassignIp.mutate({ ipId } as any);
 
 				succeedSpinner("IP unassigned!");
 
@@ -1607,10 +1661,10 @@ export function registerServersCommands(program: Command) {
 				table(
 					["METRIC", "CONDITION", "THRESHOLD", "ENABLED"],
 					items.map((a: any) => [
-						a.metric || a.alertType || "-",
-						a.condition || a.operator || "-",
-						String(a.threshold || a.value || "-"),
-						a.enabled || a.isEnabled ? colors.success("yes") : colors.dim("no"),
+						a.metricType || a.metric || "-",
+						a.comparisonOp || a.condition || "-",
+						String(a.thresholdValue ?? a.threshold ?? "-"),
+						a.enabled ? colors.success("yes") : colors.dim("no"),
 					]),
 				);
 				log("");
@@ -1623,8 +1677,11 @@ export function registerServersCommands(program: Command) {
 		.command("set")
 		.argument("<server>", "Server ID or name")
 		.description("Create or update an alert configuration")
-		.option("-m, --metric <metric>", "Metric to alert on (cpu, memory, disk)")
-		.option("-t, --threshold <n>", "Alert threshold percentage", "80")
+		.option(
+			"-m, --metric <metric>",
+			"Metric: cpu, memory, disk_read, disk_write, network_in, network_out",
+		)
+		.option("-t, --threshold <n>", "Alert threshold value", "80")
 		.option("--disable", "Disable the alert")
 		.action(async (serverIdentifier, options) => {
 			try {
@@ -1646,6 +1703,8 @@ export function registerServersCommands(program: Command) {
 					throw new NotFoundError("Server", serverIdentifier);
 				}
 
+				// Metric must be one of the server's metricType enum values
+				// (cpu | memory | disk_read | disk_write | network_in | network_out).
 				let metric = options.metric;
 				if (!metric) {
 					metric = await select(
@@ -1653,7 +1712,10 @@ export function registerServersCommands(program: Command) {
 						[
 							{ name: "CPU Usage", value: "cpu" },
 							{ name: "Memory Usage", value: "memory" },
-							{ name: "Disk Usage", value: "disk" },
+							{ name: "Disk Read", value: "disk_read" },
+							{ name: "Disk Write", value: "disk_write" },
+							{ name: "Network In", value: "network_in" },
+							{ name: "Network Out", value: "network_out" },
 						],
 						{ field: "alert_metric", flag: "--metric" },
 					);
@@ -1663,8 +1725,8 @@ export function registerServersCommands(program: Command) {
 
 				await client.virtualMachine.upsertAlertConfig.mutate({
 					serverId: server.id || server.serverId,
-					metric,
-					threshold: Number.parseInt(options.threshold) || 80,
+					metricType: metric,
+					thresholdValue: Number.parseInt(options.threshold) || 80,
 					enabled: !options.disable,
 				} as any);
 
@@ -1711,17 +1773,32 @@ export function registerServersCommands(program: Command) {
 					throw new NotFoundError("Server", serverIdentifier);
 				}
 
+				// deleteAlertConfig takes { alertId } — there is no delete-by-metric
+				// path. Resolve the alert's id from the server's configs first.
+				const alertConfigs = await client.virtualMachine.listAlertConfigs.query({
+					serverId: server.id || server.serverId,
+				} as any);
+				const alertItems = Array.isArray(alertConfigs) ? alertConfigs : [];
+				const alert = alertItems.find(
+					(a: any) => (a.metricType || a.metric) === metric,
+				);
+				if (!alert?.id) {
+					failSpinner();
+					throw new CliError(
+						`No alert configured for metric "${metric}" on this server.`,
+					);
+				}
+
 				const _deleteSpinner = startSpinner("Deleting alert...");
 
 				await client.virtualMachine.deleteAlertConfig.mutate({
-					serverId: server.id || server.serverId,
-					metric,
+					alertId: alert.id,
 				} as any);
 
 				succeedSpinner("Alert deleted!");
 
 				if (isJsonMode()) {
-					outputData({ deleted: true, metric });
+					outputData({ deleted: true, metric, alertId: alert.id });
 				}
 			} catch (err) {
 				handleError(err);
@@ -1768,7 +1845,7 @@ export function registerServersCommands(program: Command) {
 				}
 				const _termSpinner = startSpinner("Terminating server...");
 				await client.virtualMachine.terminate.mutate({
-					serverId: server.id || server.serverId,
+					id: server.id || server.serverId,
 				} as any);
 				succeedSpinner("Server terminated!");
 				if (isJsonMode()) outputData({ terminated: true });
@@ -1798,10 +1875,10 @@ export function registerServersCommands(program: Command) {
 					throw new NotFoundError("Server", identifier);
 				}
 				const _resSpinner = startSpinner("Resizing volume...");
+				// resizeVolume input is { volumeId, newSizeGb } — no serverId.
 				const result = await client.virtualMachine.resizeVolume.mutate({
-					serverId: server.id || server.serverId,
 					volumeId,
-					sizeGb,
+					newSizeGb: sizeGb,
 				} as any);
 				succeedSpinner("Volume resized!");
 				if (isJsonMode()) outputData(result);
@@ -1884,7 +1961,7 @@ export function registerServersCommands(program: Command) {
 				}
 				const _cancelSpinner = startSpinner("Cancelling subscription...");
 				await client.virtualMachine.cancelSubscription.mutate({
-					serverId: server.id || server.serverId,
+					id: server.id || server.serverId,
 				} as any);
 				succeedSpinner("Subscription cancelled!");
 				if (isJsonMode()) outputData({ cancelled: true });
@@ -2036,7 +2113,10 @@ export function registerServersCommands(program: Command) {
 					outputData(list);
 					return;
 				}
-				const items = Array.isArray(list) ? list : (list as any)?.servers || [];
+				// server.list returns { dedicatedServers: [...], sharedPool: {...} }.
+				const items = Array.isArray(list)
+					? list
+					: (list as any)?.dedicatedServers || [];
 				if (!items.length) {
 					log("\nNo managed servers found.\n");
 					return;
@@ -2066,7 +2146,7 @@ export function registerServersCommands(program: Command) {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching server...");
-				const s = await client.server.getById.query({ id } as any);
+				const s = await client.server.getById.query({ serverId: id } as any);
 				succeedSpinner();
 				if (isJsonMode()) {
 					outputData(s);
@@ -2096,7 +2176,9 @@ export function registerServersCommands(program: Command) {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
 				const _spinner = startSpinner("Checking health...");
-				const health = await client.server.getHealth.query({ id } as any);
+				const health = await client.server.getHealth.query({
+					serverId: id,
+				} as any);
 				succeedSpinner();
 				if (isJsonMode()) {
 					outputData(health);
@@ -2137,14 +2219,16 @@ export function registerServersCommands(program: Command) {
 					return;
 				}
 				log("");
+				// getAvailableSizes returns
+				// { size, machineType, maxApplications, maxDatabases, diskSizeGb }.
 				table(
-					["SIZE", "CPU", "RAM", "DISK", "PRICE/MO"],
+					["SIZE", "MACHINE TYPE", "MAX APPS", "MAX DBS", "DISK"],
 					list.map((s: any) => [
-						colors.cyan(s.name || s.key || "-"),
-						`${s.cpu || "-"} vCPU`,
-						`${s.ram || s.memory || "-"} GB`,
-						`${s.disk || s.storage || "-"} GB`,
-						s.priceHalalas ? `${(s.priceHalalas / 100).toFixed(0)} SAR` : "-",
+						colors.cyan(s.size || "-"),
+						s.machineType || "-",
+						String(s.maxApplications ?? "-"),
+						String(s.maxDatabases ?? "-"),
+						s.diskSizeGb ? `${s.diskSizeGb} GB` : "-",
 					]),
 				);
 				log("");
@@ -2156,17 +2240,25 @@ export function registerServersCommands(program: Command) {
 	pool
 		.command("provision")
 		.description("Provision a new dedicated Coolify server")
-		.option("--size <size>", "Server size key")
+		.option("--size <size>", "Server size: SMALL, MEDIUM, or LARGE")
 		.option("--region <region>", "Region")
 		.action(async (options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const sizeKey =
-					options.size ||
-					(await input("Server size key:", undefined, {
-						field: "server_size",
-						flag: "--size",
-					}));
+				let sizeInput = options.size;
+				if (!sizeInput) {
+					sizeInput = await select(
+						"Server size:",
+						[
+							{ name: "Small", value: "SMALL" },
+							{ name: "Medium", value: "MEDIUM" },
+							{ name: "Large", value: "LARGE" },
+						],
+						{ field: "server_size", flag: "--size" },
+					);
+				}
+				// provisionDedicated input is { size: enum SMALL/MEDIUM/LARGE, region? }.
+				const size = normalizeDedicatedSize(sizeInput);
 				const region =
 					options.region ||
 					(await input("Region:", undefined, {
@@ -2175,12 +2267,12 @@ export function registerServersCommands(program: Command) {
 					}));
 				if (!shouldSkipConfirmation()) {
 					const confirmed = await confirm(
-						`Provision a dedicated server (${sizeKey} in ${region})?`,
+						`Provision a dedicated server (${size} in ${region})?`,
 						false,
 						{
 							field: "confirm_provision_dedicated",
 							flag: "--yes",
-							context: { sizeKey, region },
+							context: { size, region },
 						},
 					);
 					if (!confirmed) {
@@ -2191,14 +2283,14 @@ export function registerServersCommands(program: Command) {
 				const client = getApiClient();
 				const _spinner = startSpinner("Provisioning dedicated server...");
 				const result = await client.server.provisionDedicated.mutate({
-					sizeKey,
+					size,
 					region,
 				} as any);
 				succeedSpinner("Dedicated server provisioning started!");
 				if (isJsonMode()) outputData(result);
 				else {
 					box("Server Provisioning", [
-						`Size: ${colors.cyan(sizeKey)}`,
+						`Size: ${colors.cyan(size)}`,
 						`Region: ${region}`,
 						`Status: ${colors.warn("provisioning...")}`,
 					]);
@@ -2232,7 +2324,7 @@ export function registerServersCommands(program: Command) {
 				}
 				const client = getApiClient();
 				const _spinner = startSpinner("Decommissioning server...");
-				await client.server.decommission.mutate({ id } as any);
+				await client.server.decommission.mutate({ serverId: id } as any);
 				succeedSpinner("Server decommissioning started!");
 				if (isJsonMode()) outputData({ decommissioning: true, id });
 			} catch (err) {
@@ -2243,22 +2335,24 @@ export function registerServersCommands(program: Command) {
 	pool
 		.command("upgrade")
 		.argument("<id>", "Server ID")
-		.option("--size <size>", "New size key")
+		.option("--size <size>", "New size: SMALL, MEDIUM, or LARGE")
 		.description("Upgrade a dedicated server to a larger size")
 		.action(async (id, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const sizeKey =
+				const sizeInput =
 					options.size ||
-					(await input("New size key:", undefined, {
+					(await input("New size (SMALL/MEDIUM/LARGE):", undefined, {
 						field: "new_size",
 						flag: "--size",
 					}));
+				// upgradeServer input is { serverId, newSize: enum SMALL/MEDIUM/LARGE }.
+				const newSize = normalizeDedicatedSize(sizeInput);
 				const client = getApiClient();
 				const _spinner = startSpinner("Starting upgrade...");
 				const result = await client.server.upgradeServer.mutate({
-					id,
-					sizeKey,
+					serverId: id,
+					newSize,
 				} as any);
 				succeedSpinner("Server upgrade initiated!");
 				if (isJsonMode()) outputData(result);
@@ -2270,22 +2364,24 @@ export function registerServersCommands(program: Command) {
 	pool
 		.command("blue-green-upgrade")
 		.argument("<id>", "Server ID")
-		.option("--size <size>", "Target size key")
+		.option("--size <size>", "Target size: SMALL, MEDIUM, or LARGE")
 		.description("Start a blue/green server upgrade (zero-downtime)")
 		.action(async (id, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				const sizeKey =
+				const sizeInput =
 					options.size ||
-					(await input("Target size:", undefined, {
+					(await input("Target size (SMALL/MEDIUM/LARGE):", undefined, {
 						field: "target_size",
 						flag: "--size",
 					}));
+				// upgradeBlueGreen input is { serverId, newSize: enum }.
+				const newSize = normalizeDedicatedSize(sizeInput);
 				const client = getApiClient();
 				const _spinner = startSpinner("Starting blue/green upgrade...");
 				const result = await client.server.upgradeBlueGreen.mutate({
-					id,
-					sizeKey,
+					serverId: id,
+					newSize,
 				} as any);
 				succeedSpinner("Blue/green upgrade started!");
 				if (isJsonMode()) outputData(result);
@@ -2304,7 +2400,7 @@ export function registerServersCommands(program: Command) {
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching upgrade status...");
 				const status = await client.server.getBlueGreenStatus.query({
-					id,
+					blueServerId: id,
 				} as any);
 				succeedSpinner();
 				if (isJsonMode()) {
@@ -2349,7 +2445,7 @@ export function registerServersCommands(program: Command) {
 				}
 				const client = getApiClient();
 				const _spinner = startSpinner("Completing cutover...");
-				await client.server.completeCutover.mutate({ id } as any);
+				await client.server.completeCutover.mutate({ blueServerId: id } as any);
 				succeedSpinner("Cutover complete!");
 				if (isJsonMode()) outputData({ cutoverComplete: true });
 			} catch (err) {
@@ -2366,7 +2462,7 @@ export function registerServersCommands(program: Command) {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
 				const _spinner = startSpinner("Rolling back cutover...");
-				await client.server.rollbackCutover.mutate({ id } as any);
+				await client.server.rollbackCutover.mutate({ blueServerId: id } as any);
 				succeedSpinner("Cutover rolled back!");
 				if (isJsonMode()) outputData({ rolledBack: true });
 			} catch (err) {
@@ -2383,7 +2479,9 @@ export function registerServersCommands(program: Command) {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
 				const _spinner = startSpinner("Cancelling blue/green upgrade...");
-				await client.server.cancelBlueGreenUpgrade.mutate({ id } as any);
+				await client.server.cancelBlueGreenUpgrade.mutate({
+					blueServerId: id,
+				} as any);
 				succeedSpinner("Blue/green upgrade cancelled!");
 				if (isJsonMode()) outputData({ cancelled: true });
 			} catch (err) {
@@ -2393,8 +2491,9 @@ export function registerServersCommands(program: Command) {
 
 	pool
 		.command("migrate-to-dedicated")
+		.argument("<id>", "Dedicated server ID to move shared apps onto")
 		.description("Migrate apps from shared pool to your dedicated server")
-		.action(async () => {
+		.action(async (id) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 				if (!shouldSkipConfirmation()) {
@@ -2404,6 +2503,7 @@ export function registerServersCommands(program: Command) {
 						{
 							field: "confirm_migrate_to_dedicated",
 							flag: "--yes",
+							context: { id },
 						},
 					);
 					if (!confirmed) {
@@ -2413,8 +2513,11 @@ export function registerServersCommands(program: Command) {
 				}
 				const client = getApiClient();
 				const _spinner = startSpinner("Starting migration...");
-				const result =
-					await client.server.migrateSharedAppsToDedicated.mutate();
+				// migrateSharedAppsToDedicated input is
+				// { dedicatedServerId, applicationIds? }.
+				const result = await client.server.migrateSharedAppsToDedicated.mutate({
+					dedicatedServerId: id,
+				} as any);
 				succeedSpinner("Migration started!");
 				if (isJsonMode()) outputData(result);
 			} catch (err) {
@@ -2424,13 +2527,17 @@ export function registerServersCommands(program: Command) {
 
 	pool
 		.command("complete-migration")
+		.argument("<id>", "Dedicated server ID")
 		.description("Complete the shared-to-dedicated migration")
-		.action(async () => {
+		.action(async (id) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
 				const _spinner = startSpinner("Completing migration...");
-				await client.server.completeSharedToDedicated.mutate();
+				// completeSharedToDedicated input is { dedicatedServerId }.
+				await client.server.completeSharedToDedicated.mutate({
+					dedicatedServerId: id,
+				} as any);
 				succeedSpinner("Migration complete!");
 				if (isJsonMode()) outputData({ migrationComplete: true });
 			} catch (err) {
@@ -2440,13 +2547,17 @@ export function registerServersCommands(program: Command) {
 
 	pool
 		.command("rollback-migration")
+		.argument("<id>", "Dedicated server ID")
 		.description("Rollback a shared-to-dedicated migration")
-		.action(async () => {
+		.action(async (id) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
 				const _spinner = startSpinner("Rolling back migration...");
-				await client.server.rollbackSharedToDedicated.mutate();
+				// rollbackSharedToDedicated input is { dedicatedServerId }.
+				await client.server.rollbackSharedToDedicated.mutate({
+					dedicatedServerId: id,
+				} as any);
 				succeedSpinner("Migration rolled back!");
 				if (isJsonMode()) outputData({ rolledBack: true });
 			} catch (err) {
@@ -2518,4 +2629,23 @@ function formatPercent(value: number): string {
 	if (pct >= 90) return colors.error(`${pct}%`);
 	if (pct >= 70) return colors.warn(`${pct}%`);
 	return colors.success(`${pct}%`);
+}
+
+/**
+ * Dedicated Coolify server sizes are a strict enum on the server
+ * (SMALL | MEDIUM | LARGE). Normalize free-text CLI input to that enum so an
+ * invalid value fails with a clear message instead of a raw Zod BAD_REQUEST.
+ */
+function normalizeDedicatedSize(value: string): "SMALL" | "MEDIUM" | "LARGE" {
+	const normalized = String(value).trim().toUpperCase();
+	if (
+		normalized === "SMALL" ||
+		normalized === "MEDIUM" ||
+		normalized === "LARGE"
+	) {
+		return normalized;
+	}
+	throw new CliError(
+		`Invalid dedicated server size "${value}". Must be one of: SMALL, MEDIUM, LARGE.`,
+	);
 }

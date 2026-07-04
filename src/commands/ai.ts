@@ -657,6 +657,7 @@ export function registerAiCommands(program: Command) {
 		.option("--name <name>", "Provider name")
 		.option("--url <url>", "Provider API URL")
 		.option("--key <key>", "Provider API key")
+		.option("--model <model>", "Default model (e.g. gpt-4o)")
 		.action(async (options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
@@ -679,12 +680,21 @@ export function registerAiCommands(program: Command) {
 						flag: "--key",
 						sensitive: true,
 					}));
+				// apiCreateAi requires `model` — prompt when not supplied.
+				const model =
+					options.model ||
+					(await input("Default model (e.g. gpt-4o):", undefined, {
+						field: "model",
+						flag: "--model",
+						context: { name },
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Creating AI provider...");
 				const result = await client.ai.create.mutate({
 					name,
 					apiUrl,
 					apiKey,
+					model,
 				} as any);
 				succeedSpinner("AI provider created!");
 				if (isJsonMode()) outputData(result);
@@ -693,6 +703,7 @@ export function registerAiCommands(program: Command) {
 					box("AI Provider Created", [
 						`Name: ${colors.cyan(name)}`,
 						`URL: ${apiUrl}`,
+						`Model: ${model}`,
 					]);
 				}
 			} catch (err) {
@@ -707,12 +718,20 @@ export function registerAiCommands(program: Command) {
 		.option("--name <name>", "New name")
 		.option("--url <url>", "New API URL")
 		.option("--key <key>", "New API key")
+		.option("--model <model>", "New default model")
 		.action(async (aiId, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
 				const _spinner = startSpinner("Updating AI provider...");
-				await client.ai.update.mutate({ aiId, ...options } as any);
+				// apiUpdateAi expects apiUrl/apiKey (not url/key) — map the flags so
+				// they aren't silently dropped by Zod.
+				const payload: Record<string, unknown> = { aiId };
+				if (options.name !== undefined) payload.name = options.name;
+				if (options.url !== undefined) payload.apiUrl = options.url;
+				if (options.key !== undefined) payload.apiKey = options.key;
+				if (options.model !== undefined) payload.model = options.model;
+				await client.ai.update.mutate(payload as any);
 				succeedSpinner("AI provider updated!");
 				if (isJsonMode()) outputData({ updated: true, aiId });
 			} catch (err) {
