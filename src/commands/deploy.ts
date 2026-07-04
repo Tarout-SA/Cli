@@ -115,7 +115,7 @@ interface DeploymentSummary {
 	title?: string | null;
 }
 
-interface DeployOptions {
+export interface DeployOptions {
 	apiUrl?: string;
 	buildCommand?: string;
 	database?: string;
@@ -148,7 +148,7 @@ export type ResourcePlan = "FREE" | "STARTER" | "STANDARD" | "PRO";
 type DatabaseKind = "none" | "postgres" | "mysql";
 type SourcePreference = "auto" | "upload" | "configured" | "connect";
 
-interface ProjectInspection {
+export interface ProjectInspection {
 	database: DatabaseKind;
 	databaseReasons: string[];
 	git: {
