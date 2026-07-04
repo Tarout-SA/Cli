@@ -267,6 +267,48 @@ export function registerDomainsCommands(program: Command) {
 			}
 		});
 
+	// ── Transfer a domain in from another registrar ──
+	domains
+		.command("transfer-in")
+		.argument("<domain>", "Domain to transfer in (e.g., example.com)")
+		.option(
+			"--auth-code <code>",
+			"Authorization/EPP code from the current registrar",
+		)
+		.option("--current-registrar <name>", "Name of the current registrar")
+		.option("--note <text>", "Note for the support team")
+		.description("Request an inbound domain transfer (opens a support ticket)")
+		.action(async (domainName, options) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				if (!isValidDomain(domainName)) {
+					throw new InvalidArgumentError(
+						`Invalid domain format: ${domainName}. Use format like: example.com`,
+					);
+				}
+				const client = getApiClient();
+				const _spinner = startSpinner("Requesting transfer...");
+				const res: any = await client.domainRegistrar.requestTransferIn.mutate({
+					domainName,
+					authCode: options.authCode || undefined,
+					currentRegistrar: options.currentRegistrar || undefined,
+					note: options.note || undefined,
+				});
+				succeedSpinner("Transfer requested.");
+				if (isJsonMode()) {
+					outputData(res);
+					return;
+				}
+				box("Domain Transfer Requested", [
+					`Domain: ${colors.cyan(domainName)}`,
+					`Support ticket: ${colors.dim(res?.ticketId || "-")}`,
+					"Our team will follow up with the next steps.",
+				]);
+			} catch (err) {
+				handleError(err);
+			}
+		});
+
 	// ── Add external domain ──
 	domains
 		.command("add-external")

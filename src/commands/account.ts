@@ -270,6 +270,79 @@ export function registerAccountCommands(program: Command) {
 		);
 
 	apiKeys
+		.command("list")
+		.alias("ls")
+		.description("List your personal API keys")
+		.action(async () => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching API keys...");
+				const keys = await client.user.listApiKeys.query();
+				succeedSpinner();
+				if (isJsonMode()) {
+					outputData(keys);
+					return;
+				}
+				const list = Array.isArray(keys) ? keys : [];
+				if (!list.length) {
+					log("\nNo API keys.\n");
+					return;
+				}
+				log("");
+				table(
+					["ID", "NAME", "PREFIX", "ENABLED", "LAST USED", "EXPIRES"],
+					list.map((k: any) => [
+						colors.cyan((k.id || "").slice(0, 12)),
+						k.name || "-",
+						k.prefix || k.start || "-",
+						k.enabled !== false ? colors.success("yes") : colors.dim("no"),
+						k.lastRequest
+							? new Date(k.lastRequest).toLocaleDateString()
+							: colors.dim("never"),
+						k.expiresAt
+							? new Date(k.expiresAt).toLocaleDateString()
+							: colors.dim("never"),
+					]),
+				);
+				log("");
+			} catch (err) {
+				failSpinner();
+				handleError(err);
+			}
+		});
+
+	apiKeys
+		.command("rotate <api-key-id>")
+		.description("Rotate a personal API key (new secret, same settings)")
+		.action(async (apiKeyId: string) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Rotating API key...");
+				const result = await client.user.rotateApiKey.mutate({
+					apiKeyId,
+				} as any);
+				succeedSpinner("API key rotated.");
+				if (isJsonMode()) {
+					outputData(result);
+					return;
+				}
+				const r = result as any;
+				log("");
+				log(colors.bold("API Key Rotated"));
+				log(colors.warn("Save this key — it won't be shown again!"));
+				log("");
+				log(`  Key: ${colors.cyan(r.token || r.key || r.apiKey || "-")}`);
+				log(`  ID:  ${colors.dim(r.id || apiKeyId)}`);
+				log("");
+			} catch (err) {
+				failSpinner();
+				handleError(err);
+			}
+		});
+
+	apiKeys
 		.command("delete <api-key-id>")
 		.alias("rm")
 		.description("Delete a personal API key")
