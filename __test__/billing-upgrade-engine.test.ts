@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	type BillingChangeResult,
 	exitCodeForBillingResult,
+	finalizeBillingMutation,
 	nextCommandFor,
 	performBillingChange,
 	storageSlotTierForAddonKey,
@@ -320,5 +321,29 @@ describe("nextCommandFor / exitCodeForBillingResult", () => {
 		expect(exitCodeForBillingResult({ ...base, status: "expired" })).toBe(
 			ExitCode.GENERAL_ERROR,
 		);
+	});
+});
+
+describe("finalizeBillingMutation — database kind", () => {
+	it("classifies an applied (net-zero) db change", async () => {
+		const r = await finalizeBillingMutation(
+			{} as never,
+			{ applied: true, proratedChargeHalalas: 0 },
+			{ kind: "database", target: "STANDARD" },
+		);
+		expect(r.status).toBe("applied");
+		expect(r.kind).toBe("database");
+		expect(r.target).toBe("STANDARD");
+	});
+
+	it("classifies a db upgrade that returns a hosted checkout", async () => {
+		const r = await finalizeBillingMutation(
+			{} as never,
+			{ applied: false, paymentUrl: "https://pay.test/x", orderId: "ord_9", proratedChargeHalalas: 2000 },
+			{ kind: "database", target: "PRO" },
+		);
+		expect(r.status).toBe("payment_required");
+		expect(r.kind).toBe("database");
+		expect(r.target).toBe("PRO");
 	});
 });

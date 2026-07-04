@@ -17,6 +17,12 @@ import {
 	NotFoundError,
 } from "../lib/errors.js";
 import {
+	type BillingChangeResult,
+	emitBillingResult,
+	finalizeBillingMutation,
+} from "../lib/billing-upgrade.js";
+import { paymentBrowserOpener, shouldAutoConfirmPaidCheckout } from "../lib/browser.js";
+import {
 	box,
 	colors,
 	getStatusBadge,
@@ -24,6 +30,7 @@ import {
 	isNonInteractiveMode,
 	log,
 	outputData,
+	outputJsonLine,
 	quietOutput,
 	shouldSkipConfirmation,
 	table,
@@ -49,6 +56,76 @@ function normalizeDbPlan(value: string | undefined): ResourcePlan | undefined {
 		`Invalid database plan "${value}". Use free, starter, standard, or pro.`,
 		ExitCode.INVALID_ARGUMENTS,
 	);
+}
+
+export function assertPostgresTierChange(dbSummary: {
+	type: DatabaseType;
+	name: string;
+}): void {
+	if (dbSummary.type !== "postgres") {
+		throw new CliError(
+			`Tier changes are available for PostgreSQL databases only. "${dbSummary.name}" is a ${dbSummary.type} database; MySQL tier changes aren't supported yet.`,
+			ExitCode.INVALID_ARGUMENTS,
+		);
+	}
+}
+
+export function resolveDbTierTarget(
+	direction: "upgrade" | "downgrade",
+	raw: string | undefined,
+): "STARTER" | "STANDARD" | "PRO" {
+	const plan = normalizeDbPlan(raw);
+	if (!plan) {
+		throw new CliError("A target tier is required (--plan).", ExitCode.INVALID_ARGUMENTS);
+	}
+	if (plan === "FREE") {
+		throw new CliError(
+			"FREE is not a paid tier. To stop billing for a database, delete it instead.",
+			ExitCode.INVALID_ARGUMENTS,
+		);
+	}
+	if (direction === "downgrade" && plan === "PRO") {
+		throw new CliError(
+			"PRO is the highest tier — use `tarout db upgrade` to move up.",
+			ExitCode.INVALID_ARGUMENTS,
+		);
+	}
+	return plan as "STARTER" | "STANDARD" | "PRO";
+}
+
+export interface DatabaseTierChangeInput {
+	direction: "upgrade" | "downgrade";
+	postgresId: string;
+	targetPlan: "STARTER" | "STANDARD" | "PRO";
+	wait?: boolean;
+	timeoutMs?: number;
+	openBrowser?: (url: string) => Promise<void>;
+	onCheckoutOpened?: (info: { orderId: string; paymentUrl: string }) => void;
+}
+
+export async function runDatabaseTierChange(
+	// biome-ignore lint/suspicious/noExplicitAny: untyped tRPC proxy client.
+	client: any,
+	input: DatabaseTierChangeInput,
+): Promise<BillingChangeResult> {
+	const result =
+		input.direction === "upgrade"
+			? await client.subscription.purchaseDatabaseUpgrade.mutate({
+					postgresId: input.postgresId,
+					targetPlan: input.targetPlan,
+				})
+			: await client.subscription.purchaseDatabaseDowngrade.mutate({
+					postgresId: input.postgresId,
+					targetPlan: input.targetPlan,
+				});
+	return finalizeBillingMutation(client, result, {
+		kind: "database",
+		target: input.targetPlan,
+		wait: input.wait,
+		timeoutMs: input.timeoutMs,
+		openBrowser: input.openBrowser,
+		onCheckoutOpened: input.onCheckoutOpened,
+	});
 }
 
 // An explicit --plan wins; otherwise default to the project's subscribed tier and
@@ -845,8 +922,17 @@ export function registerDbCommands(program: Command) {
 	// ── Upgrade database ─────────────────────────────────────────────────────────
 	db.command("upgrade")
 		.argument("<db>", "Database ID or name")
-		.description("Upgrade database to a higher plan")
-		.option("--plan <plan>", "Target plan (standard, pro)")
+		.description("Upgrade a managed PostgreSQL database to a higher tier")
+		.option("--plan <plan>", "Target tier (starter, standard, pro)")
+		.option("--wait", "Wait/poll until the hosted checkout is confirmed (default)")
+		.option("--no-wait", "Return as soon as the hosted checkout opens")
+		.option(
+			"--timeout <seconds>",
+			"Maximum wait time in seconds (default 600)",
+			(v) => Number.parseInt(v, 10),
+			600,
+		)
+		.option("--no-open", "Do not auto-open the payment URL in the browser")
 		.action(async (dbIdentifier, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
@@ -858,32 +944,156 @@ export function registerDbCommands(program: Command) {
 					failSpinner();
 					throw new NotFoundError("Database", dbIdentifier);
 				}
-				const targetPlan =
+				succeedSpinner();
+				assertPostgresTierChange(dbSummary);
+				const rawPlan =
 					options.plan ||
-					(await input("Target plan:", undefined, {
+					(await input("Target tier (starter, standard, pro):", undefined, {
 						field: "target_plan",
 						flag: "--plan",
-						context: {
-							id: dbSummary.id,
-							name: dbSummary.name,
-							type: dbSummary.type,
-						},
+						context: { id: dbSummary.id, name: dbSummary.name, type: dbSummary.type },
 					}));
-				const _upgradeSpinner = startSpinner(`Upgrading to ${targetPlan}...`);
-				if (dbSummary.type === "postgres") {
-					await client.postgres.upgrade.mutate({
-						postgresId: dbSummary.id,
-						targetPlan,
-					} as any);
-				} else {
-					await client.mysql.upgrade.mutate({
-						mysqlId: dbSummary.id,
-						targetPlan,
-					} as any);
+				const targetPlan = resolveDbTierTarget("upgrade", rawPlan);
+
+				// Interactive-only preview + confirm; agent/--json/--yes go straight to
+				// the mutation (fewer round-trips, deterministic).
+				if (!isJsonMode() && !isNonInteractiveMode() && !shouldSkipConfirmation()) {
+					const _p = startSpinner("Calculating change...");
+					// biome-ignore lint/suspicious/noExplicitAny: server preview shape varies.
+					let preview: any = null;
+					try {
+						preview = await client.subscription.previewDatabaseUpgrade.query({
+							postgresId: dbSummary.id,
+							targetPlan,
+						});
+						succeedSpinner();
+					} catch {
+						failSpinner();
+					}
+					const dueHalalas =
+						typeof preview?.proratedChargeHalalas === "number"
+							? preview.proratedChargeHalalas
+							: undefined;
+					if (dueHalalas !== undefined) {
+						log(
+							`Amount due now: ${colors.bold(`${(dueHalalas / 100).toFixed(2)} SAR`)} ${colors.dim("(incl. 15% VAT at checkout)")}`,
+						);
+					}
+					if (shouldAutoConfirmPaidCheckout(dueHalalas)) {
+						log("Opening the secure payment page in your browser to complete the upgrade...");
+					} else {
+						const confirmed = await confirm(
+							`Upgrade "${dbSummary.name}" to ${targetPlan}?`,
+							false,
+							{
+								field: "confirm_db_upgrade",
+								flag: "--yes",
+								context: { id: dbSummary.id, name: dbSummary.name, targetPlan, amountDueHalalas: dueHalalas },
+							},
+						);
+						if (!confirmed) {
+							log("Cancelled.");
+							return;
+						}
+					}
 				}
-				succeedSpinner(`Database upgraded to ${targetPlan}.`);
-				if (isJsonMode())
-					outputData({ upgraded: true, id: dbSummary.id, targetPlan });
+
+				const _u = startSpinner(`Upgrading ${dbSummary.name} to ${targetPlan}...`);
+				const result = await runDatabaseTierChange(client, {
+					direction: "upgrade",
+					postgresId: dbSummary.id,
+					targetPlan,
+					wait: options.wait,
+					timeoutMs: options.timeout * 1000,
+					openBrowser: paymentBrowserOpener({ noOpen: options.open === false }),
+					onCheckoutOpened: ({ orderId, paymentUrl }) => {
+						if (isJsonMode()) {
+							outputJsonLine({ type: "event", event: "checkout_started", orderId, paymentUrl });
+						} else {
+							log("");
+							log("Open this URL to complete payment:");
+							log(`  ${colors.cyan(paymentUrl)}`);
+							log(`Order ID: ${colors.dim(orderId)}`);
+							log(`Polling for confirmation (up to ${options.timeout}s)...`);
+						}
+					},
+				});
+				succeedSpinner("Upgrade processed.");
+				const code = emitBillingResult(result, {
+					label: `Database ${dbSummary.name} → ${targetPlan}`,
+				});
+				if (code !== ExitCode.SUCCESS) exit(code);
+			} catch (err) {
+				handleError(err);
+			}
+		});
+
+	// ── Downgrade database ───────────────────────────────────────────────────────
+	db.command("downgrade")
+		.argument("<db>", "Database ID or name")
+		.description("Downgrade a managed PostgreSQL database to a lower tier (applies immediately, no refund)")
+		.option("--plan <plan>", "Target tier (starter, standard)")
+		.action(async (dbIdentifier, options) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Finding database...");
+				const allDbs = await getAllDatabases(client);
+				const dbSummary = findDatabase(allDbs, dbIdentifier);
+				if (!dbSummary) {
+					failSpinner();
+					throw new NotFoundError("Database", dbIdentifier);
+				}
+				succeedSpinner();
+				assertPostgresTierChange(dbSummary);
+				const rawPlan =
+					options.plan ||
+					(await input("Target tier (starter, standard):", undefined, {
+						field: "target_plan",
+						flag: "--plan",
+						context: { id: dbSummary.id, name: dbSummary.name, type: dbSummary.type },
+					}));
+				const targetPlan = resolveDbTierTarget("downgrade", rawPlan);
+
+				// Interactive-only preview + confirm. Preview errors are swallowed —
+				// the mutation enforces the same guards and surfaces the real message.
+				if (!isJsonMode() && !isNonInteractiveMode() && !shouldSkipConfirmation()) {
+					const _p = startSpinner("Checking downgrade...");
+					try {
+						await client.subscription.previewDatabaseDowngrade.query({
+							postgresId: dbSummary.id,
+							targetPlan,
+						});
+						succeedSpinner();
+					} catch {
+						failSpinner();
+					}
+					const confirmed = await confirm(
+						`Downgrade "${dbSummary.name}" to ${targetPlan}? Applies immediately; no refund.`,
+						false,
+						{
+							field: "confirm_db_downgrade",
+							flag: "--yes",
+							context: { id: dbSummary.id, name: dbSummary.name, targetPlan },
+						},
+					);
+					if (!confirmed) {
+						log("Cancelled.");
+						return;
+					}
+				}
+
+				const _d = startSpinner(`Downgrading ${dbSummary.name} to ${targetPlan}...`);
+				const result = await runDatabaseTierChange(client, {
+					direction: "downgrade",
+					postgresId: dbSummary.id,
+					targetPlan,
+				});
+				succeedSpinner("Downgrade processed.");
+				const code = emitBillingResult(result, {
+					label: `Database ${dbSummary.name} → ${targetPlan}`,
+				});
+				if (code !== ExitCode.SUCCESS) exit(code);
 			} catch (err) {
 				handleError(err);
 			}

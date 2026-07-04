@@ -12,8 +12,8 @@ import {
 	paymentBrowserOpener,
 	shouldAutoConfirmPaidCheckout,
 } from "../lib/browser.js";
-import { getApiUrl, getCurrentProfile, isLoggedIn } from "../lib/config.js";
-import { AuthError, handleError } from "../lib/errors.js";
+import { getCurrentProfile, isLoggedIn } from "../lib/config.js";
+import { AuthError, CliError, handleError } from "../lib/errors.js";
 import {
 	buildPlanAddonCart,
 	isPaidFamily,
@@ -51,6 +51,45 @@ function reportBillingResult(
 ): void {
 	const code = emitBillingResult(result, { label });
 	if (code !== ExitCode.SUCCESS) exit(code);
+}
+
+/** Read a plan's key across the catalog's field variants. */
+export function planKeyOf(p: unknown): string {
+	const o = p as { planKey?: string; key?: string; name?: string };
+	return (o?.planKey || o?.key || o?.name || "").toString();
+}
+
+/**
+ * Classify a target plan relative to the current one using catalog `sortOrder`.
+ * Missing keys and `free` rank as the lowest baseline (-1). Throws on an unknown
+ * target so `billing downgrade` fails loudly instead of guessing.
+ */
+export function classifyPlanDirection(
+	plans: unknown[],
+	currentPlanKey: string | null | undefined,
+	targetPlanKey: string,
+): "upgrade" | "same" | "downgrade" {
+	const rankOf = (key: string | null | undefined): number | null => {
+		const k = (key ?? "").toString();
+		if (!k) return -1;
+		const match = plans.find(
+			(x) => planKeyOf(x).toLowerCase() === k.toLowerCase(),
+		) as { sortOrder?: number } | undefined;
+		if (match && typeof match.sortOrder === "number") return match.sortOrder;
+		if (k.toLowerCase() === "free") return -1;
+		return null;
+	};
+	const targetRank = rankOf(targetPlanKey);
+	if (targetRank === null) {
+		throw new CliError(
+			`Unknown plan "${targetPlanKey}". Run \`tarout billing plans\` to see available plans.`,
+			ExitCode.INVALID_ARGUMENTS,
+		);
+	}
+	const currentRank = rankOf(currentPlanKey) ?? -1;
+	if (targetRank > currentRank) return "upgrade";
+	if (targetRank === currentRank) return "same";
+	return "downgrade";
 }
 
 /** True when a tRPC error carries a CONFLICT code (either v10 shape). */
@@ -467,6 +506,108 @@ export function registerBillingCommands(program: Command) {
 				});
 
 				succeedSpinner("Plan change processed.");
+				reportBillingResult(result, `Plan: ${targetPlan}`);
+			} catch (err) {
+				handleError(err);
+			}
+		});
+
+	// Downgrade to a lower plan (deferred to end of billing period)
+	billing
+		.command("downgrade")
+		.argument("[plan]", "Plan key to downgrade to (alias: --plan)")
+		.description("Downgrade to a lower subscription plan (applies at the end of the billing period)")
+		.option("--plan <key>", "Plan key (alias for the positional argument)")
+		.option(
+			"--billing-period <period>",
+			"Billing period: monthly or yearly",
+			parseBillingPeriod,
+		)
+		.action(async (planArg, options) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching subscription...");
+				const [subscription, catalog] = await Promise.all([
+					client.subscription.getCurrent.query(),
+					client.subscription.getCatalog.query(),
+				]);
+				succeedSpinner();
+				if (!subscription || !subscription.planKey) {
+					throw new CliError("No active subscription to downgrade.", ExitCode.INVALID_ARGUMENTS);
+				}
+				const plans: unknown[] = catalog?.plans || catalog || [];
+				let targetPlan: string | undefined = planArg || options.plan;
+
+				if (!targetPlan) {
+					const lower = plans.filter((p) => {
+						try {
+							return (
+								classifyPlanDirection(plans, subscription.planKey, planKeyOf(p)) === "downgrade"
+							);
+						} catch {
+							return false;
+						}
+					});
+					if (lower.length === 0) {
+						log("You are already on the lowest plan.");
+						return;
+					}
+					targetPlan = await select<string>(
+						"Downgrade to:",
+						lower.map((p) => {
+							const price = (p as { priceHalalas?: number }).priceHalalas;
+							return {
+								name: `${planKeyOf(p)}${price ? ` (${(price / 100).toFixed(2)} SAR/mo)` : " (Free)"}`,
+								value: planKeyOf(p),
+							};
+						}),
+						{
+							field: "plan",
+							flag: "--plan",
+							context: { current: subscription.planKey, available: lower.map((p) => planKeyOf(p)) },
+						},
+					);
+				}
+				if (!targetPlan) {
+					throw new CliError("No plan selected.", ExitCode.INVALID_ARGUMENTS);
+				}
+
+				const direction = classifyPlanDirection(plans, subscription.planKey, targetPlan);
+				if (direction === "same") {
+					log(`Already on plan "${targetPlan}".`);
+					return;
+				}
+				if (direction === "upgrade") {
+					throw new CliError(
+						`"${targetPlan}" is higher than your current plan "${subscription.planKey}". Use \`tarout billing upgrade ${targetPlan}\` to move up.`,
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+
+				if (!shouldSkipConfirmation()) {
+					const confirmed = await confirm(
+						`Downgrade from "${subscription.planKey}" to "${targetPlan}"? Takes effect at the end of the current billing period; no refund for the remainder.`,
+						false,
+						{
+							field: "confirm_downgrade",
+							flag: "--yes",
+							context: { from: subscription.planKey, to: targetPlan },
+						},
+					);
+					if (!confirmed) {
+						log("Cancelled.");
+						return;
+					}
+				}
+
+				const _c = startSpinner("Scheduling downgrade...");
+				const result = await performBillingChange(client, {
+					kind: "plan",
+					planKey: targetPlan,
+					billingPeriod: options.billingPeriod,
+				});
+				succeedSpinner("Downgrade processed.");
 				reportBillingResult(result, `Plan: ${targetPlan}`);
 			} catch (err) {
 				handleError(err);

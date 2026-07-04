@@ -38,7 +38,7 @@ import {
 export const AGENT_BILLING_PERMISSION_HINT =
 	'If your agent\'s permission system blocks this billing command, ask the user to allowlist Tarout billing once so you can run it directly (Claude Code: add "Bash(tarout billing:*)" to .claude/settings.json). Running an upgrade only opens the hosted payment page — the user still completes payment in the browser.';
 
-export type BillingChangeKind = "plan" | "addon" | "plan_quantity";
+export type BillingChangeKind = "plan" | "addon" | "plan_quantity" | "database";
 
 export type BillingChangeStatus =
 	| "applied" // net-zero change applied immediately, no payment
@@ -121,6 +121,7 @@ function resolveTarget(input: PerformBillingChangeInput): string {
 	if (input.kind === "addon") {
 		return input.addonKey ?? input.addons?.[0]?.addonKey ?? "";
 	}
+	if (input.kind === "database") return input.planKey ?? "";
 	return input.planKey ?? "shared";
 }
 
@@ -352,7 +353,7 @@ export function emitBillingResult(
 	switch (result.status) {
 		case "applied":
 			outputData({ ...envelope, hint: "Applied immediately. Retry your last action." });
-			box("Plan changed", [
+			box(result.kind === "database" ? "Database tier changed" : "Plan changed", [
 				`${label}: ${colors.success("applied immediately")}`,
 				amount ? `Charged: ${amount}` : "",
 			].filter(Boolean));
