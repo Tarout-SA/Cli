@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import { getApiClient } from "../lib/api.js";
 import { isLoggedIn } from "../lib/config.js";
-import { AuthError, handleError } from "../lib/errors.js";
+import { AuthError, handleError, InvalidArgumentError } from "../lib/errors.js";
 import {
 	box,
 	colors,
@@ -114,10 +114,44 @@ export function registerFirewallCommands(program: Command) {
 						field: "firewall_template_name",
 						flag: "--name",
 					}));
-				log("");
-				log("Add rules interactively (leave protocol empty to finish):");
 				const rules: any[] = [];
-				for (let i = 0; i < 10; i++) {
+				// Non-interactive path: `--rules '[{protocol,portRange,direction,sourceRanges,name?}]'`.
+				// The server requires a non-empty `name` per rule (firewallRuleInput),
+				// so synthesize one from protocol+port when the caller omits it.
+				if (options.rules) {
+					let parsed: unknown;
+					try {
+						parsed = JSON.parse(options.rules);
+					} catch {
+						throw new InvalidArgumentError(
+							"--rules must be a valid JSON array.",
+						);
+					}
+					if (!Array.isArray(parsed) || parsed.length === 0) {
+						throw new InvalidArgumentError(
+							"--rules must be a non-empty JSON array of rules.",
+						);
+					}
+					for (const r of parsed as any[]) {
+						const protocol = String(r.protocol ?? "tcp");
+						const portRange = String(r.portRange ?? r.port ?? "");
+						rules.push({
+							name:
+								(r.name && String(r.name)) ||
+								`${protocol}-${portRange}`.slice(0, 50) ||
+								protocol,
+							protocol,
+							portRange,
+							direction: r.direction ?? "ingress",
+							sourceRanges: r.sourceRanges ?? r.source ?? "0.0.0.0/0",
+						});
+					}
+				}
+				if (!options.rules) {
+					log("");
+					log("Add rules interactively (leave protocol empty to finish):");
+				}
+				for (let i = 0; !options.rules && i < 10; i++) {
 					const protocol = await select(
 						`Rule ${i + 1} protocol (or skip):`,
 						[
@@ -160,7 +194,13 @@ export function registerFirewallCommands(program: Command) {
 							flag: "--rules",
 							context: { ruleIndex: i },
 						})) || "0.0.0.0/0";
-					rules.push({ protocol, portRange, direction, sourceRanges });
+					rules.push({
+						name: `${protocol}-${portRange}`.slice(0, 50) || protocol,
+						protocol,
+						portRange,
+						direction,
+						sourceRanges,
+					});
 				}
 				const client = getApiClient();
 				const _spinner = startSpinner("Creating firewall template...");
@@ -253,7 +293,7 @@ export function registerFirewallCommands(program: Command) {
 				const client = getApiClient();
 				const _spinner = startSpinner("Applying firewall template...");
 				const result = await client.firewallTemplate.applyToServer.mutate({
-					id: templateId,
+					templateId,
 					serverId,
 				} as any);
 				succeedSpinner("Firewall template applied to server!");
@@ -298,7 +338,7 @@ export function registerFirewallCommands(program: Command) {
 				const client = getApiClient();
 				const _spinner = startSpinner("Removing firewall template...");
 				await client.firewallTemplate.removeFromServer.mutate({
-					id: templateId,
+					templateId,
 					serverId,
 				} as any);
 				succeedSpinner("Firewall template removed from server!");
@@ -308,36 +348,38 @@ export function registerFirewallCommands(program: Command) {
 			}
 		});
 
-	// List template assignments (which servers have which templates)
+	// List firewall templates applied to a server. The server exposes
+	// `listAssignments({ serverId })` → templates-on-a-server; there is no
+	// template→servers query, so this command is keyed by server (matches the
+	// dashboard's per-server firewall view).
 	fw.command("assignments")
-		.argument("<template-id>", "Firewall template ID")
-		.description("List servers that have this firewall template applied")
-		.action(async (templateId) => {
+		.argument("<server-id>", "Cloud server ID")
+		.description("List firewall templates applied to a cloud server")
+		.action(async (serverId) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching assignments...");
 				const result = await client.firewallTemplate.listAssignments.query({
-					id: templateId,
+					serverId,
 				} as any);
 				succeedSpinner();
 				if (isJsonMode()) {
 					outputData(result);
 					return;
 				}
-				const list = Array.isArray(result)
-					? result
-					: (result as any)?.assignments || [];
+				const list = Array.isArray(result) ? result : [];
 				if (!list.length) {
-					log(`\nNo servers have template "${templateId}" applied.\n`);
+					log(`\nNo firewall templates applied to server "${serverId}".\n`);
 					return;
 				}
 				log("");
 				table(
-					["SERVER ID", "SERVER NAME", "APPLIED AT"],
+					["TEMPLATE ID", "NAME", "RULES", "APPLIED AT"],
 					list.map((a: any) => [
-						colors.cyan((a.serverId || a.id || "").slice(0, 8)),
-						a.serverName || a.name || "-",
+						colors.cyan((a.template?.id || a.templateId || "").slice(0, 8)),
+						a.template?.name || "-",
+						String(a.template?.rules?.length ?? 0),
 						a.appliedAt ? new Date(a.appliedAt).toLocaleDateString() : "-",
 					]),
 				);

@@ -38,8 +38,28 @@ export function registerProvidersCommands(program: Command) {
 					return;
 				}
 
-				const list = Array.isArray(all) ? all : [];
-				if (list.length === 0) {
+				// gitProvider.allProviders returns an OBJECT keyed by provider type:
+				// { github: [...], gitlab: [...], bitbucket: [...], gitea: [...] }.
+				// Each entry nests the git_provider record (name/id) plus a
+				// provider-specific id (githubId/gitlabId/bitbucketId/giteaId).
+				const grouped = (all as any) || {};
+				const rows: string[][] = [];
+				const pushRows = (type: string, entries: any[], idKey: string) => {
+					for (const entry of entries || []) {
+						const gp = entry.git_provider || entry.gitProvider || {};
+						rows.push([
+							colors.cyan(type),
+							gp.name || "-",
+							colors.dim(entry[idKey] || gp.gitProviderId || "-"),
+						]);
+					}
+				};
+				pushRows("github", grouped.github, "githubId");
+				pushRows("gitlab", grouped.gitlab, "gitlabId");
+				pushRows("bitbucket", grouped.bitbucket, "bitbucketId");
+				pushRows("gitea", grouped.gitea, "giteaId");
+
+				if (rows.length === 0) {
 					log("");
 					log("No Git providers connected.");
 					log("");
@@ -50,14 +70,7 @@ export function registerProvidersCommands(program: Command) {
 				}
 
 				log("");
-				table(
-					["TYPE", "NAME", "ID"],
-					list.map((p: any) => [
-						colors.cyan(p.type || p.provider || "-"),
-						p.name || p.gitProviderName || "-",
-						colors.dim(p.gitProviderId || p.id || "-"),
-					]),
-				);
+				table(["TYPE", "NAME", "ID"], rows);
 				log("");
 			} catch (err) {
 				failSpinner();
@@ -324,31 +337,39 @@ export function registerProvidersCommands(program: Command) {
 		.command("update <github-id>")
 		.description("Update a GitHub provider name")
 		.option("-n, --name <name>", "New name")
-		.action(async (githubId: string, options: { name?: string }) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-				const name =
-					options.name ||
-					(await input("New name for this provider:", undefined, {
-						field: "provider_name",
-						flag: "--name",
-					}));
-				const client = getApiClient();
-				const _spinner = startSpinner("Updating provider...");
-				// Fetch to get gitProviderId
-				const data = (await client.github.one.query({ githubId })) as any;
-				await client.github.update.mutate({
-					githubId,
-					gitProviderId: data.gitProviderId,
-					name,
-				});
-				succeedSpinner("Provider updated.");
-				if (isJsonMode()) outputData({ updated: true, githubId });
-			} catch (err) {
-				failSpinner();
-				handleError(err);
-			}
-		});
+		.option("--app-name <appName>", "GitHub App name (defaults to current)")
+		.action(
+			async (
+				githubId: string,
+				options: { name?: string; appName?: string },
+			) => {
+				try {
+					if (!isLoggedIn()) throw new AuthError();
+					const name =
+						options.name ||
+						(await input("New name for this provider:", undefined, {
+							field: "provider_name",
+							flag: "--name",
+						}));
+					const client = getApiClient();
+					const _spinner = startSpinner("Updating provider...");
+					// Fetch to get gitProviderId + current githubAppName (both required by
+					// apiUpdateGithub). githubAppName can be overridden with --app-name.
+					const data = (await client.github.one.query({ githubId })) as any;
+					await client.github.update.mutate({
+						githubId,
+						gitProviderId: data.gitProviderId,
+						name,
+						githubAppName: options.appName || data.githubAppName,
+					});
+					succeedSpinner("Provider updated.");
+					if (isJsonMode()) outputData({ updated: true, githubId });
+				} catch (err) {
+					failSpinner();
+					handleError(err);
+				}
+			},
+		);
 
 	// ══ GitLab sub-group ══════════════════════════════════════════════════════════
 	const gitlab = providers
@@ -394,19 +415,29 @@ export function registerProvidersCommands(program: Command) {
 	gitlab
 		.command("create")
 		.description("Create a GitLab provider")
+		.option("-n, --name <name>", "Display name for this provider")
 		.option("--application-id <id>", "OAuth Application ID")
 		.option("--secret <secret>", "OAuth Secret")
 		.option("--gitlab-url <url>", "GitLab instance URL (default: gitlab.com)")
 		.option("--group <group>", "GitLab group name")
+		.option("--auth-id <id>", "Git auth id (defaults to the current user's id)")
 		.action(
 			async (options: {
+				name?: string;
 				applicationId?: string;
 				secret?: string;
 				gitlabUrl?: string;
 				group?: string;
+				authId?: string;
 			}) => {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
+					const name =
+						options.name ||
+						(await input("Display name for this provider:", undefined, {
+							field: "provider_name",
+							flag: "--name",
+						}));
 					const applicationId =
 						options.applicationId ||
 						(await input("GitLab OAuth Application ID:", undefined, {
@@ -421,11 +452,16 @@ export function registerProvidersCommands(program: Command) {
 							sensitive: true,
 						}));
 					const client = getApiClient();
+					// authId is a required field on apiCreateGitlab; the dashboard sources
+					// it from the current user's id (api.user.get). Resolve the same way.
+					const authId = options.authId || (await resolveAuthId(client));
 					const _spinner = startSpinner("Creating GitLab provider...");
 					const result = await client.gitlab.create.mutate({
+						name,
+						authId,
 						applicationId,
 						secret,
-						gitlabUrl: options.gitlabUrl,
+						gitlabUrl: options.gitlabUrl || "https://gitlab.com",
 						groupName: options.group,
 					} as any);
 					succeedSpinner("GitLab provider created.");
@@ -546,6 +582,7 @@ export function registerProvidersCommands(program: Command) {
 	gitlab
 		.command("update <gitlab-id>")
 		.description("Update a GitLab provider")
+		.option("-n, --name <name>", "New display name")
 		.option("--application-id <id>", "New OAuth Application ID")
 		.option("--secret <secret>", "New OAuth Secret")
 		.option("--gitlab-url <url>", "New GitLab instance URL")
@@ -554,6 +591,7 @@ export function registerProvidersCommands(program: Command) {
 			async (
 				gitlabId: string,
 				options: {
+					name?: string;
 					applicationId?: string;
 					secret?: string;
 					gitlabUrl?: string;
@@ -565,13 +603,18 @@ export function registerProvidersCommands(program: Command) {
 					const client = getApiClient();
 					const _spinner = startSpinner("Updating GitLab provider...");
 					const data = (await client.gitlab.one.query({ gitlabId })) as any;
+					// apiUpdateGitlab requires name (min 1) and gitlabUrl (valid URL) in
+					// addition to gitlabId/gitProviderId — preserve current values when
+					// the caller doesn't override them.
 					await client.gitlab.update.mutate({
 						gitlabId,
 						gitProviderId: data.gitProviderId,
-						applicationId: options.applicationId || data.applicationId,
+						name: options.name || data.git_provider?.name || data.name,
+						applicationId: options.applicationId || data.application_id,
 						secret: options.secret,
-						gitlabUrl: options.gitlabUrl || data.gitlabUrl,
-						groupName: options.group || data.groupName,
+						gitlabUrl:
+							options.gitlabUrl || data.gitlabUrl || "https://gitlab.com",
+						groupName: options.group || data.group_name,
 					} as any);
 					succeedSpinner("GitLab provider updated.");
 					if (isJsonMode()) outputData({ updated: true, gitlabId });
@@ -626,32 +669,64 @@ export function registerProvidersCommands(program: Command) {
 	bitbucket
 		.command("create")
 		.description("Create a Bitbucket provider")
-		.option("--client-id <id>", "Bitbucket OAuth Client ID")
-		.option("--secret <secret>", "Bitbucket OAuth Secret")
-		.action(async (options: { clientId?: string; secret?: string }) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-				const appPassword =
-					options.secret ||
-					(await input("Bitbucket App Password or Secret:", undefined, {
-						field: "bitbucket_oauth_secret",
-						flag: "--secret",
-						sensitive: true,
-					}));
-				const client = getApiClient();
-				const _spinner = startSpinner("Creating Bitbucket provider...");
-				const result = await client.bitbucket.create.mutate({
-					bitbucketClientId: options.clientId,
-					bitbucketClientSecret: appPassword,
-				} as any);
-				succeedSpinner("Bitbucket provider created.");
-				if (isJsonMode()) outputData(result);
-				else quietOutput((result as any).bitbucketId || "created");
-			} catch (err) {
-				failSpinner();
-				handleError(err);
-			}
-		});
+		.option("-n, --name <name>", "Display name for this provider")
+		.option("-u, --username <username>", "Bitbucket username")
+		.option("--api-token <token>", "Bitbucket API token")
+		.option("--email <email>", "Bitbucket account email")
+		.option("--workspace <workspace>", "Bitbucket workspace name")
+		.option("--auth-id <id>", "Git auth id (defaults to the current user's id)")
+		.action(
+			async (options: {
+				name?: string;
+				username?: string;
+				apiToken?: string;
+				email?: string;
+				workspace?: string;
+				authId?: string;
+			}) => {
+				try {
+					if (!isLoggedIn()) throw new AuthError();
+					const name =
+						options.name ||
+						(await input("Display name for this provider:", undefined, {
+							field: "provider_name",
+							flag: "--name",
+						}));
+					const bitbucketUsername =
+						options.username ||
+						(await input("Bitbucket username:", undefined, {
+							field: "bitbucket_username",
+							flag: "--username",
+						}));
+					const apiToken =
+						options.apiToken ||
+						(await input("Bitbucket API token:", undefined, {
+							field: "bitbucket_api_token",
+							flag: "--api-token",
+							sensitive: true,
+						}));
+					const client = getApiClient();
+					// authId is a required field on apiCreateBitbucket; the dashboard sources
+					// it from the current user's id (api.user.get). Resolve the same way.
+					const authId = options.authId || (await resolveAuthId(client));
+					const _spinner = startSpinner("Creating Bitbucket provider...");
+					const result = await client.bitbucket.create.mutate({
+						name,
+						authId,
+						bitbucketUsername,
+						apiToken,
+						bitbucketEmail: options.email,
+						bitbucketWorkspaceName: options.workspace,
+					} as any);
+					succeedSpinner("Bitbucket provider created.");
+					if (isJsonMode()) outputData(result);
+					else quietOutput((result as any).bitbucketId || "created");
+				} catch (err) {
+					failSpinner();
+					handleError(err);
+				}
+			},
+		);
 
 	bitbucket
 		.command("info <bitbucket-id>")
@@ -762,25 +837,36 @@ export function registerProvidersCommands(program: Command) {
 	bitbucket
 		.command("update <bitbucket-id>")
 		.description("Update a Bitbucket provider")
-		.option("--client-id <id>", "New Client ID")
-		.option("--secret <secret>", "New Client Secret")
+		.option("-n, --name <name>", "New display name")
+		.option("-u, --username <username>", "New Bitbucket username")
+		.option("--api-token <token>", "New Bitbucket API token")
+		.option("--workspace <workspace>", "New workspace name")
 		.action(
 			async (
 				bitbucketId: string,
-				options: { clientId?: string; secret?: string },
+				options: {
+					name?: string;
+					username?: string;
+					apiToken?: string;
+					workspace?: string;
+				},
 			) => {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
 					const client = getApiClient();
 					const _spinner = startSpinner("Updating Bitbucket provider...");
+					// apiUpdateBitbucket requires bitbucketId, gitProviderId and name.
+					// Fetch current values so unspecified fields keep their existing data.
 					const data = (await client.bitbucket.one.query({
 						bitbucketId,
 					})) as any;
 					await client.bitbucket.update.mutate({
 						bitbucketId,
 						gitProviderId: data.gitProviderId,
-						bitbucketClientId: options.clientId,
-						bitbucketClientSecret: options.secret,
+						name: options.name || data.git_provider?.name || data.name,
+						bitbucketUsername: options.username,
+						apiToken: options.apiToken,
+						bitbucketWorkspaceName: options.workspace,
 					} as any);
 					succeedSpinner("Bitbucket provider updated.");
 					if (isJsonMode()) outputData({ updated: true, bitbucketId });
@@ -792,4 +878,15 @@ export function registerProvidersCommands(program: Command) {
 		);
 
 	void select; // suppress unused import warning
+}
+
+/**
+ * Resolves the `authId` required by the gitlab/bitbucket create procedures.
+ * The dashboard forms source this from `api.user.get` (the current user's id),
+ * and the create services only require it to be a non-empty string. Mirror
+ * that here so the CLI create flows satisfy validation without a web step.
+ */
+async function resolveAuthId(client: any): Promise<string> {
+	const me = (await client.user.get.query()) as any;
+	return me?.userId || me?.user?.id || me?.id || "";
 }

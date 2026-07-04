@@ -1128,87 +1128,6 @@ export function registerBillingCommands(program: Command) {
 			}
 		});
 
-	// Confirm checkout
-	billing
-		.command("checkout:confirm")
-		.argument("<session-id>", "Checkout session ID")
-		.description("Confirm a pending checkout session")
-		.action(async (sessionId) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-				const client = getApiClient();
-				const _spinner = startSpinner("Confirming checkout...");
-				const result = await client.subscription.confirmCheckout.mutate({
-					sessionId,
-				} as any);
-				succeedSpinner("Checkout confirmed!");
-				if (isJsonMode()) outputData(result);
-			} catch (err) {
-				handleError(err);
-			}
-		});
-
-	// Get checkout session
-	billing
-		.command("checkout:get")
-		.argument("<session-id>", "Checkout session ID")
-		.description("Get details of a checkout session")
-		.action(async (sessionId) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-				const client = getApiClient();
-				const _spinner = startSpinner("Fetching checkout...");
-				const data = await client.payment.getCheckout.query({
-					sessionId,
-				} as any);
-				succeedSpinner();
-				if (isJsonMode()) outputData(data);
-				else {
-					const d = data as any;
-					log("");
-					log(colors.bold("Checkout Session"));
-					log(`  ID:     ${d.sessionId || sessionId}`);
-					log(`  Status: ${d.status || "-"}`);
-					log(
-						`  Amount: ${d.amount !== undefined ? `${(d.amount / 100).toFixed(2)} SAR` : "-"}`,
-					);
-					log("");
-				}
-			} catch (err) {
-				handleError(err);
-			}
-		});
-
-	// Submit card payment
-	billing
-		.command("checkout:pay")
-		.argument("<session-id>", "Checkout session ID")
-		.description("Submit card payment for a checkout session")
-		.option("--card-number <n>", "Card number")
-		.option("--exp-month <m>", "Expiry month")
-		.option("--exp-year <y>", "Expiry year")
-		.option("--cvv <cvv>", "CVV")
-		.option("--name <name>", "Cardholder name")
-		.action(async (sessionId, options) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-				const client = getApiClient();
-				const _spinner = startSpinner("Processing payment...");
-				const result = await client.payment.submitCardPayment.mutate({
-					sessionId,
-					cardNumber: options.cardNumber,
-					expMonth: options.expMonth,
-					expYear: options.expYear,
-					cvv: options.cvv,
-					cardholderName: options.name,
-				} as any);
-				succeedSpinner("Payment submitted!");
-				if (isJsonMode()) outputData(result);
-			} catch (err) {
-				handleError(err);
-			}
-		});
-
 	// Billing analytics — usage breakdown
 	billing
 		.command("usage")
@@ -1380,6 +1299,142 @@ export function registerBillingCommands(program: Command) {
 					]),
 				);
 				log("");
+			} catch (err) {
+				handleError(err);
+			}
+		});
+
+	// ── Invoices ──────────────────────────────────────────────────────────────
+	billing
+		.command("invoices")
+		.description("List invoices")
+		.option("-n, --limit <n>", "Max invoices to show", (v) =>
+			Number.parseInt(v, 10),
+		)
+		.action(async (options) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching invoices...");
+				const invoices = await client.payment.listInvoices.query(
+					options.limit ? { take: options.limit } : undefined,
+				);
+				succeedSpinner();
+				if (isJsonMode()) {
+					outputData(invoices);
+					return;
+				}
+				const list = Array.isArray(invoices) ? invoices : [];
+				if (!list.length) {
+					log("\nNo invoices.\n");
+					return;
+				}
+				log("");
+				table(
+					["NUMBER", "STATUS", "TOTAL", "ISSUED", "PAID"],
+					list.map((inv: any) => [
+						colors.cyan(inv.externalNumber || (inv.id || "").slice(0, 8)),
+						inv.status || "-",
+						`${((inv.totalHalalas ?? 0) / 100).toFixed(2)} SAR`,
+						inv.issuedAt ? new Date(inv.issuedAt).toLocaleDateString() : "-",
+						inv.paidAt
+							? new Date(inv.paidAt).toLocaleDateString()
+							: colors.dim("—"),
+					]),
+				);
+				log("");
+			} catch (err) {
+				handleError(err);
+			}
+		});
+
+	billing
+		.command("invoice")
+		.argument("<invoice-id>", "Invoice ID")
+		.description("Show invoice details")
+		.action(async (invoiceId) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching invoice...");
+				const inv: any = await client.payment.getInvoice.query({ invoiceId });
+				succeedSpinner();
+				if (isJsonMode()) {
+					outputData(inv);
+					return;
+				}
+				log("");
+				log(colors.bold(`Invoice ${inv.externalNumber || inv.id}`));
+				log(`  Status:   ${inv.status || "-"}`);
+				log(`  Subtotal: ${((inv.subtotalHalalas ?? 0) / 100).toFixed(2)} SAR`);
+				log(`  VAT:      ${((inv.taxHalalas ?? 0) / 100).toFixed(2)} SAR`);
+				log(
+					`  Total:    ${colors.bold(`${((inv.totalHalalas ?? 0) / 100).toFixed(2)} SAR`)}`,
+				);
+				log(
+					`  Issued:   ${inv.issuedAt ? new Date(inv.issuedAt).toLocaleDateString() : "-"}`,
+				);
+				if (inv.paidAt)
+					log(`  Paid:     ${new Date(inv.paidAt).toLocaleDateString()}`);
+				else if (inv.dueAt)
+					log(`  Due:      ${new Date(inv.dueAt).toLocaleDateString()}`);
+				log("");
+			} catch (err) {
+				handleError(err);
+			}
+		});
+
+	billing
+		.command("invoice-pdf")
+		.argument("<invoice-id>", "Invoice ID")
+		.option("--locale <locale>", "PDF locale: en or ar", "en")
+		.description("Get a link to the invoice PDF")
+		.action(async (invoiceId, options) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching PDF link...");
+				const res: any = await client.payment.getInvoicePdfUrl.query({
+					invoiceId,
+					locale: options.locale === "ar" ? "ar" : "en",
+				});
+				succeedSpinner();
+				const rawUrl = res?.url ? String(res.url) : "";
+				const url = rawUrl.startsWith("http")
+					? rawUrl
+					: rawUrl
+						? `${getApiUrl()}${rawUrl}`
+						: "";
+				if (isJsonMode()) {
+					outputData({ url });
+					return;
+				}
+				log("");
+				log(`PDF: ${colors.cyan(url || "-")}`);
+				log("");
+			} catch (err) {
+				handleError(err);
+			}
+		});
+
+	billing
+		.command("pay-invoice")
+		.argument("<invoice-id>", "Invoice ID")
+		.description("Pay an outstanding invoice now (org owner only)")
+		.action(async (invoiceId) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Submitting payment...");
+				const res: any = await client.payment.payInvoiceNow.mutate({
+					invoiceId,
+				});
+				succeedSpinner(
+					res?.status === "already_paid"
+						? "Invoice already paid."
+						: "Payment queued.",
+				);
+				if (isJsonMode()) outputData(res);
 			} catch (err) {
 				handleError(err);
 			}

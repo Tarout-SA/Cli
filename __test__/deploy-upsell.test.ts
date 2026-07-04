@@ -166,8 +166,8 @@ describe("runInlineTargetedRemedy", () => {
 			subscription: {
 				getCurrent: { query: async () => ({ planQuantity: 2 }) },
 				setPlanQuantity: {
-					mutate: async (input: { quantity: number }) => {
-						setQuantity = input.quantity;
+					mutate: async (input: { planQuantity: number }) => {
+						setQuantity = input.planQuantity;
 						return { applied: true };
 					},
 				},
@@ -195,8 +195,8 @@ describe("runInlineTargetedRemedy", () => {
 					},
 				},
 				setPlanQuantity: {
-					mutate: async (input: { quantity: number }) => {
-						setQuantity = input.quantity;
+					mutate: async (input: { planQuantity: number }) => {
+						setQuantity = input.planQuantity;
 						return { applied: true };
 					},
 				},

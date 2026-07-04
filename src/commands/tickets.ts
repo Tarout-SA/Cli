@@ -1,7 +1,12 @@
 import type { Command } from "commander";
 import { getApiClient } from "../lib/api.js";
 import { isLoggedIn } from "../lib/config.js";
-import { AuthError, handleError, NotFoundError } from "../lib/errors.js";
+import {
+	AuthError,
+	handleError,
+	InvalidArgumentError,
+	NotFoundError,
+} from "../lib/errors.js";
 import {
 	box,
 	colors,
@@ -361,53 +366,13 @@ export function registerTicketsCommands(program: Command) {
 		.command("upload-url")
 		.argument("<ticket>", "Ticket ID")
 		.argument("<filename>", "File name to upload")
-		.description("Get a pre-signed URL to upload a file attachment to a ticket")
-		.action(async (ticketIdentifier, filename) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-				const client = getApiClient();
-				let ticketId = ticketIdentifier;
-				if (ticketIdentifier.length < 36) {
-					const _spinner = startSpinner("Finding ticket...");
-					const result = await client.supportTicket.list.query({ limit: 50 });
-					const list = result?.tickets || result?.items || result || [];
-					const found = list.find((t: any) =>
-						(t.ticketId || t.id || "").startsWith(ticketIdentifier),
-					);
-					if (!found) {
-						failSpinner();
-						throw new NotFoundError("Ticket", ticketIdentifier);
-					}
-					ticketId = found.ticketId || found.id;
-					succeedSpinner();
-				}
-				const _spinner = startSpinner("Getting upload URL...");
-				const data = await client.supportTicket.getUploadUrl.query({
-					ticketId,
-					fileName: filename,
-				} as any);
-				succeedSpinner();
-				if (isJsonMode()) outputData(data);
-				else {
-					log("");
-					log(colors.bold("Upload URL"));
-					log(`  URL: ${colors.cyan((data as any).uploadUrl || "-")}`);
-					log(`  Expires: ${(data as any).expiresAt || "-"}`);
-					log("");
-				}
-			} catch (err) {
-				handleError(err);
-			}
-		});
-
-	// Register an uploaded attachment on a ticket
-	tickets
-		.command("attach")
-		.argument("<ticket>", "Ticket ID")
-		.argument("<filename>", "File name that was uploaded")
-		.option("--file-key <key>", "Storage file key returned by the upload")
+		.option(
+			"--content-type <type>",
+			"MIME type of the file (e.g. image/png)",
+			"application/octet-stream",
+		)
 		.option("--size <bytes>", "File size in bytes", Number.parseInt)
-		.description("Register an uploaded file as a ticket attachment")
+		.description("Get a pre-signed URL to upload a file attachment to a ticket")
 		.action(async (ticketIdentifier, filename, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
@@ -427,18 +392,80 @@ export function registerTicketsCommands(program: Command) {
 					ticketId = found.ticketId || found.id;
 					succeedSpinner();
 				}
-				const _spinner = startSpinner("Creating attachment record...");
-				const result = await client.supportTicket.createAttachment.mutate({
+				const fileSize = options.size;
+				if (!fileSize || Number.isNaN(fileSize)) {
+					throw new InvalidArgumentError(
+						"--size <bytes> is required (the byte length of the file to upload).",
+					);
+				}
+				const _spinner = startSpinner("Getting upload URL...");
+				// getUploadUrl is a mutation and needs contentType + fileSize; it returns
+				// { uploadUrl, storageKey }. Use storageKey with `tickets attach`.
+				const data = await client.supportTicket.getUploadUrl.mutate({
 					ticketId,
 					fileName: filename,
-					fileKey: options.fileKey,
-					fileSize: options.size,
+					contentType: options.contentType || "application/octet-stream",
+					fileSize,
+				} as any);
+				succeedSpinner();
+				if (isJsonMode()) outputData(data);
+				else {
+					log("");
+					log(colors.bold("Upload URL"));
+					log(`  URL:        ${colors.cyan((data as any).uploadUrl || "-")}`);
+					log(`  Storage key: ${colors.dim((data as any).storageKey || "-")}`);
+					log("");
+					log(
+						colors.dim(
+							"Upload the file bytes to the URL (HTTP PUT), then register it with `tarout tickets attach`.",
+						),
+					);
+					log("");
+				}
+			} catch (err) {
+				handleError(err);
+			}
+		});
+
+	// Register an uploaded attachment on a support MESSAGE
+	tickets
+		.command("attach")
+		.argument("<filename>", "File name that was uploaded")
+		.requiredOption(
+			"--message-id <id>",
+			"Support message ID the attachment belongs to (from a reply)",
+		)
+		.requiredOption(
+			"--storage-key <key>",
+			"Storage key returned by `tarout tickets upload-url`",
+		)
+		.requiredOption("--content-type <type>", "MIME type of the uploaded file")
+		.requiredOption("--size <bytes>", "File size in bytes", Number.parseInt)
+		.description("Register an uploaded file as an attachment on a message")
+		.action(async (filename, options) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const fileSize = options.size;
+				if (!fileSize || Number.isNaN(fileSize)) {
+					throw new InvalidArgumentError("--size <bytes> must be a number.");
+				}
+				const client = getApiClient();
+				const _spinner = startSpinner("Creating attachment record...");
+				// createAttachment attaches to a MESSAGE (not a ticket): it requires
+				// messageId + the exact storageKey from getUploadUrl, plus contentType
+				// and fileSize matching the uploaded object.
+				const result = await client.supportTicket.createAttachment.mutate({
+					messageId: options.messageId,
+					fileName: filename,
+					fileSize,
+					contentType: options.contentType,
+					storageKey: options.storageKey,
 				} as any);
 				succeedSpinner("Attachment created!");
 				if (isJsonMode()) outputData(result);
 				else {
 					quietOutput((result as any)?.attachmentId || filename);
-					log(`\n${colors.success("File attached to ticket.")}\n`);
+					log(`\n${colors.success("File attached to message.")}\n`);
 				}
 			} catch (err) {
 				handleError(err);

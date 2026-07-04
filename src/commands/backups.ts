@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import { getApiClient } from "../lib/api.js";
 import { isLoggedIn } from "../lib/config.js";
-import { AuthError, handleError } from "../lib/errors.js";
+import { AuthError, CliError, handleError } from "../lib/errors.js";
 import {
 	colors,
 	isJsonMode,
@@ -10,6 +10,7 @@ import {
 	shouldSkipConfirmation,
 	table,
 } from "../lib/output.js";
+import { ExitCode } from "../utils/exit-codes.js";
 import { confirm, input, select } from "../utils/prompts.js";
 import { startSpinner, succeedSpinner } from "../utils/spinner.js";
 
@@ -402,46 +403,30 @@ export function registerBackupsCommands(program: Command) {
 			}
 		});
 
-	// Restore a backup with real-time logs
+	// Restore a backup.
+	//
+	// The platform exposes restore ONLY as a tRPC subscription
+	// (`backup.restoreBackupWithLogs`, streamed for live logs). The CLI talks to
+	// the API over `httpBatchLink`, which cannot consume subscriptions, so there
+	// is no transport that can drive a restore from here today. Rather than emit
+	// a cryptic "no mutation procedure" error (the old code called `.mutate()` on
+	// a subscription, with the wrong input shape too), fail with clear guidance.
+	//
+	// TODO(platform): expose a non-subscription restore endpoint (mutation that
+	// enqueues the job and returns a jobId) so the CLI can offer restore. Tracked
+	// in the CLI/dashboard consistency work.
 	backups
 		.command("restore")
 		.argument("<backup-id>", "Backup configuration ID")
 		.argument("<backup-file>", "Backup file name to restore")
-		.description("Restore a backup with streaming log output")
-		.action(async (backupId, backupFile) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-				if (!shouldSkipConfirmation()) {
-					const { confirm: confirmFn } = await import("../utils/prompts.js");
-					const ok = await confirmFn(
-						`Restore backup file "${backupFile}"? This will overwrite current data.`,
-						false,
-					);
-					if (!ok) {
-						log("Cancelled.");
-						return;
-					}
-				}
-				const client = getApiClient();
-				const _spinner = startSpinner("Starting restore...");
-				const result = await client.backup.restoreBackupWithLogs.mutate({
-					backupId,
-					backupFile,
-				} as any);
-				succeedSpinner("Restore initiated!");
-				if (isJsonMode()) outputData(result);
-				else {
-					log("");
-					log(
-						colors.success("Restore job started. Monitor logs for progress."),
-					);
-					if ((result as any)?.jobId)
-						log(`  Job ID: ${colors.dim((result as any).jobId)}`);
-					log("");
-				}
-			} catch (err) {
-				handleError(err);
-			}
+		.description("Restore a backup (currently dashboard-only)")
+		.action(async (_backupId, _backupFile) => {
+			handleError(
+				new CliError(
+					"Backup restore isn't available from the CLI yet — the platform only exposes it as a streaming endpoint. Restore from the Tarout dashboard for now.",
+					ExitCode.GENERAL_ERROR,
+				),
+			);
 		});
 }
 

@@ -485,7 +485,7 @@ export function registerUpCommand(program: Command): void {
 						branch: options.branch ?? "main",
 						buildPath: "/",
 						githubId,
-						watchPaths: null,
+						watchPaths: [],
 						enableSubmodules: false,
 					});
 					emitEvent({

@@ -270,6 +270,79 @@ export function registerAccountCommands(program: Command) {
 		);
 
 	apiKeys
+		.command("list")
+		.alias("ls")
+		.description("List your personal API keys")
+		.action(async () => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching API keys...");
+				const keys = await client.user.listApiKeys.query();
+				succeedSpinner();
+				if (isJsonMode()) {
+					outputData(keys);
+					return;
+				}
+				const list = Array.isArray(keys) ? keys : [];
+				if (!list.length) {
+					log("\nNo API keys.\n");
+					return;
+				}
+				log("");
+				table(
+					["ID", "NAME", "PREFIX", "ENABLED", "LAST USED", "EXPIRES"],
+					list.map((k: any) => [
+						colors.cyan((k.id || "").slice(0, 12)),
+						k.name || "-",
+						k.prefix || k.start || "-",
+						k.enabled !== false ? colors.success("yes") : colors.dim("no"),
+						k.lastRequest
+							? new Date(k.lastRequest).toLocaleDateString()
+							: colors.dim("never"),
+						k.expiresAt
+							? new Date(k.expiresAt).toLocaleDateString()
+							: colors.dim("never"),
+					]),
+				);
+				log("");
+			} catch (err) {
+				failSpinner();
+				handleError(err);
+			}
+		});
+
+	apiKeys
+		.command("rotate <api-key-id>")
+		.description("Rotate a personal API key (new secret, same settings)")
+		.action(async (apiKeyId: string) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Rotating API key...");
+				const result = await client.user.rotateApiKey.mutate({
+					apiKeyId,
+				} as any);
+				succeedSpinner("API key rotated.");
+				if (isJsonMode()) {
+					outputData(result);
+					return;
+				}
+				const r = result as any;
+				log("");
+				log(colors.bold("API Key Rotated"));
+				log(colors.warn("Save this key — it won't be shown again!"));
+				log("");
+				log(`  Key: ${colors.cyan(r.token || r.key || r.apiKey || "-")}`);
+				log(`  ID:  ${colors.dim(r.id || apiKeyId)}`);
+				log("");
+			} catch (err) {
+				failSpinner();
+				handleError(err);
+			}
+		});
+
+	apiKeys
 		.command("delete <api-key-id>")
 		.alias("rm")
 		.description("Delete a personal API key")
@@ -420,8 +493,13 @@ export function registerAccountCommands(program: Command) {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching container metrics...");
-				const metrics = await client.user.getContainerMetrics.query({
+				// getContainerMetrics keys on the Coolify appName slug, not the
+				// application id — resolve the app record first.
+				const app = await client.application.one.query({
 					applicationId: appId,
+				});
+				const metrics = await client.user.getContainerMetrics.query({
+					appName: (app as any)?.appName,
 				} as any);
 				succeedSpinner();
 				if (isJsonMode()) {
@@ -444,13 +522,18 @@ export function registerAccountCommands(program: Command) {
 	// Check user organizations
 	account
 		.command("check-orgs")
-		.description("Check which organizations the current user belongs to")
-		.action(async () => {
+		.argument("[user-id]", "User ID to check (defaults to the current user)")
+		.description("Check which organizations a user belongs to (org owner only)")
+		.action(async (userIdArg) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
 				const _spinner = startSpinner("Checking organizations...");
-				const result = await client.user.checkUserOrganizations.query();
+				// Server requires a userId; default to the signed-in user.
+				const userId = userIdArg || (await client.user.get.query())?.id;
+				const result = await client.user.checkUserOrganizations.query({
+					userId,
+				} as any);
 				succeedSpinner();
 				if (isJsonMode()) {
 					outputData(result);
@@ -502,9 +585,9 @@ export function registerAccountCommands(program: Command) {
 				table(
 					["ID", "NAME", "EMAIL", "ROLE"],
 					list.map((m: any) => [
-						colors.cyan((m.id || m.userId || "").slice(0, 8)),
-						m.name || "-",
-						m.email || "-",
+						colors.cyan((m.userId || m.user?.id || m.id || "").slice(0, 8)),
+						m.user?.name || "-",
+						m.user?.email || "-",
 						m.role || "-",
 					]),
 				);
@@ -570,7 +653,10 @@ export function registerAccountCommands(program: Command) {
 					));
 				const client = getApiClient();
 				const _spinner = startSpinner("Assigning permissions...");
-				await client.user.assignPermissions.mutate({ userId, role } as any);
+				await client.user.assignPermissions.mutate({
+					id: userId,
+					role,
+				} as any);
 				succeedSpinner("Permissions updated!");
 				if (isJsonMode()) outputData({ userId, role });
 			} catch (err) {
@@ -578,37 +664,11 @@ export function registerAccountCommands(program: Command) {
 			}
 		});
 
-	// Send org invitation (org owner)
-	account
-		.command("invite")
-		.argument("<email>", "Email address to invite")
-		.option(
-			"--role <role>",
-			"Role for the invited user: admin, member",
-			"member",
-		)
-		.description("Send an organization invitation (org owner only)")
-		.action(async (email, options) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-				const client = getApiClient();
-				const _spinner = startSpinner("Sending invitation...");
-				await client.user.sendInvitation.mutate({
-					email,
-					role: options.role,
-				} as any);
-				succeedSpinner("Invitation sent!");
-				if (isJsonMode())
-					outputData({ invited: true, email, role: options.role });
-				else {
-					log("");
-					log(colors.success(`Invitation sent to ${email}.`));
-					log("");
-				}
-			} catch (err) {
-				handleError(err);
-			}
-		});
+	// NOTE: `account invite` was removed. Creating an organization invitation
+	// goes through better-auth (`authClient.organization.inviteMember`), which is
+	// not reachable over the CLI's x-api-key transport, and `user.sendInvitation`
+	// only *re-sends* an existing invitation. Invite members from the dashboard.
+	// TODO(platform): expose an API-key-callable invite mutation for CLI parity.
 
 	// Get user backups (org owner)
 	account

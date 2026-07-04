@@ -41,9 +41,10 @@ export function registerInboxCommands(program: Command) {
 					return;
 				}
 
+				// appNotification.list returns { notifications, nextCursor }.
 				const list = Array.isArray(result)
 					? result
-					: (result as any)?.items || [];
+					: (result as any)?.notifications || [];
 				if (list.length === 0) {
 					log("");
 					log("No notifications.");
@@ -54,7 +55,8 @@ export function registerInboxCommands(program: Command) {
 				table(
 					["READ", "TITLE", "MESSAGE", "DATE"],
 					list.map((n: any) => [
-						n.readAt ? colors.dim("●") : colors.cyan("●"),
+						// `read` is a boolean on the model (not `readAt`).
+						n.read ? colors.dim("●") : colors.cyan("●"),
 						n.title || "-",
 						(n.message || "-").slice(0, 50),
 						n.createdAt ? new Date(n.createdAt).toLocaleDateString() : "-",

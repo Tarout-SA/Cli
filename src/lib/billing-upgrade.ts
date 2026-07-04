@@ -180,8 +180,11 @@ export async function performBillingChange(
 			result = await client.subscription.purchaseAddons.mutate({ items });
 		}
 	} else {
+		// Server contract: `setPlanQuantityInput` takes `{ planQuantity }` (see
+		// validations/subscription.ts), not `{ quantity }`. The dashboard's
+		// subscription-manager sends `planQuantity` too.
 		result = await client.subscription.setPlanQuantity.mutate({
-			quantity: input.quantity,
+			planQuantity: input.quantity,
 		});
 	}
 

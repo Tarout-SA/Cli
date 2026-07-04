@@ -26,6 +26,33 @@ interface AppSummary {
 	name: string;
 }
 
+// The server stores the check interval as a cron expression (validated with
+// cron-parser). Accept friendly shorthands (5m, 1h, ...) from the CLI and map
+// them to cron; pass through anything that already looks like a cron string.
+const INTERVAL_TO_CRON: Record<string, string> = {
+	"1m": "* * * * *",
+	"2m": "*/2 * * * *",
+	"5m": "*/5 * * * *",
+	"10m": "*/10 * * * *",
+	"15m": "*/15 * * * *",
+	"30m": "*/30 * * * *",
+	"1h": "0 * * * *",
+	"60m": "0 * * * *",
+	"6h": "0 */6 * * *",
+	"12h": "0 */12 * * *",
+	"24h": "0 0 * * *",
+	"1d": "0 0 * * *",
+};
+
+function toCronExpression(interval: string): string {
+	const key = interval?.trim().toLowerCase();
+	if (INTERVAL_TO_CRON[key]) return INTERVAL_TO_CRON[key];
+	// Already a cron expression (space-separated fields)? Pass it through.
+	if (key?.includes(" ")) return interval.trim();
+	// Unknown shorthand — fall back to the server default (every 5 minutes).
+	return "*/5 * * * *";
+}
+
 export function registerMonitorCommands(program: Command) {
 	const monitor = program
 		.command("monitor")
@@ -88,7 +115,7 @@ export function registerMonitorCommands(program: Command) {
 						m.name,
 						truncate(m.url || "", 35),
 						m.checkInterval || "5m",
-						formatMonitorStatus(m.status),
+						formatMonitorStatus(m.lastStatus),
 						m.enabled !== false ? colors.success("yes") : colors.dim("no"),
 					]),
 				);
@@ -173,7 +200,7 @@ export function registerMonitorCommands(program: Command) {
 					name: monitorName,
 					url: monitorUrl,
 					method: options.method?.toUpperCase() || "GET",
-					checkInterval: options.interval || "5m",
+					checkInterval: toCronExpression(options.interval || "5m"),
 					expectedStatus: options.status || 200,
 				});
 
@@ -227,23 +254,25 @@ export function registerMonitorCommands(program: Command) {
 				if (details) {
 					log(colors.bold(details.name));
 					log(`  URL: ${colors.cyan(details.url)}`);
-					log(`  Status: ${formatMonitorStatus(details.status)}`);
+					log(`  Status: ${formatMonitorStatus(details.lastStatus)}`);
 					log("");
 				}
 
 				if (stats) {
 					log(colors.bold("Uptime Statistics"));
-					if (stats.uptime24h !== undefined) {
-						log(`  24h uptime: ${formatUptime(stats.uptime24h)}`);
+					if (stats.uptimePercentage24h !== undefined) {
+						log(`  24h uptime: ${formatUptime(stats.uptimePercentage24h)}`);
 					}
-					if (stats.uptime7d !== undefined) {
-						log(`  7d uptime: ${formatUptime(stats.uptime7d)}`);
+					if (stats.uptimePercentage7d !== undefined) {
+						log(`  7d uptime: ${formatUptime(stats.uptimePercentage7d)}`);
 					}
-					if (stats.uptime30d !== undefined) {
-						log(`  30d uptime: ${formatUptime(stats.uptime30d)}`);
+					if (stats.uptimePercentage30d !== undefined) {
+						log(`  30d uptime: ${formatUptime(stats.uptimePercentage30d)}`);
 					}
-					if (stats.avgResponseTime !== undefined) {
-						log(`  Avg response: ${colors.cyan(`${stats.avgResponseTime}ms`)}`);
+					if (stats.averageResponseTime !== undefined) {
+						log(
+							`  Avg response: ${colors.cyan(`${stats.averageResponseTime}ms`)}`,
+						);
 					}
 					if (stats.totalChecks !== undefined) {
 						log(`  Total checks: ${stats.totalChecks}`);
@@ -317,7 +346,8 @@ export function registerMonitorCommands(program: Command) {
 
 				if (options.name) updates.name = options.name;
 				if (options.url) updates.url = options.url;
-				if (options.interval) updates.checkInterval = options.interval;
+				if (options.interval)
+					updates.checkInterval = toCronExpression(options.interval);
 				if (options.enable) updates.enabled = true;
 				if (options.disable) updates.enabled = false;
 
@@ -417,12 +447,10 @@ export function registerMonitorCommands(program: Command) {
 					["TIME", "STATUS", "CODE", "RESPONSE TIME", "ERROR"],
 					items.map((l: any) => [
 						formatDateTime(l.checkedAt || l.createdAt),
-						l.isUp || l.status === "up"
-							? colors.success("up")
-							: colors.error("down"),
+						l.success ? colors.success("up") : colors.error("down"),
 						String(l.statusCode || l.httpStatus || "-"),
 						l.responseTime ? `${l.responseTime}ms` : colors.dim("-"),
-						l.error || l.errorMessage || colors.dim("-"),
+						l.errorMessage || l.error || colors.dim("-"),
 					]),
 				);
 				log("");
