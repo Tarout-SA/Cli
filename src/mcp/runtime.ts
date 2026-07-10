@@ -27,7 +27,8 @@ export interface Envelope {
 export interface ToolText {
 	content: Array<{ type: "text"; text: string }>;
 	isError?: boolean;
-	structuredContent?: unknown;
+	structuredContent?: Record<string, unknown>;
+	[key: string]: unknown;
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: tRPC proxy client is untyped in the CLI package.
@@ -35,13 +36,17 @@ export type TrpcClient = any;
 
 export function okResult(data: unknown): ToolText {
 	const text =
-		typeof data === "string"
-			? JSON.stringify(data)
-			: JSON.stringify(data, null, 2);
-	return {
+		typeof data === "string" ? JSON.stringify(data) : JSON.stringify(data, null, 2);
+	const result: ToolText = {
 		content: [{ type: "text", text }],
-		structuredContent: data === undefined ? null : (data as unknown),
 	};
+	if (data !== null && data !== undefined) {
+		result.structuredContent =
+			typeof data === "object" && !Array.isArray(data)
+				? (data as Record<string, unknown>)
+				: { value: data };
+	}
+	return result;
 }
 
 export function errorResult(env: Envelope): ToolText {

@@ -41,6 +41,18 @@ describe("okResult", () => {
 	it("stringifies raw strings verbatim", () => {
 		const r = okResult("hi");
 		expect(r.content[0].text).toBe('"hi"');
+		expect(r.structuredContent).toEqual({ value: "hi" });
+	});
+
+	it("wraps primitives in { value } for structuredContent", () => {
+		const r = okResult(42);
+		expect(r.content[0].text).toBe("42");
+		expect(r.structuredContent).toEqual({ value: 42 });
+	});
+
+	it("omits structuredContent for null/undefined", () => {
+		expect(okResult(null).structuredContent).toBeUndefined();
+		expect(okResult(undefined).structuredContent).toBeUndefined();
 	});
 });
 

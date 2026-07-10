@@ -14,17 +14,7 @@ import {
 	loadManifest,
 	type ManifestEntry,
 } from "../../lib/surface-manifest.js";
-import { errorResult, type ToolText, withAuth } from "../runtime.js";
-
-// The SDK's ToolCallback expects a `CallToolResult` where `structuredContent`
-// is `Record<string, unknown> | undefined`. Our runtime's `ToolText` types it
-// as `unknown` (and populates it with the raw handler result). The two shapes
-// are structurally compatible at runtime (JSON-serialisable data), so we
-// bridge the mismatch with a single-purpose coercion at the register boundary
-// rather than loosening `runtime.ts` for every future tool.
-// biome-ignore lint/suspicious/noExplicitAny: SDK ToolCallback shape leaks here.
-type ToolResultShape = any;
-const asToolResult = (r: ToolText): ToolResultShape => r;
+import { errorResult, withAuth } from "../runtime.js";
 
 async function resolveEntry(procedure: string): Promise<ManifestEntry | undefined> {
 	const client = getApiClient();
@@ -91,20 +81,18 @@ export function registerCallTools(server: McpServer): void {
 						body.error.startsWith("Unknown procedure") ||
 						body.error.startsWith("Procedure path")
 					) {
-						return asToolResult(
-							errorResult({
-								error: body.error,
-								code: "NOT_FOUND",
-								remediation:
-									"Run list_procedures to see the current surface.",
-							}),
-						);
+						return errorResult({
+							error: body.error,
+							code: "NOT_FOUND",
+							remediation:
+								"Run list_procedures to see the current surface.",
+						});
 					}
 				} catch {
 					// content isn't JSON — leave the envelope as-is
 				}
 			}
-			return asToolResult(r);
+			return r;
 		},
 	);
 
@@ -120,15 +108,13 @@ export function registerCallTools(server: McpServer): void {
 			annotations: { readOnlyHint: true },
 		},
 		async ({ filter }) =>
-			asToolResult(
-				await withAuth(async (client) => {
-					const manifest = await fetchManifestFresh(client, getApiUrl());
-					const matched = manifest.filter(
-						(m) => !filter || m.path.includes(filter),
-					);
-					return { count: matched.length, procedures: matched };
-				}),
-			),
+			await withAuth(async (client) => {
+				const manifest = await fetchManifestFresh(client, getApiUrl());
+				const matched = manifest.filter(
+					(m) => !filter || m.path.includes(filter),
+				);
+				return { count: matched.length, procedures: matched };
+			}),
 	);
 
 	server.registerTool(
@@ -143,19 +129,17 @@ export function registerCallTools(server: McpServer): void {
 			annotations: { readOnlyHint: true },
 		},
 		async ({ procedure }) =>
-			asToolResult(
-				await withAuth(async () => {
-					const cached = await describeCache();
-					const key = procedure.replace(/\./g, "__");
-					const found = cached.get(key);
-					if (!found) {
-						throw Object.assign(new Error(`Unknown procedure: ${procedure}`), {
-							code: "NOT_FOUND",
-						});
-					}
-					return found;
-				}, procedure),
-			),
+			await withAuth(async () => {
+				const cached = await describeCache();
+				const key = procedure.replace(/\./g, "__");
+				const found = cached.get(key);
+				if (!found) {
+					throw Object.assign(new Error(`Unknown procedure: ${procedure}`), {
+						code: "NOT_FOUND",
+					});
+				}
+				return found;
+			}, procedure),
 	);
 }
 
