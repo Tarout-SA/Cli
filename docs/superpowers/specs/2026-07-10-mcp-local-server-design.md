@@ -46,6 +46,13 @@ long tail, and mirrors the CLI's non-interactive JSON behavior.
    - `dashboard` (opens a browser)
    - hosted-endpoint changes / parity-test changes
    - `tarout agent init` writing `.mcp.json` (follow-up)
+5. **Agent bootstrap: ship a hosted setup prompt** at
+   `https://tarout.sa/agent-setup/prompt.md`, in the Cloudflare
+   `developers.cloudflare.com/agent-setup/prompt.md` style — a
+   fetch-and-follow bootstrap that installs the CLI, registers the MCP server
+   with Claude Code, and defers auth to first tool call. Details in the
+   "Agent bootstrap" section below. Claude Code plugin + marketplace path is
+   a follow-up (needs a skills bundle to be worth the packaging overhead).
 
 ## Architecture
 
@@ -254,6 +261,64 @@ vocabulary.
 Location: `cli/__test__/mcp/` (new subdir); mirrors existing layout. All
 vitest — no bun:test specs needed (no `open` mocking involved).
 
+## Agent bootstrap (`tarout.sa/agent-setup/prompt.md`)
+
+Cloudflare exposes `developers.cloudflare.com/agent-setup/prompt.md` as a
+one-URL "fetch this and follow it" bootstrap: the agent reads plain-markdown
+install instructions, runs the commands verbatim, and the plugin's OAuth
+kicks in on first use. We mirror the pattern with a lighter distribution
+(no plugin marketplace yet — the CLI + `tarout-mcp` bin are already on npm).
+
+**Location.** Static file at `platform/public/agent-setup/prompt.md`, served
+by Next.js at `https://tarout.sa/agent-setup/prompt.md` with
+`Content-Type: text/markdown`. `platform/next.config.mjs` adds a header rule
+for `/agent-setup/:path*.md` if the default `application/octet-stream` fights
+Claude Code's fetcher (Cloudflare's file returns `text/plain`; either is
+fine). No API route needed; no dynamic content today.
+
+**Content (verbatim shape).**
+
+```markdown
+# Tarout Agent Setup Instructions
+
+Install the Tarout CLI and register its local MCP server with Claude Code:
+
+    npm i -g @tarout/cli
+    claude mcp add tarout -- tarout-mcp
+
+Then restart Claude Code (or run `/mcp` and reconnect the `tarout` server).
+
+The first Tarout tool call triggers a browser sign-in if you're not
+already authenticated (`tarout login` writes a token to
+`~/.tarout/config.json`; or set `TAROUT_TOKEN` for CI). No OAuth
+integration inside Claude Code — the local CLI owns the token.
+
+For Cursor / Claude Desktop, see the `README` section in
+https://github.com/Tarout-SA/cli#mcp — the same `tarout-mcp` binary
+plugs into their `mcp.json` / `claude_desktop_config.json`.
+
+The full setup prompt is at https://tarout.sa/agent-setup/prompt.md.
+```
+
+**How agents use it.** In a fresh Claude Code session the user (or the
+project's `CLAUDE.md`) says "set up Tarout — see
+https://tarout.sa/agent-setup/prompt.md". The agent WebFetches the URL,
+runs the two commands, restarts the MCP link, and everything else falls
+into the local MCP server's lazy-auth model.
+
+**Follow-up (Phase 2, out of scope here).** Publish a Claude Code plugin
+containing the MCP server + Tarout-specific skills
+(deploy-from-this-directory, debug-deployment, plan-recommendation). The
+prompt.md then flips to the Cloudflare 1:1 shape:
+
+    claude plugin marketplace add tarout-sa/tarout
+    claude plugin install tarout@tarout
+    # then /reload-plugins
+
+That requires: a `.claude-plugin/plugin.json` manifest, a marketplace repo
+under Tarout-SA, and the skill set — none of which we design in this spec.
+Tracked as an open follow-up.
+
 ## Packaging & rollout
 
 - Same `tarout-mcp` bin; tsup already builds `src/mcp/stdio.ts` (see
@@ -270,6 +335,10 @@ vitest — no bun:test specs needed (no `open` mocking involved).
   `feat/mcp-local-server` → PR. Shared `cli/` tree gets reset by concurrent
   Claude sessions and PR merges; the worktree keeps commits safe.
   `node_modules` symlinked from main checkout.
+- **Platform change** (only one, non-CLI): commit
+  `platform/public/agent-setup/prompt.md`. Separate branch + PR on the
+  platform repo (`docs(agent-setup): add tarout MCP bootstrap prompt`) so it
+  can ship independently of the CLI release.
 
 ## Risks & mitigations
 
