@@ -8,6 +8,7 @@ import { registerAppsTools } from "./tools/apps.js";
 import { registerCallTools } from "./tools/call.js";
 import { registerContextTools } from "./tools/context.js";
 import { registerDbTools } from "./tools/db.js";
+import { registerDomainTools } from "./tools/domains.js";
 import { registerEnvTools } from "./tools/env.js";
 import { registerStorageTools } from "./tools/storage.js";
 
@@ -22,5 +23,6 @@ export function createMcpServer(): McpServer {
 	registerAppsTools(server);
 	registerDbTools(server);
 	registerStorageTools(server);
+	registerDomainTools(server);
 	return server;
 }
