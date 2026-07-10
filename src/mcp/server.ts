@@ -1,0 +1,16 @@
+/**
+ * Assembles the McpServer. Each src/mcp/tools/<domain>.ts exports
+ * registerTools(server) — server.ts is the only place that lists them.
+ */
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import packageJson from "../../package.json" with { type: "json" };
+
+export function createMcpServer(): McpServer {
+	const server = new McpServer(
+		{ name: "tarout", version: packageJson.version },
+		{ capabilities: { tools: {} } },
+	);
+	// Tool modules are wired in by later tasks:
+	//   registerCallTools(server); registerContextTools(server); ...
+	return server;
+}
