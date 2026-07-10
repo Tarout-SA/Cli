@@ -3981,7 +3981,7 @@ export async function uploadCurrentDirectorySource(
 	}
 }
 
-async function createSourceArchive(): Promise<string> {
+export async function createSourceArchive(): Promise<string> {
 	const tempDir = mkdtempSync(join(tmpdir(), "tarout-source-"));
 	const archivePath = join(tempDir, "source.zip");
 

@@ -9,6 +9,7 @@ import { registerBillingTools } from "./tools/billing.js";
 import { registerCallTools } from "./tools/call.js";
 import { registerContextTools } from "./tools/context.js";
 import { registerDbTools } from "./tools/db.js";
+import { registerDeployTools } from "./tools/deploy.js";
 import { registerDomainTools } from "./tools/domains.js";
 import { registerEnvTools } from "./tools/env.js";
 import { registerStorageTools } from "./tools/storage.js";
@@ -26,5 +27,6 @@ export function createMcpServer(): McpServer {
 	registerStorageTools(server);
 	registerDomainTools(server);
 	registerBillingTools(server);
+	registerDeployTools(server);
 	return server;
 }
