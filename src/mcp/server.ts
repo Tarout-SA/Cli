@@ -4,13 +4,13 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import packageJson from "../../package.json" with { type: "json" };
+import { registerCallTools } from "./tools/call.js";
 
 export function createMcpServer(): McpServer {
 	const server = new McpServer(
 		{ name: "tarout", version: packageJson.version },
 		{ capabilities: { tools: {} } },
 	);
-	// Tool modules are wired in by later tasks:
-	//   registerCallTools(server); registerContextTools(server); ...
+	registerCallTools(server);
 	return server;
 }
