@@ -9,6 +9,7 @@ import { registerCallTools } from "./tools/call.js";
 import { registerContextTools } from "./tools/context.js";
 import { registerDbTools } from "./tools/db.js";
 import { registerEnvTools } from "./tools/env.js";
+import { registerStorageTools } from "./tools/storage.js";
 
 export function createMcpServer(): McpServer {
 	const server = new McpServer(
@@ -20,5 +21,6 @@ export function createMcpServer(): McpServer {
 	registerEnvTools(server);
 	registerAppsTools(server);
 	registerDbTools(server);
+	registerStorageTools(server);
 	return server;
 }
