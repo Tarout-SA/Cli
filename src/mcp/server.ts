@@ -5,6 +5,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import packageJson from "../../package.json" with { type: "json" };
 import { registerCallTools } from "./tools/call.js";
+import { registerEnvTools } from "./tools/env.js";
 
 export function createMcpServer(): McpServer {
 	const server = new McpServer(
@@ -12,5 +13,6 @@ export function createMcpServer(): McpServer {
 		{ capabilities: { tools: {} } },
 	);
 	registerCallTools(server);
+	registerEnvTools(server);
 	return server;
 }
