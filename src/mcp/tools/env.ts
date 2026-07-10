@@ -131,11 +131,12 @@ export function registerEnvTools(server: McpServer): void {
 		async ({ app: appRef, path: dir, file, maskSecrets }) =>
 			withAuth(async (client) => {
 				const { applicationId, name } = await resolveAppRef(client, appRef);
-				const text = (await client.envVariable.export.query({
+				const result = (await client.envVariable.export.query({
 					applicationId,
 					format: "dotenv",
 					maskSecrets: maskSecrets ?? false,
-				})) as string;
+				})) as { content: string };
+				const text = result.content;
 				const target = resolve(dir ?? process.cwd(), file ?? ".env");
 				writeFileSync(target, text, { mode: 0o600 });
 				return { app: { applicationId, name }, wrote: target, bytes: text.length };

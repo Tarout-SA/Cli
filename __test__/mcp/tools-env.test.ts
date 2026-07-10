@@ -23,7 +23,7 @@ const fakeClient = {
 			]),
 		},
 		import: { mutate: vi.fn().mockResolvedValue({ inserted: 2 }) },
-		export: { query: vi.fn().mockResolvedValue("A=1\nB=2\n") },
+		export: { query: vi.fn().mockResolvedValue({ content: "A=1\nB=2\n" }) },
 	},
 };
 
