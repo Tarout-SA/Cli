@@ -50,7 +50,7 @@ describe("stdio server — stdout hygiene", () => {
 		await new Promise<void>((r) => child.on("exit", () => r()));
 
 		const stdout = Buffer.concat(stdoutChunks).toString("utf8").trim();
-		if (!stdout) return; // No frames yet: OK, at least nothing garbage.
+		expect(stdout.length).toBeGreaterThan(0);
 
 		for (const line of stdout.split("\n").filter((l) => l.length > 0)) {
 			expect(() => JSON.parse(line)).not.toThrow();
