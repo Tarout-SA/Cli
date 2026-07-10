@@ -46,7 +46,7 @@ export function registerBillingTools(server: McpServer): void {
 				addon: z.string().optional(),
 				quantity: z.number().int().positive().optional(),
 				planQuantity: z.number().int().positive().optional(),
-				billingPeriod: z.enum(["MONTHLY", "YEARLY"]).optional(),
+				billingPeriod: z.enum(["monthly", "yearly"]).optional(),
 				wait: z.boolean().optional().default(true),
 				timeoutSeconds: z
 					.number()

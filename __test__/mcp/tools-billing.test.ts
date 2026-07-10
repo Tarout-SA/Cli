@@ -73,4 +73,17 @@ describe("billing tools", () => {
 			}),
 		);
 	});
+
+	it("billing_upgrade forwards billingPeriod as lowercase", async () => {
+		(performBillingChange as any).mockClear();
+		await invoke("billing_upgrade", {
+			plan: "dedicated_small",
+			billingPeriod: "yearly",
+			wait: true,
+		});
+		expect(performBillingChange).toHaveBeenCalledWith(
+			expect.anything(),
+			expect.objectContaining({ billingPeriod: "yearly" }),
+		);
+	});
 });
