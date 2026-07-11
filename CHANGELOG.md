@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0]
+
+### Added
+
+- **`tarout-mcp` is now a self-contained local MCP server** (was a thin stdio
+  proxy). ~36 curated tools plus a `call` / `list_procedures` /
+  `describe_procedure` escape hatch cover the CLI's real capabilities —
+  deploy from the current directory, sync `.env`, connection credentials for
+  Postgres/MySQL/S3-compatible buckets, org/project/env switching, billing
+  upgrade with hosted-checkout polling. Auth is lazy: the server stays alive
+  when logged out; the first tool call returns an `AUTH_ERROR` envelope with
+  remediation.
+- `https://tarout.sa/agent-setup/prompt.md` — fetch-and-follow install
+  bootstrap for coding agents (Claude Code, Cursor, Claude Desktop).
+
+### Changed
+
+- `src/commands/call.ts` reuses `src/lib/surface-manifest.ts` (extracted).
+- `src/commands/env.ts` reuses `src/lib/env-core.ts` (extracted).
+- `src/commands/deploy.ts::createSourceArchive` is now exported.
+
 ## [Unreleased]
 
 ### Changed

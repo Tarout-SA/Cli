@@ -50,16 +50,53 @@ tarout call application.create --input '{"name":"my-app"}' --json
 tarout call deployment.all --input '{"applicationId":"app_123"}'
 ```
 
-## MCP (agent access)
+## MCP server
 
-Connect Claude Desktop / Cursor to Tarout via the bundled `tarout-mcp` bridge:
+`tarout-mcp` is a local MCP server that gives coding agents (Claude Code,
+Cursor, Claude Desktop) the CLI's capabilities as first-class tools:
+deploy from the current directory, sync `.env`, run SQL against Postgres,
+switch org/project/env, upgrade billing, and more — with a `call` escape
+hatch covering the entire platform API.
 
-```json
-{ "mcpServers": { "tarout": { "command": "tarout-mcp" } } }
+### Setup
+
+**Claude Code**
+
+```
+npm i -g @tarout/cli
+claude mcp add tarout -- tarout-mcp
 ```
 
-Hosted agents can hit the Streamable-HTTP endpoint `/api/mcp` directly with an
-`x-api-key` header. See [`docs/MCP.md`](https://github.com/Tarout-SA/Platform/blob/main/docs/MCP.md).
+**Cursor** (`~/.cursor/mcp.json`):
+
+```json
+{
+	"mcpServers": {
+		"tarout": { "command": "tarout-mcp" }
+	}
+}
+```
+
+**Claude Desktop** (`claude_desktop_config.json`):
+
+```json
+{
+	"mcpServers": {
+		"tarout": { "command": "tarout-mcp" }
+	}
+}
+```
+
+### Auth
+
+The server reads your CLI profile (`~/.tarout/config.json`) or the
+`TAROUT_TOKEN` env var. If neither is set, tool calls return a structured
+`AUTH_ERROR` — run `tarout login` on the same machine.
+
+### Bootstrap URL
+
+Point an agent at `https://tarout.sa/agent-setup/prompt.md` and it will
+install the CLI + register the server in one shot.
 
 ## Commands
 
