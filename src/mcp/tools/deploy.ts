@@ -18,7 +18,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
-	buildConfigFromOptions,
 	createAppFromCurrentDirectory,
 	extractEntitlementKeyFromError,
 	inspectCurrentProject,
@@ -172,51 +171,45 @@ export function registerDeployTools(server: McpServer): void {
 						});
 					}
 					try {
-						// The plan-snippet shape (options + inspection) is broader than
-						// the current helper signatures — the helpers are treated as
-						// opaque here so the tool can evolve without churning the MCP
-						// surface. `as any` matches the intent while keeping the
-						// concrete call type-safe (both helpers are mocked in tests).
-						// biome-ignore lint/suspicious/noExplicitAny: helper API shape may drift; treat as opaque.
-						const options = (buildConfigFromOptions as any)(
-							{
-								name: name ?? undefined,
-								yes: true,
-								nonInteractive: true,
-								json: true,
-								plan,
-							},
-							inspection,
-						);
-						// biome-ignore lint/suspicious/noExplicitAny: see comment above; helper signature may include a Profile arg upstream.
-						const created = (await (createAppFromCurrentDirectory as any)(
-							client,
-							options,
-							inspection,
-						)) as {
-							applicationId: string;
-							name: string;
-							organizationId?: string;
+						const { getCurrentProfile } = await import("../../lib/config.js");
+						const profile = getCurrentProfile();
+						if (!profile) {
+							return errorResult({
+								error: "No CLI profile — cannot create an app without one.",
+								code: "AUTH_ERROR",
+								remediation: "Run `tarout login` on the machine running this MCP server.",
+							});
+						}
+						// biome-ignore lint/suspicious/noExplicitAny: DeployOptions is untyped at the tool boundary.
+						const options: any = {
+							name: name ?? undefined,
+							yes: true,
+							nonInteractive: true,
+							json: true,
 						};
+						if (plan) options.plan = plan;
+						const created = (await createAppFromCurrentDirectory(
+							client,
+							profile,
+							options,
+						)) as { applicationId: string; name: string; organizationId?: string };
 						applicationId = created.applicationId;
 						appName = created.name;
 						setProjectConfig(
 							{
 								applicationId,
 								name: appName,
-								organizationId: created.organizationId ?? "",
+								organizationId: created.organizationId ?? profile.organizationId,
 								linkedAt: new Date().toISOString(),
 							},
 							cwd,
 						);
 					} catch (err) {
 						if (isEntitlementError(err)) {
-							const catalog = (await client.subscription.getCatalog
+							// biome-ignore lint/suspicious/noExplicitAny: catalog shape narrows via optional chaining.
+							const catalog: any = await client.subscription.getCatalog
 								.query()
-								.catch(() => ({ plans: [], addons: [] }))) as {
-								plans: Array<{ planKey: string }>;
-								addons: Array<{ addonKey: string }>;
-							};
+								.catch(() => ({ plans: [], addons: [] }));
 							const failedKey = extractEntitlementKeyFromError(err);
 							const remedy = failedKey
 								? resolveEntitlementRemedy(failedKey, catalog, {})

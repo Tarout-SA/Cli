@@ -27,6 +27,18 @@ vi.mock("../../src/commands/deploy", () => ({
 	createSourceArchive: vi.fn(async () => "/tmp/fake-archive.zip"),
 }));
 
+const defaultProfile = {
+	token: "tok",
+	apiUrl: "https://api.test",
+	organizationId: "org_test",
+	organizationName: "Test",
+	environmentId: "env_test",
+	environmentName: "prod",
+	userId: "u1",
+	userEmail: "u@test",
+};
+const getCurrentProfileMock = vi.fn(() => defaultProfile as unknown);
+
 vi.mock("../../src/lib/config", () => ({
 	isLoggedIn: () => true,
 	getToken: () => "tok",
@@ -35,6 +47,7 @@ vi.mock("../../src/lib/config", () => ({
 	setProjectConfig: () => {},
 	isProjectLinked: () => false,
 	removeProjectConfig: () => {},
+	getCurrentProfile: () => getCurrentProfileMock(),
 }));
 
 const fakeClient = {
@@ -205,5 +218,17 @@ describe("deploy tool", () => {
 		expect(body.code).toBe("PERMISSION_DENIED");
 		expect(body.details?.entitlementKey).toBe("app.free.slots");
 		expect(body.details?.remedy?.command).toContain("tarout billing");
+	});
+
+	it("returns AUTH_ERROR envelope when profile is missing and createIfMissing", async () => {
+		getCurrentProfileMock.mockReturnValueOnce(null as unknown as typeof defaultProfile);
+		const r = await invoke("deploy", {
+			path: process.cwd(),
+			wait: false,
+			createIfMissing: true,
+		});
+		expect(r.isError).toBe(true);
+		const body = JSON.parse(r.content[0].text) as { code: string };
+		expect(body.code).toBe("AUTH_ERROR");
 	});
 });
