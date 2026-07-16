@@ -89,7 +89,9 @@ export function registerAgentCommands(program: Command): void {
 					`Agent: ${colors.cyan(result.agent)}`,
 					result.files.map((file) => {
 						const label = `${colors.bold(file.action)} ${file.path}`;
-						return file.reason ? `${label} — ${colors.dim(file.reason)}` : label;
+						return file.reason
+							? `${label} — ${colors.dim(file.reason)}`
+							: label;
 					}),
 				);
 				for (const file of result.files) {

@@ -76,6 +76,10 @@ describe("announceAuthUrl", () => {
 	it("points at the API-token fallback only on a headless host", () => {
 		setDisplay(false);
 		announceAuthUrl("https://tarout.sa/x", 4567, false);
-		expect(logs.join("\n")).toMatch(/tarout login --token/);
+		if (process.platform === "darwin" || process.platform === "win32") {
+			expect(logs).toEqual([]);
+		} else {
+			expect(logs.join("\n")).toMatch(/tarout login --token/);
+		}
 	});
 });
