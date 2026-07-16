@@ -79,7 +79,10 @@ export async function platformFetch(
 	const response = await fetch(input, { ...init, headers });
 	if (response.status !== 401) return response;
 
-	const body = await response.clone().text().catch(() => "");
+	const body = await response
+		.clone()
+		.text()
+		.catch(() => "");
 	if (!isPasswordGateResponse(body)) return response;
 
 	const cookie = await unlockPasswordGate(url.origin);

@@ -122,11 +122,10 @@ export function registerLinkCommands(program: Command) {
 						}),
 					);
 
-					const selectedId = await select(
-						"Select an application:",
-						choices,
-						{ field: "app", flag: "--app" },
-					);
+					const selectedId = await select("Select an application:", choices, {
+						field: "app",
+						flag: "--app",
+					});
 					selectedApp =
 						apps.find(
 							(a: { applicationId: string }) => a.applicationId === selectedId,

@@ -153,7 +153,10 @@ export function resolveEntitlementRemedy(
 	}
 
 	// app.dedicated.slots / host.* → (bigger) dedicated plan.
-	if (failedKey?.startsWith("app.dedicated") || failedKey?.startsWith("host.")) {
+	if (
+		failedKey?.startsWith("app.dedicated") ||
+		failedKey?.startsWith("host.")
+	) {
 		const requested = opts?.requestedPlan;
 		// On a dedicated plan already → escalate to the next dedicated tier.
 		// Otherwise honor an explicit dedicated request, else the smallest Pro.
@@ -206,8 +209,11 @@ export function resolveEntitlementRemedy(
 		const matched =
 			addons.find((a) =>
 				a.grants?.some((g) => g.entitlementKey === failedKey),
-			) ?? addons.find((a) => addonKeyOf(a) === failedKey.replace(/\.slots$/, ""));
-		const targetKey = matched ? addonKeyOf(matched) : failedKey.replace(/\.slots$/, "");
+			) ??
+			addons.find((a) => addonKeyOf(a) === failedKey.replace(/\.slots$/, ""));
+		const targetKey = matched
+			? addonKeyOf(matched)
+			: failedKey.replace(/\.slots$/, "");
 		return {
 			kind: "addon",
 			failedKey,

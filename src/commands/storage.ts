@@ -22,9 +22,9 @@ import {
 import { confirm, input, select } from "../utils/prompts.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
 import {
-	type ResourcePlan,
 	loadResourceTiers,
 	pickDefaultResourceTier,
+	type ResourcePlan,
 } from "./deploy.js";
 
 const STORAGE_TIER_LABEL: Record<ResourcePlan, string> = {
@@ -34,7 +34,9 @@ const STORAGE_TIER_LABEL: Record<ResourcePlan, string> = {
 	PRO: "PRO (1 TB)",
 };
 
-function normalizeStoragePlan(value: string | undefined): ResourcePlan | undefined {
+function normalizeStoragePlan(
+	value: string | undefined,
+): ResourcePlan | undefined {
 	if (!value) return undefined;
 	const normalized = value.trim().toUpperCase();
 	if (
@@ -152,9 +154,9 @@ export function registerStorageCommands(program: Command) {
 					} else {
 						const order: ResourcePlan[] = [
 							def,
-							...(["FREE", "STARTER", "STANDARD", "PRO"] as ResourcePlan[]).filter(
-								(t) => t !== def,
-							),
+							...(
+								["FREE", "STARTER", "STANDARD", "PRO"] as ResourcePlan[]
+							).filter((t) => t !== def),
 						];
 						plan = await select<ResourcePlan>(
 							"Storage plan:",
@@ -754,6 +756,15 @@ export function registerStorageCommands(program: Command) {
 				log(
 					`Upload URL: ${colors.cyan(r.url || r.uploadUrl || String(result))}`,
 				);
+				if (r.requiredHeaders && Object.keys(r.requiredHeaders).length > 0) {
+					log("Required headers:");
+					for (const [key, value] of Object.entries(r.requiredHeaders)) {
+						log(`  ${key}: ${String(value)}`);
+					}
+				}
+				if (r.reservationToken) {
+					log(`Reservation token: ${colors.dim(r.reservationToken)}`);
+				}
 				if (r.fields) log(`Fields:     ${JSON.stringify(r.fields)}`);
 				log("");
 			} catch (err) {
@@ -770,6 +781,10 @@ export function registerStorageCommands(program: Command) {
 		.description("Notify the platform that a file upload completed")
 		.option("--size <bytes>", "Size that existed before this upload, in bytes", "0")
 		.option("--expected-size <bytes>", "Expected uploaded size in bytes")
+		.option(
+			"--reservation-token <token>",
+			"Durable reservation token returned by upload-url",
+		)
 		.action(async (bucketIdentifier, fileName, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
@@ -796,6 +811,7 @@ export function registerStorageCommands(program: Command) {
 				const _completeSpinner = startSpinner("Completing upload...");
 				await client.storage.completeUpload.mutate({
 					bucketId,
+					reservationToken: options.reservationToken,
 					fileName,
 					expectedSizeBytes,
 					existingSizeBytes: Number.parseInt(options.size || "0"),

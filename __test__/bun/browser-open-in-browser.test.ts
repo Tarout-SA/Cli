@@ -84,11 +84,16 @@ describe("openInBrowser: degrades gracefully without aborting", () => {
 		expect(openedUrls).toEqual(["https://tarout.sa/launch-fails"]);
 	});
 
-	it("skips the launch (no open call) when no GUI is reachable", async () => {
+	it("uses the host platform's GUI policy when display variables are absent", async () => {
 		setDisplay(false);
 		const ok = await openInBrowser("https://tarout.sa/no-display");
-		expect(ok).toBe(false);
-		expect(openedUrls).toEqual([]);
+		if (process.platform === "darwin" || process.platform === "win32") {
+			expect(ok).toBe(true);
+			expect(openedUrls).toEqual(["https://tarout.sa/no-display"]);
+		} else {
+			expect(ok).toBe(false);
+			expect(openedUrls).toEqual([]);
+		}
 	});
 
 	it("skips the launch when the caller opts out via noOpen", async () => {

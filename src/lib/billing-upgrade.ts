@@ -293,7 +293,9 @@ export async function finalizeBillingMutation(
 }
 
 /** The resumable command an agent should run for a non-terminal checkout. */
-export function nextCommandFor(result: BillingChangeResult): string | undefined {
+export function nextCommandFor(
+	result: BillingChangeResult,
+): string | undefined {
 	if (
 		(result.status === "payment_required" ||
 			result.status === "pending_timeout") &&
@@ -360,7 +362,10 @@ export function emitBillingResult(
 			return ExitCode.SUCCESS;
 
 		case "paid":
-			outputData({ ...envelope, hint: "Payment confirmed. Retry your last action." });
+			outputData({
+				...envelope,
+				hint: "Payment confirmed. Retry your last action.",
+			});
 			box("Payment confirmed", [
 				`${label}: ${colors.success("subscription is active")}`,
 				"Retry your last action.",
@@ -406,11 +411,9 @@ export function emitBillingResult(
 			// failed | expired
 			const code =
 				result.status === "expired" ? "CHECKOUT_EXPIRED" : "CHECKOUT_FAILED";
-			outputError(
-				code,
-				result.failureReason ?? `Checkout ${result.status}.`,
-				{ ...envelope },
-			);
+			outputError(code, result.failureReason ?? `Checkout ${result.status}.`, {
+				...envelope,
+			});
 			box("Payment failed", [
 				`Order ID: ${colors.dim(result.orderId ?? "")}`,
 				`Reason: ${result.failureReason ?? result.status}`,

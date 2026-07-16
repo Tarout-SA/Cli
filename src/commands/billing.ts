@@ -12,13 +12,8 @@ import {
 	paymentBrowserOpener,
 	shouldAutoConfirmPaidCheckout,
 } from "../lib/browser.js";
-import { getCurrentProfile, isLoggedIn } from "../lib/config.js";
+import { getApiUrl, getCurrentProfile, isLoggedIn } from "../lib/config.js";
 import { AuthError, CliError, handleError } from "../lib/errors.js";
-import {
-	buildPlanAddonCart,
-	isPaidFamily,
-	planFamily,
-} from "../lib/plan-cart.js";
 import {
 	box,
 	colors,
@@ -31,8 +26,13 @@ import {
 	shouldSkipConfirmation,
 	table,
 } from "../lib/output.js";
-import { confirm, input, select } from "../utils/prompts.js";
+import {
+	buildPlanAddonCart,
+	isPaidFamily,
+	planFamily,
+} from "../lib/plan-cart.js";
 import { ExitCode, exit } from "../utils/exit-codes.js";
+import { confirm, input, select } from "../utils/prompts.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
 
 // Re-exported for back-compat: callers (e.g. deploy.ts dynamic import, tests)
@@ -45,10 +45,7 @@ export { pollCheckoutUntilTerminal };
  * `emitBillingResult` + `exit(code)` pattern used by every billing-mutating
  * command so the agent JSON envelope and exit codes stay identical everywhere.
  */
-function reportBillingResult(
-	result: BillingChangeResult,
-	label: string,
-): void {
+function reportBillingResult(result: BillingChangeResult, label: string): void {
 	const code = emitBillingResult(result, { label });
 	if (code !== ExitCode.SUCCESS) exit(code);
 }
@@ -313,9 +310,7 @@ export function registerBillingCommands(program: Command) {
 				let planQuantity = options.quantity as number | undefined;
 				// Explicit `--addon` flags take priority; otherwise we may build the
 				// bundled cart interactively below (estimator parity).
-				let addons:
-					| Array<{ addonKey: string; quantity: number }>
-					| undefined =
+				let addons: Array<{ addonKey: string; quantity: number }> | undefined =
 					Array.isArray(options.addon) && options.addon.length > 0
 						? options.addon
 						: undefined;
@@ -370,7 +365,10 @@ export function registerBillingCommands(program: Command) {
 					isPaidFamily(targetPlan)
 				) {
 					// Quantity-aware Starter: number of app slots → plan quantity.
-					if (planQuantity === undefined && planFamily(targetPlan) === "SHARED") {
+					if (
+						planQuantity === undefined &&
+						planFamily(targetPlan) === "SHARED"
+					) {
 						const apps = parsePositiveInt(
 							await input("How many apps (app slots)?", "1"),
 							1,

@@ -24,6 +24,10 @@ export interface Profile {
 	projectId?: string;
 	projectName?: string;
 	projectSlug?: string;
+	/**
+	 * Legacy runtime-configuration hint retained for commands that still read
+	 * environment-specific settings. It does not scope CLI authentication.
+	 */
 	environmentId: string;
 	environmentName: string;
 	userId: string;

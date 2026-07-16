@@ -1,6 +1,6 @@
 import type { Command } from "commander";
-import { startAuthServer } from "../lib/auth-server.js";
 import { resolveProfileFromCredential } from "../lib/auth-profile.js";
+import { startAuthServer } from "../lib/auth-server.js";
 import { canLaunchBrowser, openInBrowser } from "../lib/browser.js";
 import {
 	clearConfig,
@@ -59,7 +59,9 @@ export function announceAuthUrl(
 /**
  * Headless authentication with an existing API key. Shared by `tarout login
  * --token` and `tarout token` — both resolve the key to a full profile (org,
- * project, environment) and persist it as the `default` profile. Unlike browser
+ * project) and persist it as the `default` profile. A legacy environment hint
+ * may still be hydrated for older commands, but it is not an authorization
+ * boundary. Unlike browser
  * `login`, this is an explicit re-auth and overwrites any existing session.
  */
 export async function authenticateWithToken(
@@ -99,9 +101,10 @@ export async function authenticateWithToken(
 				id: profile.organizationId,
 				name: profile.organizationName,
 			},
-			environment: {
-				id: profile.environmentId,
-				name: profile.environmentName,
+			project: {
+				id: profile.projectId,
+				name: profile.projectName,
+				slug: profile.projectSlug,
 			},
 		});
 		return;
@@ -114,15 +117,42 @@ export async function authenticateWithToken(
 	success(`Authenticated as ${colors.cyan(profile.userEmail)}`);
 	box("Account", [
 		`Organization: ${colors.bold(profile.organizationName || "None")}`,
-		`Environment: ${colors.bold(profile.environmentName || "None")}`,
+		`Project: ${colors.bold(profile.projectName || "None")}`,
 	]);
+}
+
+/**
+ * Resolve the current credential against Tarout before reporting identity.
+ * Saved profile fields are only compatibility fallbacks; they are never proof
+ * that the token is still valid or that its project scope has changed.
+ */
+export async function resolveVerifiedCurrentProfile() {
+	const token = getToken();
+	if (!token) throw new AuthError();
+	return resolveProfileFromCredential({
+		token,
+		apiUrl: getApiUrl(),
+		fallback: getCurrentProfile(),
+	});
+}
+
+export function buildProjectKeyMetadata(scope: {
+	organizationId: string;
+	projectId: string;
+}) {
+	return {
+		organizationId: scope.organizationId,
+		projectId: scope.projectId,
+	};
 }
 
 export function registerAuthCommands(program: Command) {
 	// Login command
 	program
 		.command("login")
-		.description("Authenticate with Tarout via browser, or headlessly with --token")
+		.description(
+			"Authenticate with Tarout via browser, or headlessly with --token",
+		)
 		.option("--api-url <url>", "Custom API URL", "https://tarout.sa")
 		.option(
 			"--token <api-token>",
@@ -160,9 +190,9 @@ export function registerAuthCommands(program: Command) {
 				log("");
 				log("Opening browser to authenticate...");
 
-					// Start local server for callback
-					const authServer = await startAuthServer();
-					const callbackUrl = `http://localhost:${authServer.port}/callback?state=${encodeURIComponent(authServer.state)}`;
+				// Start local server for callback
+				const authServer = await startAuthServer();
+				const callbackUrl = `http://localhost:${authServer.port}/callback?state=${encodeURIComponent(authServer.state)}`;
 
 				// Open browser to auth page. The launch may silently no-op (SSH/WSL,
 				// missing xdg-open) — openInBrowser also prints the URL so the user
@@ -194,8 +224,8 @@ export function registerAuthCommands(program: Command) {
 						projectId: authData.projectId,
 						projectName: authData.projectName,
 						projectSlug: authData.projectSlug,
-						environmentId: authData.environmentId,
-						environmentName: authData.environmentName,
+						environmentId: authData.environmentId || "",
+						environmentName: authData.environmentName || "production",
 					};
 					const profile = await resolveProfileFromCredential({
 						token: authData.token,
@@ -217,9 +247,10 @@ export function registerAuthCommands(program: Command) {
 								id: authData.organizationId,
 								name: authData.organizationName,
 							},
-							environment: {
-								id: authData.environmentId,
-								name: authData.environmentName,
+							project: {
+								id: profile.projectId,
+								name: profile.projectName,
+								slug: profile.projectSlug,
 							},
 						});
 					} else {
@@ -227,7 +258,7 @@ export function registerAuthCommands(program: Command) {
 						success(`CLI authorized as ${colors.cyan(authData.userEmail)}`);
 						box("Account", [
 							`Organization: ${colors.bold(authData.organizationName)}`,
-							`Environment: ${colors.bold(authData.environmentName)}`,
+							`Project: ${colors.bold(profile.projectName || authData.projectName)}`,
 						]);
 					}
 				} catch (err) {
@@ -296,8 +327,8 @@ export function registerAuthCommands(program: Command) {
 				log("");
 				log("Opening browser to create your account...");
 
-					const authServer = await startAuthServer();
-					const callbackUrl = `http://localhost:${authServer.port}/callback?state=${encodeURIComponent(authServer.state)}`;
+				const authServer = await startAuthServer();
+				const callbackUrl = `http://localhost:${authServer.port}/callback?state=${encodeURIComponent(authServer.state)}`;
 				const authUrl = `${apiUrl}/cli-authorize?action=register&callback=${encodeURIComponent(callbackUrl)}`;
 				const launched = await openInBrowser(authUrl, {
 					hint: "If the browser didn't open, visit this URL to create your account:",
@@ -322,8 +353,8 @@ export function registerAuthCommands(program: Command) {
 						projectId: authData.projectId,
 						projectName: authData.projectName,
 						projectSlug: authData.projectSlug,
-						environmentId: authData.environmentId,
-						environmentName: authData.environmentName,
+						environmentId: authData.environmentId || "",
+						environmentName: authData.environmentName || "production",
 					};
 					const profile = await resolveProfileFromCredential({
 						token: authData.token,
@@ -345,9 +376,10 @@ export function registerAuthCommands(program: Command) {
 								id: authData.organizationId,
 								name: authData.organizationName,
 							},
-							environment: {
-								id: authData.environmentId,
-								name: authData.environmentName,
+							project: {
+								id: profile.projectId,
+								name: profile.projectName,
+								slug: profile.projectSlug,
 							},
 						});
 					} else {
@@ -357,7 +389,7 @@ export function registerAuthCommands(program: Command) {
 						);
 						box("Account", [
 							`Organization: ${colors.bold(authData.organizationName)}`,
-							`Environment: ${colors.bold(authData.environmentName)}`,
+							`Project: ${colors.bold(profile.projectName || authData.projectName)}`,
 						]);
 					}
 				} catch (err) {
@@ -417,16 +449,14 @@ export function registerAuthCommands(program: Command) {
 				// TAROUT_TOKEN (no saved profile, so profile is null) resolve the real
 				// org from the live credential instead of stamping "".
 				let keyOrg = profile?.organizationId;
-				let keyEnv = profile?.environmentId;
 				let keyProj = profile?.projectId;
-				if (!keyOrg) {
+				if (!keyOrg || !keyProj) {
 					const resolved = await resolveProfileFromCredential({
 						apiUrl: getApiUrl(),
 						token: getToken() || "",
 						fallback: profile,
 					});
 					keyOrg = resolved.organizationId;
-					keyEnv = resolved.environmentId;
 					keyProj = resolved.projectId;
 				}
 				if (!keyOrg) {
@@ -434,16 +464,20 @@ export function registerAuthCommands(program: Command) {
 						"Could not determine your organization. Run `tarout auth login` first, or pass a token scoped to an organization.",
 					);
 				}
+				if (!keyProj) {
+					throw new Error(
+						"Could not determine your project. Run `tarout auth login` first, or switch to a project before creating a token.",
+					);
+				}
 
 				const _spinner = startSpinner("Creating API token...");
 
 				const result = await client.user.createApiKey.mutate({
 					name: tokenName,
-					metadata: {
+					metadata: buildProjectKeyMetadata({
 						organizationId: keyOrg,
-						environmentId: keyEnv || "",
-						projectId: keyProj || "",
-					},
+						projectId: keyProj,
+					}),
 				});
 
 				succeedSpinner("API token created!");
@@ -479,10 +513,7 @@ export function registerAuthCommands(program: Command) {
 					throw new AuthError();
 				}
 
-				const profile = getCurrentProfile();
-				if (!profile) {
-					throw new AuthError();
-				}
+				const profile = await resolveVerifiedCurrentProfile();
 
 				if (isJsonMode()) {
 					outputData({

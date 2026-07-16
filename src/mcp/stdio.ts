@@ -20,6 +20,7 @@ import {
 	ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { getApiUrl, getToken, isLoggedIn } from "../lib/config.js";
+import { sanitizeMcpCallResult } from "./sanitize-result.js";
 
 async function main() {
 	if (!isLoggedIn()) {
@@ -57,7 +58,7 @@ async function main() {
 		upstream.listTools(),
 	);
 	server.setRequestHandler(CallToolRequestSchema, async (request) =>
-		upstream.callTool(request.params),
+		sanitizeMcpCallResult(await upstream.callTool(request.params)),
 	);
 
 	await server.connect(new StdioServerTransport());
