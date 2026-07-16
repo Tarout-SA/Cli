@@ -107,7 +107,11 @@ describe("B: paymentBrowserOpener opt-out / no-display", () => {
 
 	it("returns undefined when no display (DISPLAY + WAYLAND both unset)", () => {
 		setDisplay(false);
-		expect(paymentBrowserOpener()).toBeUndefined();
+		if (process.platform === "darwin" || process.platform === "win32") {
+			expect(typeof paymentBrowserOpener()).toBe("function");
+		} else {
+			expect(paymentBrowserOpener()).toBeUndefined();
+		}
 	});
 
 	it("returns undefined when noOpen:true AND no display", () => {
@@ -163,10 +167,12 @@ describe("D: shouldAutoConfirmPaidCheckout truth table", () => {
 		expect(shouldAutoConfirmPaidCheckout(1900)).toBe(false);
 	});
 
-	it("no display → false", () => {
+	it("no display variables follows the host GUI policy", () => {
 		setGlobalOptions({ json: false, nonInteractive: true });
 		setDisplay(false);
-		expect(shouldAutoConfirmPaidCheckout(1900)).toBe(false);
+		expect(shouldAutoConfirmPaidCheckout(1900)).toBe(
+			process.platform === "darwin" || process.platform === "win32",
+		);
 	});
 
 	it("amountDue 0 → false", () => {
@@ -189,13 +195,9 @@ describe("D: shouldAutoConfirmPaidCheckout truth table", () => {
 });
 
 // ---------------------------------------------------------------------------
-// E) canLaunchBrowser correctness on this Linux host.
+// E) canLaunchBrowser correctness across supported host policies.
 // ---------------------------------------------------------------------------
-describe("E: canLaunchBrowser (linux host)", () => {
-	it("platform is linux for these assertions", () => {
-		expect(process.platform).toBe("linux");
-	});
-
+describe("E: canLaunchBrowser host policy", () => {
 	it("DISPLAY set → true", () => {
 		process.env.DISPLAY = ":0";
 		delete process.env.WAYLAND_DISPLAY;
@@ -208,10 +210,12 @@ describe("E: canLaunchBrowser (linux host)", () => {
 		expect(canLaunchBrowser()).toBe(true);
 	});
 
-	it("neither set → false", () => {
+	it("without display variables, macOS/Windows remain browser-capable", () => {
 		delete process.env.DISPLAY;
 		delete process.env.WAYLAND_DISPLAY;
-		expect(canLaunchBrowser()).toBe(false);
+		expect(canLaunchBrowser()).toBe(
+			process.platform === "darwin" || process.platform === "win32",
+		);
 	});
 });
 
@@ -295,10 +299,9 @@ describe("F: engine uses real paymentBrowserOpener; open called with paymentUrl"
 		expect(openedUrls).toEqual(["https://pay.test/checkout"]);
 	});
 
-	it("no opener injected (no display) → open is never called", async () => {
+	it("no opener injected after explicit opt-out → open is never called", async () => {
 		setGlobalOptions({ json: false, nonInteractive: false });
-		setDisplay(false);
-		const opener = paymentBrowserOpener();
+		const opener = paymentBrowserOpener({ noOpen: true });
 		expect(opener).toBeUndefined();
 		const r = await performBillingChange(paidCheckoutClient(), {
 			kind: "plan",

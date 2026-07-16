@@ -5,7 +5,10 @@ import { platformFetch } from "./password-gate.js";
 
 type ApiClient = any;
 
-export function createCredentialClient(apiUrl: string, token: string): ApiClient {
+export function createCredentialClient(
+	apiUrl: string,
+	token: string,
+): ApiClient {
 	return createTRPCProxyClient({
 		transformer: superjson,
 		links: [

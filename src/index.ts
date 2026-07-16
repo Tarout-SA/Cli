@@ -21,7 +21,10 @@ import {
 import { registerDestinationsCommands } from "./commands/destinations.js";
 import { registerDevCommand } from "./commands/dev.js";
 import { registerDomainsCommands } from "./commands/domains.js";
-import { registerEnvCommands } from "./commands/env.js";
+import {
+	normalizeEnvCommandArgs,
+	registerEnvCommands,
+} from "./commands/env.js";
 import { registerFirewallCommands } from "./commands/firewall.js";
 import { registerInboxCommands } from "./commands/inbox.js";
 import { registerInitCommand } from "./commands/init.js";
@@ -223,5 +226,9 @@ program.configureOutput({
 // which may open a browser and wait for sign-in — is awaited before the
 // command action runs. Errors thrown from the hook (e.g. a cancelled or failed
 // auth recovery) surface here; the command actions handle their own errors
-// internally and exit, so this catch is the hook's safety net.
-program.parseAsync().catch((err) => handleError(err));
+// internally and exit, so this catch is the hook's safety net. The argv is run
+// through `normalizeEnvCommandArgs` first so the original documented env syntax
+// is rewritten before Commander resolves nested subcommands.
+program.parseAsync(normalizeEnvCommandArgs(process.argv)).catch((err) =>
+	handleError(err),
+);

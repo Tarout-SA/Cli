@@ -6,11 +6,7 @@ import { getApiClient } from "../lib/api.js";
 import { getApiUrl, isLoggedIn } from "../lib/config.js";
 import { AuthError, handleError } from "../lib/errors.js";
 import { colors, isJsonMode, log, outputData, table } from "../lib/output.js";
-import {
-	failSpinner,
-	startSpinner,
-	succeedSpinner,
-} from "../utils/spinner.js";
+import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
 
 interface ManifestEntry {
 	path: string;
@@ -56,10 +52,9 @@ async function loadManifest(
 	apiUrl: string,
 ): Promise<ManifestEntry[]> {
 	try {
-		const cache = JSON.parse(readFileSync(manifestCachePath(), "utf8")) as Record<
-			string,
-			{ at: number; manifest: ManifestEntry[] }
-		>;
+		const cache = JSON.parse(
+			readFileSync(manifestCachePath(), "utf8"),
+		) as Record<string, { at: number; manifest: ManifestEntry[] }>;
 		const entry = cache[apiUrl];
 		if (
 			entry &&
@@ -108,8 +103,7 @@ export function registerCallCommand(program: Command) {
 					const manifest = await fetchManifestFresh(client, getApiUrl());
 					succeedSpinner();
 
-					const filter =
-						typeof opts.list === "string" ? opts.list : undefined;
+					const filter = typeof opts.list === "string" ? opts.list : undefined;
 					const matched = manifest.filter(
 						(m) => !filter || m.path.includes(filter),
 					);

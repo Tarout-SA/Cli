@@ -21,8 +21,8 @@ describe("CLI auth callback server", () => {
 					userEmail: "attacker@example.com",
 					organizationId: "org_1",
 					organizationName: "Org",
-					environmentId: "env_1",
-					environmentName: "Production",
+					projectId: "project_1",
+					projectName: "Project One",
 				}),
 			);
 
@@ -37,8 +37,8 @@ describe("CLI auth callback server", () => {
 					userEmail: "user@example.com",
 					organizationId: "org_1",
 					organizationName: "Org",
-					environmentId: "env_1",
-					environmentName: "Production",
+					projectId: "project_1",
+					projectName: "Project One",
 				}),
 			);
 
@@ -46,6 +46,8 @@ describe("CLI auth callback server", () => {
 			await expect(wait).resolves.toMatchObject({
 				token: "cli_good",
 				userEmail: "user@example.com",
+				projectId: "project_1",
+				projectName: "Project One",
 			});
 		} finally {
 			server.close();

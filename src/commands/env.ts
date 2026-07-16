@@ -27,23 +27,64 @@ interface AppSummary {
 	name: string;
 }
 
+const envSubcommands = new Set([
+	"list",
+	"ls",
+	"set",
+	"unset",
+	"pull",
+	"push",
+	"audit",
+	"reveal",
+	"get",
+	"get-string",
+	"list-all-envs",
+	"bulk-set",
+	"bulk-delete",
+	"copy",
+]);
+
+/**
+ * Preserve the original documented `tarout env <app> <command>` form while
+ * Commander uses the unambiguous `tarout env <command> <app>` grammar.
+ */
+export function normalizeEnvCommandArgs(argv: string[]): string[] {
+	const envIndex = argv.indexOf("env");
+	if (envIndex === -1) return argv;
+
+	const app = argv[envIndex + 1];
+	const subcommand = argv[envIndex + 2];
+	if (
+		!app ||
+		app.startsWith("-") ||
+		envSubcommands.has(app) ||
+		!subcommand ||
+		!envSubcommands.has(subcommand)
+	) {
+		return argv;
+	}
+
+	const normalized = [...argv];
+	normalized[envIndex + 1] = subcommand;
+	normalized[envIndex + 2] = app;
+	return normalized;
+}
+
 export function registerEnvCommands(program: Command) {
 	const env = program
 		.command("env")
-		.argument("<app>", "Application ID or name")
 		.description("Manage environment variables");
 
 	// List environment variables
 	env
 		.command("list")
 		.alias("ls")
+		.argument("<app>", "Application ID or name")
 		.description("List all environment variables")
 		.option("--reveal", "Show actual values (not masked)")
-		.action(async (options, command) => {
+		.action(async (appIdentifier, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-
-				const appIdentifier = command.parent.args[0];
 				const client = getApiClient();
 
 				// Find the application
@@ -107,15 +148,14 @@ export function registerEnvCommands(program: Command) {
 	// Set environment variable
 	env
 		.command("set")
+		.argument("<app>", "Application ID or name")
 		.argument("<key=value>", "Variable to set (KEY=value format)")
 		.description("Set an environment variable")
 		.option("-s, --secret", "Mark as secret (default)", true)
 		.option("--no-secret", "Mark as non-secret")
-		.action(async (keyValue, options, command) => {
+		.action(async (appIdentifier, keyValue, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-
-				const appIdentifier = command.parent.parent.args[0];
 
 				// Parse KEY=value
 				const eqIndex = keyValue.indexOf("=");
@@ -193,17 +233,16 @@ export function registerEnvCommands(program: Command) {
 	// Unset environment variable
 	env
 		.command("unset")
+		.argument("<app>", "Application ID or name")
 		.argument("<key>", "Variable key to remove")
 		.description("Remove an environment variable")
 		.option(
 			"--restart",
 			"Restart the app to apply now (default: apply on next restart)",
 		)
-		.action(async (key, options, command) => {
+		.action(async (appIdentifier, key, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-
-				const appIdentifier = command.parent.parent.args[0];
 				const client = getApiClient();
 
 				// Find the application
@@ -248,14 +287,13 @@ export function registerEnvCommands(program: Command) {
 	// Pull environment variables to .env file
 	env
 		.command("pull")
+		.argument("<app>", "Application ID or name")
 		.description("Download environment variables as .env file")
 		.option("-o, --output <file>", "Output file path", ".env")
 		.option("--reveal", "Include actual secret values")
-		.action(async (options, command) => {
+		.action(async (appIdentifier, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-
-				const appIdentifier = command.parent.parent.args[0];
 				const client = getApiClient();
 
 				// Find the application
@@ -319,6 +357,7 @@ export function registerEnvCommands(program: Command) {
 	// Push environment variables from .env file
 	env
 		.command("push")
+		.argument("<app>", "Application ID or name")
 		.description("Upload environment variables from .env file")
 		.option("-i, --input <file>", "Input file path", ".env")
 		.option("--replace", "Replace all existing variables (default: merge)")
@@ -326,11 +365,9 @@ export function registerEnvCommands(program: Command) {
 			"--restart",
 			"Restart the app to apply now (default: apply on next restart)",
 		)
-		.action(async (options, command) => {
+		.action(async (appIdentifier, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-
-				const appIdentifier = command.parent.parent.args[0];
 
 				// Read the file
 				if (!existsSync(options.input)) {
@@ -386,17 +423,13 @@ export function registerEnvCommands(program: Command) {
 	// View env variable audit log
 	env
 		.command("audit")
+		.argument("<app>", "Application ID or name")
 		.description("Show audit log for environment variables")
 		.option("-k, --key <key>", "Filter by variable key")
 		.option("-n, --limit <n>", "Number of entries to show", "50")
-		.action(async (options: any, command: any) => {
+		.action(async (appIdentifier: string, options: any) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-
-				const appIdentifier = command.parent.args[0];
-				if (!appIdentifier) {
-					throw new Error("Usage: tarout env <app> audit");
-				}
 
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching audit log...");
@@ -451,18 +484,14 @@ export function registerEnvCommands(program: Command) {
 	// Reveal a specific env variable value
 	env
 		.command("reveal")
+		.argument("<app>", "Application ID or name")
 		.argument("<key>", "Variable key to reveal")
 		.description(
 			"Reveal the plaintext value of an environment variable (logged)",
 		)
-		.action(async (key: string, _options: any, command: any) => {
+		.action(async (appIdentifier: string, key: string) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-
-				const appIdentifier = command.parent.parent.args[0];
-				if (!appIdentifier) {
-					throw new Error("Usage: tarout env <app> reveal <KEY>");
-				}
 
 				const client = getApiClient();
 				const _spinner = startSpinner("Revealing variable...");
