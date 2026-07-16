@@ -15,11 +15,6 @@ import {
 import { isLoggedIn } from "../lib/config.js";
 import { AuthError, handleError } from "../lib/errors.js";
 import {
-	buildPlanAddonCart,
-	isPaidFamily,
-	planFamily,
-} from "../lib/plan-cart.js";
-import {
 	box,
 	colors,
 	isJsonMode,
@@ -31,8 +26,13 @@ import {
 	shouldSkipConfirmation,
 	table,
 } from "../lib/output.js";
-import { confirm, input, select } from "../utils/prompts.js";
+import {
+	buildPlanAddonCart,
+	isPaidFamily,
+	planFamily,
+} from "../lib/plan-cart.js";
 import { ExitCode, exit } from "../utils/exit-codes.js";
+import { confirm, input, select } from "../utils/prompts.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
 
 // Re-exported for back-compat: callers (e.g. deploy.ts dynamic import, tests)
@@ -45,10 +45,7 @@ export { pollCheckoutUntilTerminal };
  * `emitBillingResult` + `exit(code)` pattern used by every billing-mutating
  * command so the agent JSON envelope and exit codes stay identical everywhere.
  */
-function reportBillingResult(
-	result: BillingChangeResult,
-	label: string,
-): void {
+function reportBillingResult(result: BillingChangeResult, label: string): void {
 	const code = emitBillingResult(result, { label });
 	if (code !== ExitCode.SUCCESS) exit(code);
 }
@@ -264,9 +261,7 @@ export function registerBillingCommands(program: Command) {
 				let planQuantity = options.quantity as number | undefined;
 				// Explicit `--addon` flags take priority; otherwise we may build the
 				// bundled cart interactively below (estimator parity).
-				let addons:
-					| Array<{ addonKey: string; quantity: number }>
-					| undefined =
+				let addons: Array<{ addonKey: string; quantity: number }> | undefined =
 					Array.isArray(options.addon) && options.addon.length > 0
 						? options.addon
 						: undefined;
@@ -321,7 +316,10 @@ export function registerBillingCommands(program: Command) {
 					isPaidFamily(targetPlan)
 				) {
 					// Quantity-aware Starter: number of app slots → plan quantity.
-					if (planQuantity === undefined && planFamily(targetPlan) === "SHARED") {
+					if (
+						planQuantity === undefined &&
+						planFamily(targetPlan) === "SHARED"
+					) {
 						const apps = parsePositiveInt(
 							await input("How many apps (app slots)?", "1"),
 							1,
@@ -960,87 +958,6 @@ export function registerBillingCommands(program: Command) {
 				await client.subscription.cancelPendingPlanChange.mutate();
 				succeedSpinner("Pending plan change cancelled!");
 				if (isJsonMode()) outputData({ cancelled: true });
-			} catch (err) {
-				handleError(err);
-			}
-		});
-
-	// Confirm checkout
-	billing
-		.command("checkout:confirm")
-		.argument("<session-id>", "Checkout session ID")
-		.description("Confirm a pending checkout session")
-		.action(async (sessionId) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-				const client = getApiClient();
-				const _spinner = startSpinner("Confirming checkout...");
-				const result = await client.subscription.confirmCheckout.mutate({
-					sessionId,
-				} as any);
-				succeedSpinner("Checkout confirmed!");
-				if (isJsonMode()) outputData(result);
-			} catch (err) {
-				handleError(err);
-			}
-		});
-
-	// Get checkout session
-	billing
-		.command("checkout:get")
-		.argument("<session-id>", "Checkout session ID")
-		.description("Get details of a checkout session")
-		.action(async (sessionId) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-				const client = getApiClient();
-				const _spinner = startSpinner("Fetching checkout...");
-				const data = await client.payment.getCheckout.query({
-					sessionId,
-				} as any);
-				succeedSpinner();
-				if (isJsonMode()) outputData(data);
-				else {
-					const d = data as any;
-					log("");
-					log(colors.bold("Checkout Session"));
-					log(`  ID:     ${d.sessionId || sessionId}`);
-					log(`  Status: ${d.status || "-"}`);
-					log(
-						`  Amount: ${d.amount !== undefined ? `${(d.amount / 100).toFixed(2)} SAR` : "-"}`,
-					);
-					log("");
-				}
-			} catch (err) {
-				handleError(err);
-			}
-		});
-
-	// Submit card payment
-	billing
-		.command("checkout:pay")
-		.argument("<session-id>", "Checkout session ID")
-		.description("Submit card payment for a checkout session")
-		.option("--card-number <n>", "Card number")
-		.option("--exp-month <m>", "Expiry month")
-		.option("--exp-year <y>", "Expiry year")
-		.option("--cvv <cvv>", "CVV")
-		.option("--name <name>", "Cardholder name")
-		.action(async (sessionId, options) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-				const client = getApiClient();
-				const _spinner = startSpinner("Processing payment...");
-				const result = await client.payment.submitCardPayment.mutate({
-					sessionId,
-					cardNumber: options.cardNumber,
-					expMonth: options.expMonth,
-					expYear: options.expYear,
-					cvv: options.cvv,
-					cardholderName: options.name,
-				} as any);
-				succeedSpinner("Payment submitted!");
-				if (isJsonMode()) outputData(result);
 			} catch (err) {
 				handleError(err);
 			}

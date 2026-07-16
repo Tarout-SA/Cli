@@ -1,8 +1,8 @@
 import inquirer from "inquirer";
 import {
-	type NeedsInputRequest,
 	isJsonMode,
 	isNonInteractiveMode,
+	type NeedsInputRequest,
 	outputNeedsInput,
 } from "../lib/output.js";
 import { ExitCode, exit } from "./exit-codes.js";

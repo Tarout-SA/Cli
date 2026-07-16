@@ -1,5 +1,5 @@
-import type { Server } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import type { Server } from "node:http";
 import express from "express";
 
 export interface AuthCallbackData {
@@ -9,11 +9,12 @@ export interface AuthCallbackData {
 	userName?: string;
 	organizationId: string;
 	organizationName: string;
-	projectId?: string;
-	projectName?: string;
+	projectId: string;
+	projectName: string;
 	projectSlug?: string;
-	environmentId: string;
-	environmentName: string;
+	/** Compatibility hints from older platform releases; not auth scopes. */
+	environmentId?: string;
+	environmentName?: string;
 }
 
 interface StartAuthServerOptions {
@@ -40,9 +41,7 @@ function escapeHtml(value: unknown): string {
 		.replace(/'/g, "&#39;");
 }
 
-export function startAuthServer(
-	options: StartAuthServerOptions = {},
-): Promise<{
+export function startAuthServer(options: StartAuthServerOptions = {}): Promise<{
 	port: number;
 	state: string;
 	waitForCallback: () => Promise<AuthCallbackData>;
@@ -72,23 +71,23 @@ export function startAuthServer(
 				projectId,
 				projectName,
 				projectSlug,
-					environmentId,
-					environmentName,
-					error,
-					state,
-				} = req.query;
+				environmentId,
+				environmentName,
+				error,
+				state,
+			} = req.query;
 
-				if (
-					!state ||
-					Array.isArray(state) ||
-					!safeEqual(String(state), expectedState)
-				) {
-					res.status(400).send("Invalid authentication state");
-					return;
-				}
+			if (
+				!state ||
+				Array.isArray(state) ||
+				!safeEqual(String(state), expectedState)
+			) {
+				res.status(400).send("Invalid authentication state");
+				return;
+			}
 
-				if (error) {
-					res.send(`
+			if (error) {
+				res.send(`
 	          <!DOCTYPE html>
           <html>
             <head>
@@ -119,8 +118,8 @@ export function startAuthServer(
 			if (!userEmail) missing.push("userEmail");
 			if (!organizationId) missing.push("organizationId");
 			if (!organizationName) missing.push("organizationName");
-			if (!environmentId) missing.push("environmentId");
-			if (!environmentName) missing.push("environmentName");
+			if (!projectId) missing.push("projectId");
+			if (!projectName) missing.push("projectName");
 			if (missing.length > 0) {
 				const list = missing.join(", ");
 				res.status(400).send(`Missing required parameters: ${list}`);
@@ -160,42 +159,42 @@ export function startAuthServer(
 				userName: userName ? String(userName) : undefined,
 				organizationId: String(organizationId),
 				organizationName: String(organizationName),
-				projectId: projectId ? String(projectId) : undefined,
-				projectName: projectName ? String(projectName) : undefined,
+				projectId: String(projectId),
+				projectName: String(projectName),
 				projectSlug: projectSlug ? String(projectSlug) : undefined,
-				environmentId: String(environmentId),
-				environmentName: String(environmentName),
-			});
-			});
-
-			// Timeout after 5 minutes
-			const timeout = setTimeout(
-				() => {
-					callbackRejecter(
-						new Error("Authentication timed out. Please try again."),
-					);
-					server.close();
-				},
-				5 * 60 * 1000,
-			);
-			timeout.unref?.();
-
-			const close = () => {
-				clearTimeout(timeout);
-				server.close();
-			};
-
-			// Find an available port
-			server = app.listen(0, "127.0.0.1", () => {
-				const address = server.address();
-				const port = typeof address === "object" && address ? address.port : 0;
-
-				resolve({
-					port,
-					state: expectedState,
-					waitForCallback: () => callbackPromise,
-					close,
-				});
+				environmentId: environmentId ? String(environmentId) : undefined,
+				environmentName: environmentName ? String(environmentName) : undefined,
 			});
 		});
-	}
+
+		// Timeout after 5 minutes
+		const timeout = setTimeout(
+			() => {
+				callbackRejecter(
+					new Error("Authentication timed out. Please try again."),
+				);
+				server.close();
+			},
+			5 * 60 * 1000,
+		);
+		timeout.unref?.();
+
+		const close = () => {
+			clearTimeout(timeout);
+			server.close();
+		};
+
+		// Find an available port
+		server = app.listen(0, "127.0.0.1", () => {
+			const address = server.address();
+			const port = typeof address === "object" && address ? address.port : 0;
+
+			resolve({
+				port,
+				state: expectedState,
+				waitForCallback: () => callbackPromise,
+				close,
+			});
+		});
+	});
+}

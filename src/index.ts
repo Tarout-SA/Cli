@@ -20,7 +20,10 @@ import {
 import { registerDestinationsCommands } from "./commands/destinations.js";
 import { registerDevCommand } from "./commands/dev.js";
 import { registerDomainsCommands } from "./commands/domains.js";
-import { registerEnvCommands } from "./commands/env.js";
+import {
+	normalizeEnvCommandArgs,
+	registerEnvCommands,
+} from "./commands/env.js";
 import { registerFirewallCommands } from "./commands/firewall.js";
 import { registerInboxCommands } from "./commands/inbox.js";
 import { registerInitCommand } from "./commands/init.js";
@@ -160,5 +163,6 @@ program.configureOutput({
 	},
 });
 
-// Parse and execute
-program.parse();
+// Parse and execute. Normalize the original documented env syntax before
+// Commander resolves nested subcommands.
+program.parse(normalizeEnvCommandArgs(process.argv));

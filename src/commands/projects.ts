@@ -23,6 +23,24 @@ interface ProjectSummary {
 }
 
 /**
+ * Project-scoped API keys cannot be moved by mutating session state. Verify the
+ * effective server scope before changing local metadata; a different target
+ * requires browser reauthorization so the server can mint a new scoped key.
+ */
+export async function verifyProjectCredentialScope(
+	client: any,
+	target: ProjectSummary,
+): Promise<ProjectSummary> {
+	const effective = await client.project.getActive.query();
+	if (effective?.projectId !== target.projectId) {
+		throw new AuthError(
+			`Cannot switch to ${target.name} with the current project-scoped credential. Run \`tarout login\` and select that project in the browser.`,
+		);
+	}
+	return target;
+}
+
+/**
  * `tarout projects ...` commands.
  *
  * Projects were introduced in the May-2026 environment redesign. Each
@@ -99,9 +117,7 @@ export function registerProjectsCommands(program: Command) {
 					return;
 				}
 
-				await client.project.setActive.mutate({
-					projectId: target.projectId,
-				});
+				await verifyProjectCredentialScope(client, target);
 
 				updateProfile({
 					projectId: target.projectId,
@@ -115,6 +131,14 @@ export function registerProjectsCommands(program: Command) {
 				succeedSpinner(
 					`Switched to project ${colors.success(target.name)} (${target.slug})`,
 				);
+				if (isJsonMode()) {
+					outputData({
+						projectId: target.projectId,
+						name: target.name,
+						slug: target.slug,
+						verified: true,
+					});
+				}
 			} catch (err) {
 				failSpinner();
 				handleError(err);

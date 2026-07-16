@@ -19,13 +19,7 @@ import { ensureAgentSetup } from "../lib/agent-setup.js";
 import { getApiClient } from "../lib/api.js";
 import { getProjectConfig } from "../lib/config.js";
 import { AuthError, handleError } from "../lib/errors.js";
-import {
-	box,
-	colors,
-	isJsonMode,
-	log,
-	outputJsonLine,
-} from "../lib/output.js";
+import { box, colors, isJsonMode, log, outputJsonLine } from "../lib/output.js";
 import { envVarsToObject } from "../lib/process.js";
 import { ExitCode, exit } from "../utils/exit-codes.js";
 import { formatAppUrl } from "../utils/url.js";
@@ -146,8 +140,14 @@ export function registerInitCommand(program: Command): void {
 		.option("--database-plan <plan>", "Database plan (e.g. free, starter)")
 		.option("--storage", "Provision file storage")
 		.option("--storage-plan <plan>", "Storage plan (e.g. free, starter)")
-		.option("--scaffold", "Write a minimal starter app if the directory is empty")
-		.option("--no-env-write", "Do not write a local .env file with connection strings")
+		.option(
+			"--scaffold",
+			"Write a minimal starter app if the directory is empty",
+		)
+		.option(
+			"--no-env-write",
+			"Do not write a local .env file with connection strings",
+		)
 		.option(
 			"--no-agent-setup",
 			"Don't auto-write the agent permission allowlist (CLAUDE.md / .claude/settings.local.json) on first run",
@@ -282,7 +282,11 @@ export function registerInitCommand(program: Command): void {
 						envCount = Object.keys(vars).length;
 						if (envCount > 0) {
 							envFile = writeEnvFile(cwd, vars);
-							emitEvent({ event: "env_written", file: envFile, count: envCount });
+							emitEvent({
+								event: "env_written",
+								file: envFile,
+								count: envCount,
+							});
 						}
 					} catch (err) {
 						emitEvent({
@@ -292,7 +296,9 @@ export function registerInitCommand(program: Command): void {
 					}
 				}
 
-				const url = formatAppUrl((app as { appSubdomain?: string }).appSubdomain);
+				const url = formatAppUrl(
+					(app as { appSubdomain?: string }).appSubdomain,
+				);
 
 				if (isJsonMode()) {
 					outputJsonLine({
@@ -311,10 +317,14 @@ export function registerInitCommand(program: Command): void {
 				box("Project initialized", [
 					`Application: ${colors.cyan(app.name)}`,
 					`ID: ${colors.dim(app.applicationId)}`,
-					...(envFile ? [`Env file: ${colors.dim(envFile)} (${envCount} vars)`] : []),
+					...(envFile
+						? [`Env file: ${colors.dim(envFile)} (${envCount} vars)`]
+						: []),
 				]);
 				log("Next steps:");
-				log(`  ${colors.dim("tarout dev")}            - Run locally with cloud env vars`);
+				log(
+					`  ${colors.dim("tarout dev")}            - Run locally with cloud env vars`,
+				);
 				log(`  ${colors.dim("tarout deploy --wait")}  - Ship to production`);
 				log("");
 			} catch (err) {

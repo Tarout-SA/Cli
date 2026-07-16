@@ -163,7 +163,10 @@ function replaceBlock(content: string, block: string): string {
  * Create the memory file with the block, refresh an existing block in place, or
  * append the block after existing content — never clobbering user prose.
  */
-export function upsertMarkdownBlock(filePath: string, block: string): FileAction {
+export function upsertMarkdownBlock(
+	filePath: string,
+	block: string,
+): FileAction {
 	if (!existsSync(filePath)) {
 		writeFileSync(filePath, `${block}\n`, "utf-8");
 		return "created";
@@ -225,8 +228,10 @@ function ensureEntries(
 
 /** Apply all Tarout allow/ask/autoMode rules to a settings object in place. */
 function applyTaroutRules(settings: ClaudeSettings): boolean {
-	const permissions = (settings.permissions ??= {});
-	const autoMode = (settings.autoMode ??= {});
+	settings.permissions ??= {};
+	settings.autoMode ??= {};
+	const permissions = settings.permissions;
+	const autoMode = settings.autoMode;
 
 	const allow = ensureEntries(permissions.allow, [TAROUT_ALLOW_ENTRY]);
 	permissions.allow = allow.next;
@@ -234,10 +239,18 @@ function applyTaroutRules(settings: ClaudeSettings): boolean {
 	const ask = ensureEntries(permissions.ask, TAROUT_ASK_ENTRIES);
 	permissions.ask = ask.next;
 
-	const env = ensureEntries(autoMode.environment, [TAROUT_AUTOMODE_ENV_ENTRY], true);
+	const env = ensureEntries(
+		autoMode.environment,
+		[TAROUT_AUTOMODE_ENV_ENTRY],
+		true,
+	);
 	autoMode.environment = env.next;
 
-	const amAllow = ensureEntries(autoMode.allow, [TAROUT_AUTOMODE_ALLOW_ENTRY], true);
+	const amAllow = ensureEntries(
+		autoMode.allow,
+		[TAROUT_AUTOMODE_ALLOW_ENTRY],
+		true,
+	);
 	autoMode.allow = amAllow.next;
 
 	return allow.changed || ask.changed || env.changed || amAllow.changed;
@@ -259,8 +272,7 @@ export function hasTaroutAgentConfig(cwd: string): boolean {
 		) as ClaudeSettings;
 		const allow = settings?.permissions?.allow;
 		const ask = settings?.permissions?.ask;
-		const hasAllow =
-			Array.isArray(allow) && allow.includes(TAROUT_ALLOW_ENTRY);
+		const hasAllow = Array.isArray(allow) && allow.includes(TAROUT_ALLOW_ENTRY);
 		const hasAsk =
 			Array.isArray(ask) && TAROUT_ASK_ENTRIES.every((e) => ask.includes(e));
 		return hasAllow && hasAsk;
@@ -291,7 +303,8 @@ export function mergeClaudeSettings(claudeDir: string): ScaffoldedFile {
 			return {
 				path: relPath,
 				action: "skipped",
-				reason: "existing settings.local.json is not valid JSON; left untouched",
+				reason:
+					"existing settings.local.json is not valid JSON; left untouched",
 			};
 		}
 
@@ -299,7 +312,8 @@ export function mergeClaudeSettings(claudeDir: string): ScaffoldedFile {
 			return {
 				path: relPath,
 				action: "skipped",
-				reason: "existing settings.local.json is not a JSON object; left untouched",
+				reason:
+					"existing settings.local.json is not a JSON object; left untouched",
 			};
 		}
 	}
@@ -308,13 +322,21 @@ export function mergeClaudeSettings(claudeDir: string): ScaffoldedFile {
 
 	if (!exists) {
 		mkdirSync(claudeDir, { recursive: true });
-		writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf-8");
+		writeFileSync(
+			settingsPath,
+			`${JSON.stringify(settings, null, 2)}\n`,
+			"utf-8",
+		);
 		return { path: relPath, action: "created" };
 	}
 
 	if (!changed) return { path: relPath, action: "unchanged" };
 
-	writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf-8");
+	writeFileSync(
+		settingsPath,
+		`${JSON.stringify(settings, null, 2)}\n`,
+		"utf-8",
+	);
 	return { path: relPath, action: "updated" };
 }
 

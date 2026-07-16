@@ -16,10 +16,10 @@ import { ensureAgentSetup } from "../lib/agent-setup.js";
 import { getApiClient } from "../lib/api.js";
 import { getProjectConfig, setProjectConfig } from "../lib/config.js";
 import {
-	InvalidArgumentError,
-	NotFoundError,
 	findSimilar,
 	handleError,
+	InvalidArgumentError,
+	NotFoundError,
 } from "../lib/errors.js";
 import {
 	box,
@@ -113,9 +113,7 @@ export function registerUpCommand(program: Command): void {
 	program
 		.command("up")
 		.argument("[path]", "Project directory (defaults to current)")
-		.description(
-			"Inspect, create, upload, and deploy a project in one command",
-		)
+		.description("Inspect, create, upload, and deploy a project in one command")
 		.option(
 			"--api-url <url>",
 			"Custom API URL (defaults to saved profile or https://tarout.sa)",
@@ -158,7 +156,10 @@ export function registerUpCommand(program: Command): void {
 			"--framework-preset <preset>",
 			"Framework preset override (e.g. nextjs, vite, astro)",
 		)
-		.option("--root-directory <path>", "Project root directory inside the source")
+		.option(
+			"--root-directory <path>",
+			"Project root directory inside the source",
+		)
 		.option("--install-command <cmd>", "Custom install command")
 		.option("--build-command <cmd>", "Custom build command")
 		.option(
@@ -263,7 +264,8 @@ export function registerUpCommand(program: Command): void {
 					// re-invoke flags so the human decides through the agent.
 					const apps = await loadApps();
 					const linkedApp = linked
-						? findApp(apps, linked.applicationId) ?? findApp(apps, linked.name)
+						? (findApp(apps, linked.applicationId) ??
+							findApp(apps, linked.name))
 						: undefined;
 
 					if (shouldSkipConfirmation()) {
@@ -347,7 +349,7 @@ export function registerUpCommand(program: Command): void {
 							const message =
 								err instanceof Error ? err.message : "Plan upgrade required";
 
-								// Any non-interactive context (JSON, no TTY, or --yes) gets the
+							// Any non-interactive context (JSON, no TTY, or --yes) gets the
 							// NEEDS_UPGRADE envelope, which lists both the buy-addon and
 							// upgrade-plan options for the agent to put to the user.
 							if (
@@ -440,13 +442,9 @@ export function registerUpCommand(program: Command): void {
 					const githubId =
 						providerList[0]?.githubId ?? providerList[0]?.id ?? "";
 					if (!githubId) {
-						throw new NotFoundError(
-							"GitHub connection",
-							"none",
-							[
-								"Install the Tarout GitHub App: visit your Tarout dashboard → Integrations → GitHub.",
-							],
-						);
+						throw new NotFoundError("GitHub connection", "none", [
+							"Install the Tarout GitHub App: visit your Tarout dashboard → Integrations → GitHub.",
+						]);
 					}
 					await client.application.saveGithubProvider.mutate({
 						applicationId: app.applicationId,
@@ -472,7 +470,10 @@ export function registerUpCommand(program: Command): void {
 					emitEvent({ event: "upload_done" });
 				}
 
-				emitEvent({ event: "deploy_started", applicationId: app.applicationId });
+				emitEvent({
+					event: "deploy_started",
+					applicationId: app.applicationId,
+				});
 				const result = await client.application.deployToCloud.mutate({
 					applicationId: app.applicationId,
 				});
@@ -535,15 +536,15 @@ export function registerUpCommand(program: Command): void {
 					]);
 					return;
 				}
-				if (err instanceof Error && err.message.startsWith("Invalid --source")) {
+				if (
+					err instanceof Error &&
+					err.message.startsWith("Invalid --source")
+				) {
 					outputError("INVALID_ARGUMENTS", err.message);
 					if (!isJsonMode()) log(colors.error(err.message));
 					exit(ExitCode.INVALID_ARGUMENTS);
 				}
-				if (
-					err instanceof Error &&
-					err.message.startsWith("--repo must be")
-				) {
+				if (err instanceof Error && err.message.startsWith("--repo must be")) {
 					outputError("INVALID_ARGUMENTS", err.message);
 					if (!isJsonMode()) log(colors.error(err.message));
 					exit(ExitCode.INVALID_ARGUMENTS);
@@ -606,10 +607,11 @@ function resolveAppRef(apps: AppSummary[], ref: string): AppSummary {
 		suggestions.length > 0
 			? suggestions
 			: apps.length > 0
-				? apps.slice(0, 5).map((a) => `${a.name} (${a.applicationId.slice(0, 8)})`)
+				? apps
+						.slice(0, 5)
+						.map((a) => `${a.name} (${a.applicationId.slice(0, 8)})`)
 				: [
 						"No apps exist in this organization yet. Drop --app to create a new one.",
 					],
 	);
 }
-

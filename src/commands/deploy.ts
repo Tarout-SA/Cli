@@ -15,15 +15,11 @@ import type { Command } from "commander";
 import open from "open";
 import { ensureAgentSetup } from "../lib/agent-setup.js";
 import { getApiClient, resetApiClient } from "../lib/api.js";
-import { startAuthServer } from "../lib/auth-server.js";
-import { openInBrowser, paymentBrowserOpener } from "../lib/browser.js";
 import {
-	type Catalog,
-	type EntitlementRemedy,
-	nextPlanForRequested,
-	resolveEntitlementRemedy,
-	upgradeTargetPlan,
-} from "../lib/entitlement-remedy.js";
+	isCredentialError,
+	resolveProfileFromCredential,
+} from "../lib/auth-profile.js";
+import { startAuthServer } from "../lib/auth-server.js";
 import {
 	AGENT_BILLING_PERMISSION_HINT,
 	type BillingChangeResult,
@@ -31,22 +27,25 @@ import {
 	type PerformBillingChangeInput,
 	performBillingChange,
 } from "../lib/billing-upgrade.js";
-import { dbAddonKeyForPlanFamily } from "../lib/plan-cart.js";
+import { openInBrowser, paymentBrowserOpener } from "../lib/browser.js";
 import {
-	isCredentialError,
-	resolveProfileFromCredential,
-} from "../lib/auth-profile.js";
-import {
-	type Profile,
 	getApiUrl,
 	getCurrentProfile,
 	getProjectConfig,
 	getToken,
 	isLoggedIn,
+	type Profile,
 	setCurrentProfile,
 	setProfile,
 	setProjectConfig,
 } from "../lib/config.js";
+import {
+	type Catalog,
+	type EntitlementRemedy,
+	nextPlanForRequested,
+	resolveEntitlementRemedy,
+	upgradeTargetPlan,
+} from "../lib/entitlement-remedy.js";
 import {
 	AuthError,
 	analyzeDeploymentError,
@@ -73,9 +72,9 @@ import {
 	success,
 	table,
 } from "../lib/output.js";
+import { dbAddonKeyForPlanFamily } from "../lib/plan-cart.js";
 import { streamDeploymentLogs } from "../lib/websocket.js";
 import { ExitCode, exit } from "../utils/exit-codes.js";
-import { formatAppUrl } from "../utils/url.js";
 import {
 	confirm,
 	input,
@@ -89,6 +88,7 @@ import {
 	stopSpinner,
 	succeedSpinner,
 } from "../utils/spinner.js";
+import { formatAppUrl } from "../utils/url.js";
 
 const DEFAULT_REGION = "me-central2";
 const DROP_UPLOAD_CONTENT_TYPE = "application/zip";
@@ -108,6 +108,31 @@ interface DeploymentSummary {
 	deploymentId: string;
 	status: string;
 	title?: string | null;
+}
+
+export type DeploymentLookupType =
+	| "application"
+	| "previewDeployment"
+	| "backup";
+
+export function buildDeploymentTypeQuery(
+	id: string,
+	type: string,
+): { id: string; type: DeploymentLookupType } {
+	if (
+		type !== "application" &&
+		type !== "previewDeployment" &&
+		type !== "backup"
+	) {
+		throw new InvalidArgumentError(
+			'Deployment type must be "application", "previewDeployment", or "backup".',
+		);
+	}
+	return { id, type };
+}
+
+export function shouldConfirmRollback(): boolean {
+	return !shouldSkipConfirmation();
 }
 
 interface DeployOptions {
@@ -178,8 +203,7 @@ export async function ensureAuthenticatedForDeploy(
 				{
 					field: "token",
 					kind: "password",
-					question:
-						`Paste a Tarout API token. Generate one at ${apiUrl}/dashboard/settings/profile`,
+					question: `Paste a Tarout API token. Generate one at ${apiUrl}/dashboard/settings/profile`,
 					flag: "--token",
 					sensitive: true,
 					context: {
@@ -223,8 +247,7 @@ export async function ensureAuthenticatedForDeploy(
 				{
 					field: "token",
 					kind: "password",
-					question:
-						`Stored credentials are invalid or expired. Paste a new Tarout API token from ${apiUrl}/dashboard/settings/profile`,
+					question: `Stored credentials are invalid or expired. Paste a new Tarout API token from ${apiUrl}/dashboard/settings/profile`,
 					flag: "--token",
 					sensitive: true,
 					context: {
@@ -243,8 +266,6 @@ export async function ensureAuthenticatedForDeploy(
 			"Your Tarout credentials are invalid or expired.",
 		);
 	}
-	// Unreachable: both branches above either return or exit via promptOrEmit.
-	throw new AuthError();
 }
 
 async function promptForCredentials(
@@ -312,12 +333,12 @@ async function authenticateViaBrowser(
 	);
 
 	try {
-			const authData = await authServer.waitForCallback();
-			succeedSpinner(
-				action === "register"
-					? "Account created and CLI authorized."
-					: "CLI authorized.",
-			);
+		const authData = await authServer.waitForCallback();
+		succeedSpinner(
+			action === "register"
+				? "Account created and CLI authorized."
+				: "CLI authorized.",
+		);
 		authServer.close();
 
 		const fallbackProfile = {
@@ -331,8 +352,8 @@ async function authenticateViaBrowser(
 			projectId: authData.projectId,
 			projectName: authData.projectName,
 			projectSlug: authData.projectSlug,
-			environmentId: authData.environmentId,
-			environmentName: authData.environmentName,
+			environmentId: authData.environmentId || "",
+			environmentName: authData.environmentName || "production",
 		};
 		const profile = await resolveProfileFromCredential({
 			token: authData.token,
@@ -347,7 +368,7 @@ async function authenticateViaBrowser(
 		success(`Logged in as ${colors.cyan(profile.userEmail)}`);
 		box("Account", [
 			`Organization: ${colors.bold(profile.organizationName)}`,
-			`Environment: ${colors.bold(profile.environmentName)}`,
+			`Project: ${colors.bold(profile.projectName || authData.projectName)}`,
 		]);
 		return profile;
 	} catch (err) {
@@ -388,7 +409,7 @@ async function authenticateViaApiToken(
 			success(`Authenticated as ${colors.cyan(profile.userEmail)}`);
 			box("Account", [
 				`Organization: ${colors.bold(profile.organizationName)}`,
-				`Environment: ${colors.bold(profile.environmentName)}`,
+				`Project: ${colors.bold(profile.projectName || "None")}`,
 			]);
 		}
 
@@ -581,9 +602,7 @@ function collectInspectableFiles(root: string): string[] {
 			const lowerName = entry.name.toLowerCase();
 			if (
 				includedNames.has(lowerName) ||
-				includedExtensions.some((extension) =>
-					lowerName.endsWith(extension),
-				)
+				includedExtensions.some((extension) => lowerName.endsWith(extension))
 			) {
 				files.push(fullPath);
 			}
@@ -821,8 +840,8 @@ export async function resolveDeploymentTarget(
 	// source-override needs_input so the redeploy stays non-interactive.
 	const linkedProject = getProjectConfig();
 	const linkedApp = linkedProject
-		? findApp(apps, linkedProject.applicationId) ??
-			findApp(apps, linkedProject.name)
+		? (findApp(apps, linkedProject.applicationId) ??
+			findApp(apps, linkedProject.name))
 		: undefined;
 	if (linkedApp) {
 		return reuseAppTarget(client, profile, linkedApp, {
@@ -1139,9 +1158,9 @@ async function promptFreeTierUpsell(
 	return choice === "shared" ? "SHARED" : "DEDICATED";
 }
 
-async function fetchCatalogSafely(
-	client: any,
-): Promise<{ plans?: Array<{ planKey?: string; key?: string; priceHalalas?: number }> } | null> {
+async function fetchCatalogSafely(client: any): Promise<{
+	plans?: Array<{ planKey?: string; key?: string; priceHalalas?: number }>;
+} | null> {
 	try {
 		return await client.subscription.getCatalog.query();
 	} catch {
@@ -1254,7 +1273,11 @@ export async function runInlineTargetedRemedy(
 		label = remedy.targetName ?? remedy.targetKey;
 	} else {
 		const next = (await getCurrentPlanQuantitySafely(client)) + 1;
-		input = { kind: "plan_quantity", planKey: remedy.targetKey, quantity: next };
+		input = {
+			kind: "plan_quantity",
+			planKey: remedy.targetKey,
+			quantity: next,
+		};
 		label = `${remedy.targetName ?? remedy.targetKey} ×${next}`;
 	}
 
@@ -1526,7 +1549,9 @@ function humanizeGrant(g: {
 }): string {
 	const label = ENTITLEMENT_LABELS[g.entitlementKey] ?? g.entitlementKey;
 	if (g.entitlementKey.startsWith("feature.")) return label;
-	return g.quantity > 1 ? `${g.quantity}× ${label}s` : `${g.quantity}× ${label}`;
+	return g.quantity > 1
+		? `${g.quantity}× ${label}s`
+		: `${g.quantity}× ${label}`;
 }
 
 function summarizePlanGrants(plan: {
@@ -1708,9 +1733,7 @@ async function explainFreeResourceSlotExhaustion(
 		if (existing.length > 0) {
 			log("You already have:");
 			for (const d of existing) {
-				log(
-					`  • ${d.name} ${colors.dim(`(${d.kind} · ${d.id.slice(0, 8)})`)}`,
-				);
+				log(`  • ${d.name} ${colors.dim(`(${d.kind} · ${d.id.slice(0, 8)})`)}`);
 			}
 		} else {
 			log(
@@ -1776,7 +1799,7 @@ export async function promptUpgradeFromEntitlementError(
 	const recommendedKey: string | undefined = ladderPlan
 		? ladderKey
 		: matchingPlan
-			? (matchingPlan.planKey || matchingPlan.key)
+			? matchingPlan.planKey || matchingPlan.key
 			: inferSuggestedPlan(requestedPlan);
 
 	// Details block printed before the selector so users can read full
@@ -1825,10 +1848,7 @@ export async function promptUpgradeFromEntitlementError(
 		value: "__cancel__",
 	});
 
-	const picked = await select<string>(
-		"Select a plan to upgrade to:",
-		choices,
-	);
+	const picked = await select<string>("Select a plan to upgrade to:", choices);
 
 	if (picked === "__cancel__") return false;
 
@@ -2059,10 +2079,7 @@ async function resolveStorageChoice(
 			`Detected file storage usage: ${inspection.storageReasons.slice(0, 3).join("; ")}`,
 		);
 	}
-	return confirm(
-		"Provision file storage for this app?",
-		inspection.storage,
-	);
+	return confirm("Provision file storage for this app?", inspection.storage);
 }
 
 export type ResourceKind = "database" | "storage";
@@ -2180,7 +2197,10 @@ async function resolveResourcePlan(
 				: ` ${colors.dim("(needs an addon/upgrade)")}`
 			: "";
 		const rec = t === def ? colors.dim("  recommended") : "";
-		return { name: `${RESOURCE_TIER_LABEL[t]}${price}${avail}${rec}`, value: t };
+		return {
+			name: `${RESOURCE_TIER_LABEL[t]}${price}${avail}${rec}`,
+			value: t,
+		};
 	});
 	return select<ResourcePlan>(message, choices, {
 		field: kind === "database" ? "database_plan" : "storage_plan",
@@ -2572,7 +2592,12 @@ async function resolveStorageProvisioning(
 	if (picked === "__create__") {
 		const plan =
 			requestedPlan ??
-			(await resolveResourcePlan(client, "storage", undefined, "Storage plan:"));
+			(await resolveResourcePlan(
+				client,
+				"storage",
+				undefined,
+				"Storage plan:",
+			));
 		return {
 			action: "create",
 			plan,
@@ -3366,7 +3391,10 @@ export function registerDeployCommands(program: Command) {
 			"--source <source>",
 			"Deployment source: auto, upload, configured, or connect",
 		)
-		.option("--database <type>", "Provision a database: none, postgres, or mysql")
+		.option(
+			"--database <type>",
+			"Provision a database: none, postgres, or mysql",
+		)
 		.option(
 			"--database-plan <plan>",
 			"Database plan: free, starter, standard, or pro",
@@ -3437,14 +3465,13 @@ export function registerDeployCommands(program: Command) {
 					await openGitProviderSetup();
 					return;
 				}
-				const target =
-					await resolveDeploymentTarget(
-						client,
-						profile,
-						appIdentifier,
-						options,
-						sourcePreference,
-					);
+				const target = await resolveDeploymentTarget(
+					client,
+					profile,
+					appIdentifier,
+					options,
+					sourcePreference,
+				);
 				const { app, createdApp } = target;
 				const shouldUploadSource = resolveShouldUploadSource(
 					target,
@@ -3630,8 +3657,7 @@ export function registerDeployCommands(program: Command) {
 				log(`Status: ${getStatusBadge(app.applicationStatus)}`);
 
 				const appUrl =
-					formatAppUrl(app.appSubdomain) ??
-					formatAppUrl(app.domain?.[0]?.host);
+					formatAppUrl(app.appSubdomain) ?? formatAppUrl(app.domain?.[0]?.host);
 				if (appUrl) {
 					log(`URL: ${colors.cyan(appUrl)}`);
 				}
@@ -3814,22 +3840,25 @@ export function registerDeployCommands(program: Command) {
 					const errors: string[] = [];
 					let finalStatus = deployment.status;
 
-					const { cleanup, done } = streamDeploymentLogs(deployment.deploymentId, {
-						onData: (line) => {
-							logLines.push(line);
-							if (isErrorLine(line)) {
-								errors.push(line);
-							}
-							if (!isJsonMode()) {
-								printLogLine(line);
-							}
+					const { cleanup, done } = streamDeploymentLogs(
+						deployment.deploymentId,
+						{
+							onData: (line) => {
+								logLines.push(line);
+								if (isErrorLine(line)) {
+									errors.push(line);
+								}
+								if (!isJsonMode()) {
+									printLogLine(line);
+								}
+							},
+							onError: (error) => {
+								if (!isJsonMode()) {
+									log(colors.error(`WebSocket error: ${error.message}`));
+								}
+							},
 						},
-						onError: (error) => {
-							if (!isJsonMode()) {
-								log(colors.error(`WebSocket error: ${error.message}`));
-							}
-						},
-					});
+					);
 
 					// Handle Ctrl+C gracefully
 					process.on("SIGINT", () => {
@@ -4025,15 +4054,14 @@ export function registerDeployCommands(program: Command) {
 						}));
 
 					const { select } = await import("../utils/prompts.js");
-					targetDeploymentId = await select(
-						"Select deployment:",
-						choices,
-						{ field: "deployment", flag: "--to" },
-					);
+					targetDeploymentId = await select("Select deployment:", choices, {
+						field: "deployment",
+						flag: "--to",
+					});
 				}
 
 				// Confirm rollback
-				if (!options.yes) {
+				if (shouldConfirmRollback()) {
 					const targetDeployment = successfulDeployments.find(
 						(d) => d.deploymentId === targetDeploymentId,
 					);
@@ -4121,40 +4149,52 @@ export function registerDeployCommands(program: Command) {
 	// List deployments filtered by type
 	program
 		.command("deploy:list-by-type")
-		.argument("<app>", "App ID or name")
-		.argument("<type>", "Deployment type: git, upload, docker")
+		.argument(
+			"<id>",
+			"Application ID/name, preview deployment ID, or backup ID",
+		)
+		.argument("<type>", "Resource type: application, previewDeployment, backup")
 		.option("-n, --limit <n>", "Number of deployments", "20")
-		.description("List deployments filtered by source type")
-		.action(async (appIdentifier, type, options) => {
+		.description("List deployments for an application, preview, or backup")
+		.action(async (identifier, type, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
-				const _spinner = startSpinner("Fetching apps...");
-				const apps = await client.application.allByOrganization.query();
-				const appList = Array.isArray(apps)
-					? apps
-					: (apps as any)?.applications || [];
-				const app = findApp(appList, appIdentifier);
-				if (!app) {
-					failSpinner();
-					throw new NotFoundError("Application", appIdentifier);
+				const parsed = buildDeploymentTypeQuery(identifier, type);
+				let resourceId = parsed.id;
+				if (parsed.type === "application") {
+					const _spinner = startSpinner("Fetching apps...");
+					const apps = await client.application.allByOrganization.query();
+					const appList = Array.isArray(apps)
+						? apps
+						: (apps as any)?.applications || [];
+					const app = findApp(appList, identifier);
+					if (!app) {
+						failSpinner();
+						throw new NotFoundError("Application", identifier);
+					}
+					resourceId = app.applicationId;
 				}
 				const _depSpinner = startSpinner("Fetching deployments...");
-				const result = await client.deployment.allByType.query({
-					applicationId: app.applicationId,
-					type,
-					limit: Number.parseInt(options.limit || "20"),
-				} as any);
+				const result = await client.deployment.allByType.query(
+					buildDeploymentTypeQuery(resourceId, parsed.type),
+				);
 				succeedSpinner();
-				if (isJsonMode()) {
-					outputData(result);
-					return;
-				}
-				const list = Array.isArray(result)
+				const limit = Math.max(1, Number.parseInt(options.limit || "20") || 20);
+				const allDeployments = Array.isArray(result)
 					? result
 					: (result as any)?.deployments || [];
+				const list = allDeployments.slice(0, limit);
+				if (isJsonMode()) {
+					outputData(
+						Array.isArray(result)
+							? list
+							: { ...(result as any), deployments: list },
+					);
+					return;
+				}
 				if (!list.length) {
-					log(`\nNo ${type} deployments found.\n`);
+					log(`\nNo ${parsed.type} deployments found.\n`);
 					return;
 				}
 				log("");
@@ -4191,12 +4231,101 @@ export function registerLogsCommand(program: Command) {
 		)
 		.option("-f, --follow", "Stream logs continuously")
 		.option("-n, --limit <number>", "Number of logs to show", "100")
-		.option("--since <duration>", "Show logs since (e.g., 1h, 30m, 2d)")
-		.action(async () => {
-			log("");
-			log("Application logs are available in the dashboard.");
-			log("CLI log streaming is not yet supported for Coolify deployments.");
-			log("");
+		.option("--since <duration>", "Show logs since: 1h, 6h, 24h, 7d, all")
+		.action(async (appIdentifier, options) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				if (options.follow) {
+					throw new InvalidArgumentError(
+						"Continuous log following is not supported yet. Remove --follow to fetch a snapshot.",
+					);
+				}
+
+				const timeRange = options.since || "all";
+				if (!["1h", "6h", "24h", "7d", "all"].includes(timeRange)) {
+					throw new InvalidArgumentError(
+						"--since must be one of: 1h, 6h, 24h, 7d, all.",
+					);
+				}
+
+				const lineLimit = Number.parseInt(options.limit || "100");
+				if (
+					!Number.isInteger(lineLimit) ||
+					lineLimit < 10 ||
+					lineLimit > 5000
+				) {
+					throw new InvalidArgumentError(
+						"--limit must be an integer between 10 and 5000.",
+					);
+				}
+
+				const level = String(options.level || "ALL").toUpperCase();
+				if (
+					![
+						"ALL",
+						"ERROR",
+						"WARN",
+						"INFO",
+						"DEBUG",
+						"TRACE",
+						"UNKNOWN",
+					].includes(level)
+				) {
+					throw new InvalidArgumentError(
+						"--level must be one of: ALL, ERROR, WARN, INFO, DEBUG, TRACE, UNKNOWN.",
+					);
+				}
+
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching application logs...");
+				const apps = await client.application.allByOrganization.query();
+				const appList = Array.isArray(apps)
+					? apps
+					: (apps as any)?.applications || [];
+				const app = findApp(appList, appIdentifier);
+				if (!app) {
+					failSpinner();
+					throw new NotFoundError("Application", appIdentifier);
+				}
+
+				const result = await client.application.getApplicationLogs.query({
+					applicationId: app.applicationId,
+					lines: lineLimit,
+					level: level as
+						| "ALL"
+						| "ERROR"
+						| "WARN"
+						| "INFO"
+						| "DEBUG"
+						| "TRACE"
+						| "UNKNOWN",
+					timeRange: timeRange as "1h" | "6h" | "24h" | "7d" | "all",
+				});
+				succeedSpinner();
+
+				if (isJsonMode()) {
+					outputData(result);
+					return;
+				}
+
+				const logs = result?.logs || [];
+				if (!logs.length) {
+					log(`\nNo logs found for ${colors.cyan(app.name)}.\n`);
+					return;
+				}
+				log("");
+				for (const entry of logs) {
+					const timestamp = entry.timestamp
+						? `${colors.dim(new Date(entry.timestamp).toLocaleTimeString())} `
+						: "";
+					log(
+						`${timestamp}${entry.level || "UNKNOWN"} ${entry.message || entry.raw || ""}`,
+					);
+				}
+				log("");
+			} catch (err) {
+				handleError(err);
+			}
 		});
 }
 

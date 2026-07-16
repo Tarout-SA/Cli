@@ -3,13 +3,6 @@ import type { Command } from "commander";
 import { getApiClient } from "../lib/api.js";
 import { getCurrentProfile, isLoggedIn } from "../lib/config.js";
 import {
-	type ResourcePlan,
-	emitNeedsUpgrade,
-	isEntitlementError,
-	promptEntitlementRemedy,
-	resolveDatabasePlanOrExit,
-} from "./deploy.js";
-import {
 	AuthError,
 	CliError,
 	findSimilar,
@@ -31,6 +24,13 @@ import {
 import { ExitCode, exit } from "../utils/exit-codes.js";
 import { confirm, input, select } from "../utils/prompts.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
+import {
+	emitNeedsUpgrade,
+	isEntitlementError,
+	promptEntitlementRemedy,
+	type ResourcePlan,
+	resolveDatabasePlanOrExit,
+} from "./deploy.js";
 
 type DatabaseType = "postgres" | "mysql";
 
@@ -162,7 +162,10 @@ export function registerDbCommands(program: Command) {
 			"Database plan: free, starter, standard, or pro (defaults to your org's entitled tier)",
 		)
 		.option("-d, --description <description>", "Database description")
-		.option("--name <name>", "Database name (alternative to positional argument)")
+		.option(
+			"--name <name>",
+			"Database name (alternative to positional argument)",
+		)
 		.action(async (name, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
@@ -450,35 +453,29 @@ export function registerDbCommands(program: Command) {
 				log(`  Type: ${getTypeLabel(dbSummary.type)}`);
 				log("");
 
-				// Connection info
+				const externalEndpoint = getExternalDatabaseEndpoint(
+					dbSummary.type,
+					dbDetails,
+				);
+
+				// Customer connection info. Provider-private routing is deliberately
+				// never presented as a workstation fallback.
 				log(`${colors.bold("Connection")}`);
-				if (
-					dbDetails.directHost ||
-					dbDetails.poolerHost ||
-					dbDetails.databaseName
-				) {
-					const host =
-						dbDetails.poolerHost || dbDetails.directHost || "localhost";
-					const port =
-						dbDetails.poolerPort ||
-						dbDetails.directPort ||
-						(dbSummary.type === "postgres" ? 5432 : 3306);
-					log(`  Host: ${colors.cyan(host)}`);
-					log(`  Port: ${port}`);
+				if (externalEndpoint && dbDetails.databaseName) {
+					log(`  Host: ${colors.cyan(externalEndpoint.host)}`);
+					log(`  Port: ${externalEndpoint.port}`);
 					log(`  Database: ${dbDetails.databaseName}`);
 					log(`  Username: ${dbDetails.databaseUser}`);
 					log(`  Password: ${colors.dim("********")}`);
 				} else {
-					log(`  ${colors.dim("Not yet deployed")}`);
+					log(
+						`  ${colors.dim("External access is disabled or unavailable. Private infrastructure addresses are not exposed.")}`,
+					);
 				}
 				log("");
 
 				// Connection string
-				if (
-					dbDetails.directHost ||
-					dbDetails.poolerHost ||
-					dbDetails.databaseName
-				) {
+				if (externalEndpoint && dbDetails.databaseName) {
 					log(`${colors.bold("Connection String")}`);
 					const connStr = getConnectionString(dbSummary.type, dbDetails);
 					log(`  ${colors.cyan(connStr)}`);
@@ -720,18 +717,6 @@ export function registerDbCommands(program: Command) {
 				}
 
 				succeedSpinner();
-
-				// Check if database is deployed
-				if (
-					!dbDetails.directHost &&
-					!dbDetails.poolerHost &&
-					!dbDetails.databaseName
-				) {
-					throw new CliError(
-						"Database not deployed yet. Deploy first.",
-						ExitCode.GENERAL_ERROR,
-					);
-				}
 
 				// Build connection command
 				const { command, args, env } = getConnectCommand(
@@ -1312,30 +1297,61 @@ function getTypeLabel(type: DatabaseType): string {
 	return labels[type] || type;
 }
 
-function getConnectionString(type: DatabaseType, details: any): string {
-	const host = details.poolerHost || details.directHost || "localhost";
+function getExternalDatabaseEndpoint(
+	type: DatabaseType,
+	details: any,
+): { host: string; port: number } | null {
+	if (
+		type !== "postgres" ||
+		details.externalAccessEnabled !== true ||
+		!details.externalPoolerHost
+	) {
+		return null;
+	}
+
+	return {
+		host: details.externalPoolerHost,
+		port: details.externalPoolerPort || 5432,
+	};
+}
+
+function requireExternalDatabaseEndpoint(
+	type: DatabaseType,
+	details: any,
+): { host: string; port: number } {
+	const endpoint = getExternalDatabaseEndpoint(type, details);
+	if (endpoint) return endpoint;
+
+	throw new CliError(
+		"External access is disabled or unavailable. Enable it in the Tarout dashboard and allowlist this machine's IP before connecting.",
+		ExitCode.GENERAL_ERROR,
+	);
+}
+
+export function getConnectionString(type: DatabaseType, details: any): string {
+	const endpoint = requireExternalDatabaseEndpoint(type, details);
 	const user = details.databaseUser || "user";
 	const dbName = details.databaseName || "db";
 
 	switch (type) {
 		case "postgres": {
-			const pgPort = details.poolerPort || details.directPort || 5432;
-			return `postgresql://${user}:****@${host}:${pgPort}/${dbName}`;
+			return `postgresql://${user}:****@${endpoint.host}:${endpoint.port}/${dbName}`;
 		}
 		case "mysql": {
-			const myPort = details.poolerPort || details.directPort || 3306;
-			return `mysql://${user}:****@${host}:${myPort}/${dbName}`;
+			return `mysql://${user}:****@${endpoint.host}:${endpoint.port}/${dbName}`;
 		}
 		default:
 			return "";
 	}
 }
 
-function getConnectCommand(
+export function getConnectCommand(
 	type: DatabaseType,
 	details: any,
 ): { command: string; args: string[]; env: Record<string, string> } {
-	const host = details.poolerHost || details.directHost || "localhost";
+	// A CLI always runs outside Tarout's private network. Never guess or fall
+	// back to an internal provider route that the customer cannot reach.
+	const endpoint = requireExternalDatabaseEndpoint(type, details);
 	const user = details.databaseUser || "user";
 	const password = details.databasePassword || "";
 	const dbName = details.databaseName || "db";
@@ -1346,24 +1362,27 @@ function getConnectCommand(
 				command: "psql",
 				args: [
 					"-h",
-					host,
+					endpoint.host,
 					"-p",
-					String(details.poolerPort || details.directPort || 5432),
+					String(endpoint.port),
 					"-U",
 					user,
 					"-d",
 					dbName,
 				],
-				env: { PGPASSWORD: password },
+				env: {
+					PGPASSWORD: password,
+					...(details.externalSslRequired ? { PGSSLMODE: "require" } : {}),
+				},
 			};
 		case "mysql":
 			return {
 				command: "mysql",
 				args: [
 					"-h",
-					host,
+					endpoint.host,
 					"-P",
-					String(details.poolerPort || details.directPort || 3306),
+					String(endpoint.port),
 					"-u",
 					user,
 					`-p${password}`,

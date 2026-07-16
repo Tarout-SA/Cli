@@ -6,7 +6,12 @@
 
 import chalk from "chalk";
 import Table from "cli-table3";
-import { jsonError, jsonSuccess, outputJson } from "../utils/json.js";
+import {
+	jsonError,
+	jsonSuccess,
+	outputJson,
+	stringifyJson,
+} from "../utils/json.js";
 
 /** Global CLI options affecting output behavior */
 let globalOptions = {
@@ -203,7 +208,7 @@ export function outputError(
  */
 export function outputJsonLine(payload: unknown): void {
 	if (globalOptions.quiet) return;
-	console.log(JSON.stringify(payload));
+	console.log(stringifyJson(payload));
 }
 
 export interface NeedsInputRequest {

@@ -15,6 +15,8 @@ const m = vi.hoisted(() => ({
 	setCurrentProfile: vi.fn(),
 	isLoggedIn: vi.fn(() => false),
 	getCurrentProfile: vi.fn(() => null),
+	getToken: vi.fn(() => "tk_123"),
+	getApiUrl: vi.fn(() => "https://tarout.sa"),
 	resolveProfileFromCredential: vi.fn(),
 }));
 const {
@@ -30,8 +32,8 @@ vi.mock("../src/lib/config.js", () => ({
 	setCurrentProfile: m.setCurrentProfile,
 	isLoggedIn: m.isLoggedIn,
 	getCurrentProfile: m.getCurrentProfile,
-	getToken: vi.fn(() => null),
-	getApiUrl: vi.fn(() => "https://tarout.sa"),
+	getToken: m.getToken,
+	getApiUrl: m.getApiUrl,
 	clearConfig: vi.fn(),
 }));
 
@@ -45,7 +47,11 @@ vi.mock("../src/utils/spinner.js", () => ({
 	failSpinner: vi.fn(),
 }));
 
-import { authenticateWithToken } from "../src/commands/auth";
+import {
+	authenticateWithToken,
+	buildProjectKeyMetadata,
+	resolveVerifiedCurrentProfile,
+} from "../src/commands/auth";
 import { setGlobalOptions } from "../src/lib/output";
 
 const RESOLVED = {
@@ -56,6 +62,9 @@ const RESOLVED = {
 	userName: "Owner",
 	organizationId: "org-1",
 	organizationName: "Acme",
+	projectId: "project-1",
+	projectName: "Project One",
+	projectSlug: "project-one",
 	environmentId: "env-1",
 	environmentName: "production",
 };
@@ -104,6 +113,12 @@ describe("authenticateWithToken", () => {
 		// outputData wraps the payload as { success: true, data: <payload> }.
 		const success = events.find((e) => e.success === true);
 		expect(success?.data?.user?.email).toBe("owner@example.com");
+		expect(success?.data?.project).toEqual({
+			id: "project-1",
+			name: "Project One",
+			slug: "project-one",
+		});
+		expect(success?.data).not.toHaveProperty("environment");
 	});
 
 	it("reports the replaced identity when overwriting an existing session", async () => {
@@ -142,5 +157,46 @@ describe("authenticateWithToken", () => {
 
 		expect(setProfile).not.toHaveBeenCalled();
 		expect(setCurrentProfile).not.toHaveBeenCalled();
+	});
+});
+
+describe("buildProjectKeyMetadata", () => {
+	it("scopes new CLI keys to the project without an environment boundary", () => {
+		expect(
+			buildProjectKeyMetadata({
+				organizationId: "org-1",
+				projectId: "project-1",
+			}),
+		).toEqual({
+			organizationId: "org-1",
+			projectId: "project-1",
+		});
+	});
+});
+
+describe("resolveVerifiedCurrentProfile", () => {
+	it("validates the current token remotely instead of trusting saved metadata", async () => {
+		const stale = { ...RESOLVED, projectId: "deleted-project" };
+		getCurrentProfile.mockReturnValue(stale as never);
+		resolveProfileFromCredential.mockResolvedValueOnce(RESOLVED);
+
+		await expect(resolveVerifiedCurrentProfile()).resolves.toEqual(RESOLVED);
+		expect(resolveProfileFromCredential).toHaveBeenCalledWith({
+			token: "tk_123",
+			apiUrl: "https://tarout.sa",
+			fallback: stale,
+		});
+	});
+
+	it("supports a bare TAROUT_TOKEN without a saved profile", async () => {
+		getCurrentProfile.mockReturnValue(null);
+		resolveProfileFromCredential.mockResolvedValueOnce(RESOLVED);
+
+		await expect(resolveVerifiedCurrentProfile()).resolves.toEqual(RESOLVED);
+		expect(resolveProfileFromCredential).toHaveBeenCalledWith({
+			token: "tk_123",
+			apiUrl: "https://tarout.sa",
+			fallback: null,
+		});
 	});
 });

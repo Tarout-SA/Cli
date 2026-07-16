@@ -6,6 +6,7 @@ import {
 	AuthError,
 	findSimilar,
 	handleError,
+	InvalidArgumentError,
 	NotFoundError,
 } from "../lib/errors.js";
 import {
@@ -31,6 +32,50 @@ interface AppSummary {
 	createdAt: Date | string;
 	domain?: string | Array<{ host: string }> | null;
 	name: string;
+}
+
+interface ApplicationUpdateOptions {
+	description?: string;
+	name?: string;
+	subdomain?: string;
+}
+
+export function buildApplicationUpdatePlan(
+	applicationId: string,
+	options: ApplicationUpdateOptions,
+): {
+	application: Record<string, unknown> | null;
+	subdomain: string | null;
+} {
+	const application: Record<string, unknown> = { applicationId };
+	let subdomain: string | null = null;
+
+	if (options.name !== undefined) {
+		const name = options.name.trim();
+		if (!name)
+			throw new InvalidArgumentError("Application name cannot be empty.");
+		application.name = name;
+	}
+	if (options.description !== undefined) {
+		application.description = options.description;
+	}
+	if (options.subdomain !== undefined) {
+		subdomain = options.subdomain.trim();
+		if (!subdomain) {
+			throw new InvalidArgumentError("Application subdomain cannot be empty.");
+		}
+	}
+
+	if (Object.keys(application).length === 1 && subdomain === null) {
+		throw new InvalidArgumentError(
+			"No changes specified. Use --name, --description, or --subdomain.",
+		);
+	}
+
+	return {
+		application: Object.keys(application).length > 1 ? application : null,
+		subdomain,
+	};
 }
 
 export function registerAppsCommands(program: Command) {
@@ -112,7 +157,7 @@ export function registerAppsCommands(program: Command) {
 					});
 				}
 
-				if (!description && !shouldSkipConfirmation()) {
+				if (!description && !shouldSkipConfirmation() && !isJsonMode()) {
 					description = await input("Description (optional):", undefined, {
 						field: "description",
 						flag: "--description",
@@ -460,30 +505,24 @@ export function registerAppsCommands(program: Command) {
 					throw new NotFoundError("Application", appIdentifier, suggestions);
 				}
 
-				const updates: Record<string, any> = {
-					applicationId: app.applicationId,
-				};
+				const updatePlan = buildApplicationUpdatePlan(
+					app.applicationId,
+					options,
+				);
 
-				if (options.name) updates.name = options.name;
-				if (options.description) updates.description = options.description;
-
-				if (options.subdomain) {
+				if (updatePlan.subdomain !== null) {
 					// Use dedicated endpoint for custom subdomain
 					const _updateSpinner = startSpinner("Updating custom subdomain...");
 					await client.application.updateCustomSubdomain.mutate({
 						applicationId: app.applicationId,
-						customSubdomain: options.subdomain,
+						customSubdomain: updatePlan.subdomain,
 					});
 					succeedSpinner("Subdomain updated!");
-				} else if (Object.keys(updates).length > 1) {
+				}
+				if (updatePlan.application) {
 					const _updateSpinner = startSpinner("Updating application...");
-					await client.application.update.mutate(updates);
+					await client.application.update.mutate(updatePlan.application as any);
 					succeedSpinner("Application updated!");
-				} else {
-					log(
-						"No changes specified. Use --name, --description, or --subdomain.",
-					);
-					return;
 				}
 
 				if (isJsonMode()) {
