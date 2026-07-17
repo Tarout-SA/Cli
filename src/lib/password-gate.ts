@@ -76,7 +76,7 @@ export async function platformFetch(
 		headers.set("cookie", existingCookie);
 	}
 
-	const response = await fetch(input, { ...init, headers });
+	const response = await fetch(input, { redirect: "error", ...init, headers });
 	if (response.status !== 401) return response;
 
 	const body = await response
@@ -87,5 +87,5 @@ export async function platformFetch(
 
 	const cookie = await unlockPasswordGate(url.origin);
 	headers.set("cookie", cookie);
-	return fetch(input, { ...init, headers });
+	return fetch(input, { redirect: "error", ...init, headers });
 }

@@ -50,6 +50,96 @@ function redactUrlPassword(value: string): string {
 	);
 }
 
+// Matches a dotenv-style `KEY=VALUE` line (optionally `export KEY=…`). A full
+// secret export (e.g. envVariable.export/getAsString) arrives as ONE string
+// value under a non-sensitive key ("content"/"text"), so the per-key object
+// redaction never sees these keys — this recovers that protection line-by-line
+// by masking the RHS of any line whose key name looks credential-bearing.
+const DOTENV_LINE_PATTERN =
+	/^([ \t]*(?:export[ \t]+)?)([A-Za-z_][A-Za-z0-9_.]*)([ \t]*=[ \t]*)(.+)$/gm;
+
+function redactDotenvSecrets(value: string): string {
+	return value.replace(
+		DOTENV_LINE_PATTERN,
+		(match, prefix, key, eq) =>
+			isSensitiveKey(key) ? `${prefix}${key}${eq}${SECRET_PLACEHOLDER}` : match,
+	);
+}
+
+// Well-known credential value shapes that identify a secret by its OWN format,
+// regardless of any surrounding key name (Stripe/Moyasar, OpenAI, GitHub,
+// GitLab, Slack, AWS, Google, SendGrid). The prefixes are distinctive enough
+// that matching them does not touch ordinary prose or identifiers.
+const TOKEN_VALUE_PATTERNS: RegExp[] = [
+	// Stripe / Moyasar publishable, secret & restricted keys, and webhook secrets
+	/\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{16,}/g,
+	/\bwhsec_[A-Za-z0-9]{16,}/g,
+	// OpenAI-style keys (incl. project keys)
+	/\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}/g,
+	// GitHub personal / OAuth / app / refresh tokens and fine-grained PATs
+	/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}/g,
+	/\bgithub_pat_[A-Za-z0-9_]{22,}/g,
+	// GitLab personal access tokens
+	/\bglpat-[A-Za-z0-9_-]{20,}/g,
+	// Slack bot/user/app/refresh tokens
+	/\bxox[baprs]-[A-Za-z0-9-]{10,}/g,
+	// AWS access key IDs
+	/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,
+	// Google API keys
+	/\bAIza[A-Za-z0-9_-]{35}\b/g,
+	// SendGrid API keys
+	/\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g,
+];
+
+function redactTokenValues(value: string): string {
+	return TOKEN_VALUE_PATTERNS.reduce(
+		(acc, pattern) => acc.replace(pattern, SECRET_PLACEHOLDER),
+		value,
+	);
+}
+
+// Last-resort catch for a prefix-less, key-less credential: a long, high-entropy
+// run that mixes upper, lower AND digits (the shape of a random API key/bearer
+// token). Thresholds are deliberately strict so ordinary identifiers survive —
+// UUIDs, single-case git SHAs / container hashes and slugs lack the case+digit
+// mix, and short values never reach the length bar.
+const HIGH_ENTROPY_CANDIDATE = /[A-Za-z0-9+/=_-]{40,}/g;
+
+function shannonEntropy(s: string): number {
+	const counts = new Map<string, number>();
+	for (const ch of s) counts.set(ch, (counts.get(ch) ?? 0) + 1);
+	let bits = 0;
+	for (const count of counts.values()) {
+		const p = count / s.length;
+		bits -= p * Math.log2(p);
+	}
+	return bits;
+}
+
+function looksLikeSecretToken(token: string): boolean {
+	if (!/[a-z]/.test(token)) return false;
+	if (!/[A-Z]/.test(token)) return false;
+	if (!/[0-9]/.test(token)) return false;
+	return shannonEntropy(token) >= 3.5;
+}
+
+function redactHighEntropyTokens(value: string): string {
+	return value.replace(HIGH_ENTROPY_CANDIDATE, (token) =>
+		looksLikeSecretToken(token) ? SECRET_PLACEHOLDER : token,
+	);
+}
+
+// Value-based redaction for a free-form (non-JSON) string. Layered so key-name
+// redaction is no longer the only line of defense: URL passwords, dotenv secret
+// lines, vendor token shapes, then generic high-entropy tokens.
+function redactSecretValues(value: string): string {
+	let out = redactUrlPassword(value);
+	out = redactDotenvSecrets(out);
+	out = redactTokenValues(out);
+	out = redactHighEntropyTokens(out);
+	return out;
+}
+
 function sanitizeString(value: string): string {
 	const withoutInlineImages = redactInlineImages(value);
 	const trimmed = withoutInlineImages.trimStart();
@@ -64,14 +154,16 @@ function sanitizeString(value: string): string {
 			// Not valid JSON after all — fall through to plain-string redaction.
 		}
 	}
-	return redactUrlPassword(withoutInlineImages);
+	return redactSecretValues(withoutInlineImages);
 }
 
 /** Defense in depth for older hosted MCP endpoints which may still return an
  * inline screenshot or persisted infrastructure credential. The platform also
  * sanitizes these server-side. Recurses through nested objects AND arrays,
- * redacts credential-bearing keys, and strips the password out of any
- * connection-URL string value it encounters. */
+ * redacts credential-bearing keys, and applies value-based redaction to string
+ * values (URL passwords, dotenv secret lines, known token shapes and generic
+ * high-entropy tokens) so raw secrets embedded in free-form output — e.g. a
+ * dotenv blob from the `call` escape hatch — do not reach the agent. */
 export function sanitizeMcpCallResult<T>(value: T): T {
 	if (typeof value === "string") return sanitizeString(value) as T;
 	if (Array.isArray(value)) return value.map(sanitizeMcpCallResult) as T;

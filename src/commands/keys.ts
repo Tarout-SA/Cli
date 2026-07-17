@@ -91,7 +91,7 @@ export function registerKeysCommands(program: Command) {
 				if (!keyName) {
 					keyName = await input("Key name:", undefined, {
 						field: "name",
-						flag: "--name",
+						flag: "<name>",
 					});
 				}
 

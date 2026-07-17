@@ -136,14 +136,83 @@ export function getToken(): string | null {
 }
 
 /**
+ * Hosts the CLI will attach API credentials to without an explicit opt-in:
+ * the official production/staging domains and loopback (local dev). Mirrors the
+ * allowlist used by warnIfUntrustedHost / normalizeApiUrl so the trust boundary
+ * is consistent across the codebase.
+ * @param {string} value - A candidate API URL.
+ * @returns {boolean} True if credentials may be sent to the URL's host.
+ */
+function isTrustedApiHost(value: string): boolean {
+	let host: string;
+	try {
+		host = new URL(value).hostname.toLowerCase();
+	} catch {
+		return false;
+	}
+	return (
+		host === "tarout.sa" ||
+		host.endsWith(".tarout.sa") ||
+		host === "localhost" ||
+		host === "127.0.0.1" ||
+		host === "[::1]"
+	);
+}
+
+/**
+ * Whether the operator has explicitly opted in to sending credentials to an
+ * untrusted host via TAROUT_API_URL (escape hatch for self-hosted / bespoke
+ * deployments). Accepts the usual truthy strings.
+ * @returns {boolean} True if the opt-in is set.
+ */
+function isUntrustedHostAllowed(): boolean {
+	const value = (process.env.TAROUT_ALLOW_UNTRUSTED_HOST || "")
+		.trim()
+		.toLowerCase();
+	return value === "1" || value === "true" || value === "yes";
+}
+
+/**
  * Gets the API URL for the current profile.
  * Honors the TAROUT_API_URL env var (for CI / agents / local dev) when there is
  * no active profile, mirroring how getToken() falls back to TAROUT_TOKEN.
+ *
+ * The API token (getToken() / TAROUT_TOKEN) is attached to whatever host this
+ * resolves to, so the environment override is guarded by a host allowlist:
+ * credentials are refused for an untrusted, non-loopback host set via
+ * TAROUT_API_URL (e.g. a malicious .env, CI variable, or poisoned shell
+ * profile) rather than silently exfiltrated. Staging (*.tarout.sa) and loopback
+ * overrides keep working, and self-hosted deployments can opt in with
+ * TAROUT_ALLOW_UNTRUSTED_HOST=1. Profile-saved URLs (already vetted at login)
+ * and the built-in default are trusted by construction.
  * @returns {string} The API URL, defaults to https://tarout.sa
+ * @throws {Error} If TAROUT_API_URL points at an untrusted host without opt-in.
  */
 export function getApiUrl(): string {
 	const profile = getCurrentProfile();
-	return profile?.apiUrl || process.env.TAROUT_API_URL || "https://tarout.sa";
+	if (profile?.apiUrl) {
+		return profile.apiUrl;
+	}
+
+	const envApiUrl = process.env.TAROUT_API_URL;
+	if (envApiUrl) {
+		if (!isTrustedApiHost(envApiUrl) && !isUntrustedHostAllowed()) {
+			let host = envApiUrl;
+			try {
+				host = new URL(envApiUrl).hostname;
+			} catch {
+				// Fall back to the raw value in the error message.
+			}
+			throw new Error(
+				`Refusing to send Tarout credentials to untrusted host "${host}" from TAROUT_API_URL. ` +
+					"Use an official (*.tarout.sa) or loopback host, or set " +
+					"TAROUT_ALLOW_UNTRUSTED_HOST=1 to override if you trust this host.",
+			);
+		}
+		return envApiUrl;
+	}
+
+	return "https://tarout.sa";
 }
 
 /**

@@ -3,6 +3,7 @@ import { getApiClient } from "../lib/api.js";
 import { isLoggedIn } from "../lib/config.js";
 import {
 	AuthError,
+	CliError,
 	findSimilar,
 	handleError,
 	InvalidArgumentError,
@@ -208,29 +209,33 @@ export function registerDomainsCommands(program: Command) {
 
 				if (!availability.available) {
 					failSpinner();
-					error(`${domainName} is not available for registration.`);
-					return;
+					throw new CliError(
+						`${domainName} is not available for registration.`,
+					);
 				}
 
 				succeedSpinner();
 
-				if (isJsonMode()) {
-					outputData(availability);
-					return;
+				// Human availability summary. JSON/agent mode skips the display and
+				// proceeds straight through the purchase flow (contact collection →
+				// payment link) so an agent can complete a registration end-to-end,
+				// mirroring the interactive path below.
+				if (!isJsonMode()) {
+					log("");
+					log(
+						`${colors.cyan(domainName)} is ${colors.success("available")}!`,
+					);
+					log(
+						`  Price: ${colors.bold(`${availability.purchasePrice} ${availability.currency}`)}`,
+					);
+					log(
+						`  Renewal: ${colors.dim(`${availability.renewalPrice} ${availability.currency}/yr`)}`,
+					);
+					if (availability.premium) {
+						log(`  ${colors.warn("Premium domain")}`);
+					}
+					log("");
 				}
-
-				log("");
-				log(`${colors.cyan(domainName)} is ${colors.success("available")}!`);
-				log(
-					`  Price: ${colors.bold(`${availability.purchasePrice} ${availability.currency}`)}`,
-				);
-				log(
-					`  Renewal: ${colors.dim(`${availability.renewalPrice} ${availability.currency}/yr`)}`,
-				);
-				if (availability.premium) {
-					log(`  ${colors.warn("Premium domain")}`);
-				}
-				log("");
 
 				if (!shouldSkipConfirmation()) {
 					const confirmed = await confirm(
@@ -262,6 +267,15 @@ export function registerDomainsCommands(program: Command) {
 					});
 
 				succeedSpinner();
+
+				if (isJsonMode()) {
+					outputData({
+						domainId: payment.domainId,
+						paymentUrl: payment.paymentUrl,
+						amount: payment.amount,
+					});
+					return;
+				}
 
 				box("Domain Registration Payment", [
 					`Domain: ${colors.cyan(domainName)}`,

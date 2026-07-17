@@ -15,6 +15,8 @@
  * can surface entitlement remedies + timeout outcomes without collapsing them
  * into a plain error envelope.
  */
+import { homedir } from "node:os";
+import { parse, resolve, sep } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
@@ -28,6 +30,44 @@ import { getProjectConfig } from "../../lib/config.js";
 import { resolveAppRef } from "../../lib/env-core.js";
 import { resolveEntitlementRemedy } from "../../lib/entitlement-remedy.js";
 import { errorResult, okResult, withAuth } from "../runtime.js";
+
+/**
+ * Directory names that hold credentials/secrets and are never a deployable app.
+ * `deploy` archives the WHOLE target directory (createSourceArchive) and the
+ * archive excludes only cover build artifacts + .env, so a steered agent could
+ * point deploy at e.g. ~/.ssh or the home dir and ship keys/tokens to the
+ * platform. Refuse those locations up front.
+ */
+const SENSITIVE_DIR_NAMES = new Set([
+	".ssh",
+	".aws",
+	".gnupg",
+	".gcloud",
+	".kube",
+	".docker",
+	".azure",
+	".config",
+]);
+
+/**
+ * Returns an error message if `dir` is not a safe directory to archive+upload
+ * (filesystem root, the user's home dir, or anything living under a known
+ * secret/credential directory), or undefined when the path is acceptable.
+ * Normal project directories pass unchanged.
+ */
+function unsafeDeployDirectory(dir: string): string | undefined {
+	const abs = resolve(dir);
+	const home = resolve(homedir());
+	const { root } = parse(abs);
+	if (abs === root || abs === home) {
+		return `Refusing to deploy '${abs}': archiving a filesystem root or home directory would upload credentials and unrelated files. Point deploy at a specific project directory.`;
+	}
+	const hit = abs.split(sep).find((s) => SENSITIVE_DIR_NAMES.has(s));
+	if (hit) {
+		return `Refusing to deploy '${abs}': it is inside a sensitive directory ('${hit}'). Point deploy at a project directory outside credential/config folders.`;
+	}
+	return undefined;
+}
 
 export function registerDeployTools(server: McpServer): void {
 	server.registerTool(
@@ -121,6 +161,12 @@ export function registerDeployTools(server: McpServer): void {
 			extra: any,
 		) => {
 			const cwd = dir ?? process.cwd();
+			// Confine deploy to a real project directory: refuse home/root/secret
+			// dirs so a prompt-injected agent can't archive+upload e.g. ~/.ssh.
+			const unsafe = unsafeDeployDirectory(cwd);
+			if (unsafe) {
+				return errorResult({ error: unsafe, code: "INVALID_ARGUMENTS" });
+			}
 			// Zod defaults only apply when the schema is parsed; direct handler
 			// invocations (and MCP SDK versions that don't pre-parse) can bypass
 			// them, so mirror them here.
@@ -275,6 +321,13 @@ export function registerDeployTools(server: McpServer): void {
 						return errorResult({
 							error: "Deployment failed.",
 							code: "DEPLOYMENT_FAILED",
+							details: { deploymentId, snapshot: last },
+						});
+					}
+					if (status === "cancelled") {
+						return errorResult({
+							error: "Deployment cancelled.",
+							code: "DEPLOYMENT_CANCELLED",
 							details: { deploymentId, snapshot: last },
 						});
 					}

@@ -1728,11 +1728,24 @@ export function registerAppsCommands(program: Command) {
 	apps
 		.command("change-plan")
 		.argument("<app>", "Application ID or name")
-		.argument("<plan>", "New plan (shared, dedicated)")
+		.argument("<plan>", "New plan (free, shared, dedicated)")
 		.description("Change the hosting plan for an application")
 		.action(async (appIdentifier, newPlan) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
+				// changePlan's server input is z.enum(["FREE","SHARED","DEDICATED"]);
+				// the CLI help lists lowercase names, so accept any case and validate
+				// client-side, failing fast with the accepted values.
+				const normalizedPlan = String(newPlan).trim().toUpperCase();
+				if (
+					normalizedPlan !== "FREE" &&
+					normalizedPlan !== "SHARED" &&
+					normalizedPlan !== "DEDICATED"
+				) {
+					throw new InvalidArgumentError(
+						`Invalid plan "${newPlan}". Must be one of: FREE, SHARED, DEDICATED.`,
+					);
+				}
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching applications...");
 				const appsList: AppSummary[] =
@@ -1744,7 +1757,7 @@ export function registerAppsCommands(program: Command) {
 				}
 				if (!shouldSkipConfirmation()) {
 					const confirmed = await confirm(
-						`Change plan for "${app.name}" to "${newPlan}"?`,
+						`Change plan for "${app.name}" to "${normalizedPlan}"?`,
 						false,
 						{
 							field: "confirm_change_plan",
@@ -1752,7 +1765,7 @@ export function registerAppsCommands(program: Command) {
 							context: {
 								appName: app.name,
 								applicationId: app.applicationId,
-								newPlan,
+								newPlan: normalizedPlan,
 							},
 						},
 					);
@@ -1761,17 +1774,19 @@ export function registerAppsCommands(program: Command) {
 						return;
 					}
 				}
-				const _changeSpinner = startSpinner(`Changing plan to ${newPlan}...`);
+				const _changeSpinner = startSpinner(
+					`Changing plan to ${normalizedPlan}...`,
+				);
 				await client.application.changePlan.mutate({
 					applicationId: app.applicationId,
-					newPlan,
+					newPlan: normalizedPlan,
 				} as any);
-				succeedSpinner(`Plan changed to ${newPlan}.`);
+				succeedSpinner(`Plan changed to ${normalizedPlan}.`);
 				if (isJsonMode())
 					outputData({
 						changed: true,
 						applicationId: app.applicationId,
-						newPlan,
+						newPlan: normalizedPlan,
 					});
 			} catch (err) {
 				failSpinner();

@@ -1942,13 +1942,12 @@ export function registerServersCommands(program: Command) {
 				succeedSpinner("SSH session created!");
 				if (isJsonMode()) outputData(result);
 				else {
+					// createSshSession returns { token, ipAddress }.
+					const r = result as any;
 					log("");
 					log(colors.bold("SSH Session"));
-					log(`  Host: ${colors.cyan((result as any).host || "-")}`);
-					log(`  Port: ${(result as any).port || 22}`);
-					log(`  User: ${(result as any).user || "root"}`);
-					if ((result as any).token)
-						log(`  Token: ${colors.dim((result as any).token)}`);
+					log(`  IP Address: ${colors.cyan(r.ipAddress || "-")}`);
+					if (r.token) log(`  Token: ${colors.dim(r.token)}`);
 					log("");
 				}
 			} catch (err) {

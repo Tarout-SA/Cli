@@ -124,7 +124,7 @@ export function registerLinkCommands(program: Command) {
 
 					const selectedId = await select("Select an application:", choices, {
 						field: "app",
-						flag: "--app",
+						flag: "<app>",
 					});
 					selectedApp =
 						apps.find(

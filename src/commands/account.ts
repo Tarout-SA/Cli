@@ -110,7 +110,11 @@ export function registerAccountCommands(program: Command) {
 	account
 		.command("delete")
 		.description("Permanently delete your account")
-		.action(async () => {
+		.option(
+			"--confirm-email <email>",
+			"Your account email, to confirm deletion non-interactively",
+		)
+		.action(async (options: { confirmEmail?: string }) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 				if (!shouldSkipConfirmation()) {
@@ -131,11 +135,12 @@ export function registerAccountCommands(program: Command) {
 						return;
 					}
 				}
-				const confirmEmail = await input(
-					"Type your email address to confirm:",
-					undefined,
-					{ field: "confirm_email", flag: "--confirm-email" },
-				);
+				const confirmEmail =
+					options.confirmEmail ||
+					(await input("Type your email address to confirm:", undefined, {
+						field: "confirm_email",
+						flag: "--confirm-email",
+					}));
 				const client = getApiClient();
 				const _spinner = startSpinner("Deleting account...");
 				await client.user.deleteSelf.mutate({ confirmEmail } as any);
