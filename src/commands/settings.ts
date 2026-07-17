@@ -175,7 +175,11 @@ export function registerSettingsCommands(program: Command) {
 				const _spinner = startSpinner("Fetching OpenAPI spec...");
 				const data = await client.settings.getOpenApiDocument.query();
 				succeedSpinner();
-				outputData(data);
+				if (isJsonMode()) {
+					outputData(data);
+					return;
+				}
+				log(JSON.stringify(data, null, 2));
 			} catch (err) {
 				failSpinner();
 				handleError(err);

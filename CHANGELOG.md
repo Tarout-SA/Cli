@@ -9,41 +9,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- MCP result sanitization: tool results are redacted for credentials before
+  return, with a per-tool allowlist (`db_credentials` / `db_create` / `db_info`
+  pass through so connection strings and passwords stay usable).
+- A `process.exit` guard for MCP tool handlers — a handler that transitively
+  reaches `exit()` (e.g. a needs-input prompt) can no longer kill the server.
+- A schema contract test that validates every curated MCP tool's payload
+  against the platform's real Zod input schemas (opt in with
+  `TAROUT_PLATFORM_DIR` / `REQUIRE_PLATFORM_CONTRACT`).
+- `biome.json` — formatter off, linter on; the repo previously inherited
+  Biome's defaults with no committed config.
+- `FORBIDDEN` errors from MCP tools now carry the entitlement remedy (the exact
+  `billing_upgrade` / addon command to run).
 - **`tarout-mcp` is now a self-contained local MCP server** (was a thin stdio
   proxy). ~36 curated tools plus a `call` / `list_procedures` /
-  `describe_procedure` escape hatch cover the CLI's real capabilities —
-  deploy from the current directory, sync `.env`, connection credentials for
-  Postgres/MySQL/S3-compatible buckets, org/project/env switching, billing
-  upgrade with hosted-checkout polling. Auth is lazy: the server stays alive
-  when logged out; the first tool call returns an `AUTH_ERROR` envelope with
-  remediation.
+  `describe_procedure` escape hatch cover the CLI's real capabilities — deploy
+  from the current directory, sync `.env`, obtain connection credentials for
+  Postgres/MySQL/S3-compatible buckets, switch org/project/environment context,
+  and upgrade billing with hosted-checkout polling. Auth is lazy: the server
+  stays alive when logged out; the first tool call returns an `AUTH_ERROR`
+  envelope with remediation.
 - `https://tarout.sa/agent-setup/prompt.md` — fetch-and-follow install
   bootstrap for coding agents (Claude Code, Cursor, Claude Desktop).
 
 ### Changed
 
+- `warn()` now writes to stderr in all modes (was stdout), keeping stdout clean
+  for piping.
+- Quiet mode (`-q`) overhauled: spinners and warnings are silenced, tables emit
+  plain rows, list commands emit one full identifier per line, and mutations
+  emit the created / affected ids.
+- `build --json` failures exit `12` (`BUILD_FAILED`) with the child's real code
+  preserved as `childExitCode` in the envelope, plus a top-level error envelope.
+- `logout` best-effort revokes the server-side CLI key, removes only the current
+  profile, and announces when another saved profile becomes active.
+- Expired / rejected stored tokens now surface a re-login hint instead of a bare
+  auth error.
+- `--json` stdout is a single JSON document; the agent-setup advisory moved to
+  stderr.
+- Untrusted `--api-url` hosts warn before any credentials are sent.
+- Every authenticated command now uses a shared login-recovery gate instead of
+  dead-ending when no profile is active. Interactive sessions offer browser
+  login, agent/non-TTY sessions open and wait for the callback when possible,
+  and headless sessions fall back to a token prompt. `TAROUT_NO_BROWSER`
+  disables browser launches for headless safety and tests.
 - `src/commands/call.ts` reuses `src/lib/surface-manifest.ts` (extracted).
 - `src/commands/env.ts` reuses `src/lib/env-core.ts` (extracted).
 - `src/commands/deploy.ts::createSourceArchive` is now exported.
 
-## [Unreleased]
+### Removed
 
-### Changed
+- `domains ns`, `domains set-nameservers`, and `domains dns-ext
+  update-nameservers` — the platform deliberately does not expose customer
+  nameserver management (Cloudflare-Registrar domains are Tarout-managed), so
+  these commands always failed with `NOT_FOUND`.
 
-- **Every command auto-recovers authentication instead of dead-ending on "Run `tarout login`".**
-  Previously only `deploy`/`init`/`up` opened a browser when logged out; every other
-  command (`whoami`, `apps`, `storage`, `db`, `keys`, `env`, …) threw a bare `AuthError`
-  that just told the user — or the agent driving the CLI — to go run `tarout login`
-  themselves. Now a single `preAction` gate routes any logged-out, auth-requiring command
-  through a shared recovery: a human at a real terminal gets an arrow-selectable menu
-  whose default opens the browser; an agent / non-TTY / `--json` run gets the browser
-  opened for it automatically (emitting an `auth_browser_opened` event) and waits on the
-  local sign-in callback; a headless host with no display falls back to an API-token
-  prompt (`needs_input`, exit 6). The auth commands themselves, the self-authing
-  `deploy`/`init`/`up`, and the `agent` scaffolding namespace stay exempt. Adds the
-  `TAROUT_NO_BROWSER` env var to suppress real browser launches (headless safety / tests).
+### Fixed
 
-## [0.19.0]
+- Browser login, registration, and deploy authentication now use a short-lived,
+  single-use authorization code bound to an S256 PKCE challenge. Long-lived API
+  keys and account/profile data are no longer carried in the loopback callback
+  URL; the CLI exchanges the code through a bounded, non-redirecting POST and
+  validates the complete response before saving it.
+- MCP `app_create` / `db_create` now send the required `appName` slug alongside
+  `organizationId`.
+- MCP `env_unset` uses `envVariable.delete` / `envVariable.bulkDelete` (was an
+  import the server always rejected).
+- MCP `billing_upgrade` maps the plan `quantity` correctly.
+- MCP `billing_status` reads the real usage endpoint (`billing.getUsageBreakdown`).
+- MCP `context_switch` resolves environment names, not just ids.
+- The `call` discovery network calls are bounded at 30s.
+- `env unset` always sends `restart: true` (the server rejected `restart:false`,
+  breaking unset whenever `--restart` was omitted); `--restart` is now a
+  documented no-op.
+- `db upgrade` auto-confirm reads the correct preview field
+  (`totalProratedHalalas`) and is reachable non-interactively, so agent
+  checkouts actually confirm.
+- VAT labels now mirror the server-computed tax — real gross amount and actual
+  rate, hidden when 0%.
+- `settings openapi` now prints the spec in human (non-JSON) mode instead of
+  producing no output without `--json`.
+- deploy's database / storage choice prompts respect non-interactive mode,
+  auto-selecting the detected defaults instead of dead-ending on an
+  unanswerable prompt under `--json` / `--yes` / no TTY.
+- `env bulk-set`'s agent-mode error now points at the real remedy (`--vars`
+  with a JSON example) instead of `--yes`.
+
+### Docs
+
+- README domains / logs / config sections corrected to match the shipped
+  commands and the real config-file location.
+
 ## [0.20.1]
 
 ### Changed

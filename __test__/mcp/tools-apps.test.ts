@@ -4,6 +4,7 @@ vi.mock("../../src/lib/config", () => ({
 	isLoggedIn: () => true,
 	getToken: () => "tok",
 	getApiUrl: () => "https://api.test",
+	getCurrentProfile: () => ({ organizationId: "org_1" }),
 }));
 
 const fakeClient = {
@@ -91,16 +92,20 @@ describe("apps tools", () => {
 		});
 	});
 
-	it("app_create forwards inputs to application.create", async () => {
+	it("app_create injects appName slug + organizationId", async () => {
 		const r = await invoke("app_create", {
-			name: "api",
+			name: "My API",
 			description: "backend",
 			plan: "SHARED",
 		});
 		expect(r.isError).toBeUndefined();
+		// Regression: the platform application.create schema requires appName
+		// (a slug) and organizationId — the old payload sent neither.
 		expect(fakeClient.application.create.mutate).toHaveBeenCalledWith({
-			name: "api",
+			name: "My API",
+			appName: "my-api",
 			description: "backend",
+			organizationId: "org_1",
 			plan: "SHARED",
 		});
 		const body = JSON.parse(r.content[0].text) as { created: { applicationId: string } };

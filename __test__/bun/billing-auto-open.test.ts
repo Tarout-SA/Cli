@@ -34,6 +34,7 @@ const { setGlobalOptions } = await import("../../src/lib/output");
 /** Reset env + mode to a known baseline between tests. */
 const savedDisplay = process.env.DISPLAY;
 const savedWayland = process.env.WAYLAND_DISPLAY;
+const savedNoBrowser = process.env.TAROUT_NO_BROWSER;
 
 function setDisplay(present: boolean) {
 	if (present) {
@@ -49,6 +50,7 @@ beforeEach(() => {
 	openedUrls.length = 0;
 	setOpenShouldThrow(false);
 	setGlobalOptions({ json: false, nonInteractive: false });
+	delete process.env.TAROUT_NO_BROWSER;
 	setDisplay(true);
 });
 
@@ -58,6 +60,8 @@ afterEach(() => {
 	else process.env.DISPLAY = savedDisplay;
 	if (savedWayland === undefined) delete process.env.WAYLAND_DISPLAY;
 	else process.env.WAYLAND_DISPLAY = savedWayland;
+	if (savedNoBrowser === undefined) delete process.env.TAROUT_NO_BROWSER;
+	else process.env.TAROUT_NO_BROWSER = savedNoBrowser;
 	setGlobalOptions({ json: false, nonInteractive: false });
 });
 
@@ -103,6 +107,11 @@ describe("A: paymentBrowserOpener available in all modes (display present)", () 
 describe("B: paymentBrowserOpener opt-out / no-display", () => {
 	it("returns undefined when noOpen:true (display present)", () => {
 		expect(paymentBrowserOpener({ noOpen: true })).toBeUndefined();
+	});
+
+	it("returns undefined when TAROUT_NO_BROWSER suppresses launches", () => {
+		process.env.TAROUT_NO_BROWSER = "1";
+		expect(paymentBrowserOpener()).toBeUndefined();
 	});
 
 	it("returns undefined when no display (DISPLAY + WAYLAND both unset)", () => {
@@ -309,6 +318,20 @@ describe("F: engine uses real paymentBrowserOpener; open called with paymentUrl"
 			openBrowser: opener,
 		});
 		expect(r.status).toBe("payment_required");
+		expect(openedUrls).toEqual([]);
+	});
+
+	it("TAROUT_NO_BROWSER preserves the payment handoff without opening", async () => {
+		process.env.TAROUT_NO_BROWSER = "1";
+		const opener = paymentBrowserOpener();
+		expect(opener).toBeUndefined();
+		const r = await performBillingChange(paidCheckoutClient(), {
+			kind: "plan",
+			planKey: "shared",
+			openBrowser: opener,
+		});
+		expect(r.status).toBe("payment_required");
+		expect(r.paymentUrl).toBe("https://pay.test/checkout");
 		expect(openedUrls).toEqual([]);
 	});
 

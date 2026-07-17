@@ -1,13 +1,17 @@
 import type { Command } from "commander";
 import { resolveProfileFromCredential } from "../lib/auth-profile.js";
-import { startAuthServer } from "../lib/auth-server.js";
+import { startCliBrowserAuth } from "../lib/auth-server.js";
+import { normalizeApiUrl } from "../lib/api-url.js";
 import { canLaunchBrowser, openInBrowser } from "../lib/browser.js";
 import {
 	clearConfig,
+	deleteProfile,
 	getApiUrl,
+	getConfig,
 	getCurrentProfile,
 	getToken,
 	isLoggedIn,
+	listProfiles,
 	setCurrentProfile,
 	setProfile,
 } from "../lib/config.js";
@@ -16,11 +20,14 @@ import {
 	box,
 	colors,
 	isJsonMode,
+	isQuietMode,
 	log,
 	outputData,
 	outputJsonLine,
 	success,
+	warn,
 } from "../lib/output.js";
+import { stringifyJson } from "../utils/json.js";
 import { input, promptOrEmit } from "../utils/prompts.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
 
@@ -57,6 +64,121 @@ export function announceAuthUrl(
 }
 
 /**
+ * `login`, `login --token`, `register`, and `token <key>` all send authentication
+ * material (an API key, or the browser flow's one-time PKCE exchange) to whatever
+ * `--api-url` names.
+ * Warn — never block — when that host is neither a Tarout host nor loopback, so a
+ * typo or a malicious `--api-url` can't silently exfiltrate a token. Called from
+ * the most shared chokepoint of each path (`authenticateWithToken` for the token
+ * flows, just before the browser handshake for the interactive flows) so no
+ * credential-transmitting path is missed. Emitted on stderr in every mode
+ * (structured under --json) so it never pollutes the stdout envelope.
+ */
+export function warnIfUntrustedHost(apiUrl: string): void {
+	let host: string;
+	try {
+		host = new URL(apiUrl).hostname.toLowerCase();
+	} catch {
+		return;
+	}
+	if (
+		host === "tarout.sa" ||
+		host.endsWith(".tarout.sa") ||
+		host === "localhost" ||
+		host === "127.0.0.1"
+	) {
+		return;
+	}
+	const message = `Credentials will be sent to a non-Tarout host: ${host}. Only continue if you trust it.`;
+	if (isJsonMode()) {
+		if (isQuietMode()) return;
+		console.error(
+			stringifyJson({
+				type: "event",
+				event: "untrusted_host_warning",
+				host,
+				message,
+			}),
+		);
+	} else {
+		warn(message);
+	}
+}
+
+/**
+ * Sign out of the CURRENT profile only. Best-effort revokes the server-side CLI
+ * key first (so it can't outlive logout for its 30-day lifespan), then drops the
+ * local credential. A network failure or an older server without the revoke
+ * endpoint must never block logout — we warn and still clear local state. Other
+ * saved profiles are left untouched; when the current profile was the last one,
+ * the whole store is reset (identical to the historical single-profile flow).
+ */
+export async function performLogout(): Promise<void> {
+	if (!isLoggedIn()) {
+		if (isJsonMode()) {
+			outputData({ success: true, message: "Already logged out" });
+		} else {
+			log("Already logged out.");
+		}
+		return;
+	}
+
+	const profile = getCurrentProfile();
+	const currentName = getConfig().currentProfile;
+
+	let revoked = false;
+	let revokeFailed = false;
+	try {
+		const { getApiClient } = await import("../lib/api.js");
+		const result = await getApiClient().user.revokeCurrentCliKey.mutate();
+		revoked = Boolean(result?.revoked);
+	} catch {
+		// Best-effort: offline, or a server too old to know the endpoint. Fall
+		// through to clearing local state so logout still succeeds locally.
+		revokeFailed = true;
+	}
+
+	deleteProfile(currentName);
+	const remaining = listProfiles();
+	// Deleting the active profile silently promotes another saved profile to
+	// current — never switch identity without announcing which profile/email is
+	// now active. `switchedTo` is null when this was the last profile (a full
+	// logout with nothing left to switch to).
+	let switchedTo: { profile: string; userEmail?: string } | null = null;
+	if (remaining.length === 0) {
+		clearConfig();
+	} else {
+		const nextName = remaining[0] as string;
+		setCurrentProfile(nextName);
+		const nextProfile = getCurrentProfile();
+		switchedTo = { profile: nextName, userEmail: nextProfile?.userEmail };
+	}
+
+	if (isJsonMode()) {
+		outputData({
+			success: true,
+			message: "Logged out successfully",
+			revoked,
+			switchedTo,
+		});
+	} else {
+		if (revokeFailed) {
+			warn(
+				"Could not reach Tarout to revoke this session; cleared local credentials anyway.",
+			);
+		}
+		const from = profile?.userEmail || "Tarout";
+		if (switchedTo) {
+			success(
+				`Logged out from ${from}. Now using profile '${switchedTo.profile}'${switchedTo.userEmail ? ` (${switchedTo.userEmail})` : ""}.`,
+			);
+		} else {
+			success(`Logged out from ${from}`);
+		}
+	}
+}
+
+/**
  * Headless authentication with an existing API key. Shared by `tarout login
  * --token` and `tarout token` — both resolve the key to a full profile (org,
  * project) and persist it as the `default` profile. A legacy environment hint
@@ -68,12 +190,18 @@ export async function authenticateWithToken(
 	apiToken: string,
 	apiUrl: string,
 ): Promise<void> {
+	const normalizedApiUrl = normalizeApiUrl(apiUrl);
+	warnIfUntrustedHost(normalizedApiUrl);
+
 	const previous = isLoggedIn() ? getCurrentProfile() : null;
 
 	const _spinner = startSpinner("Verifying token...");
 	let profile: Awaited<ReturnType<typeof resolveProfileFromCredential>>;
 	try {
-		profile = await resolveProfileFromCredential({ token: apiToken, apiUrl });
+		profile = await resolveProfileFromCredential({
+			token: apiToken,
+			apiUrl: normalizedApiUrl,
+		});
 	} catch (err) {
 		failSpinner("Token verification failed");
 		throw err;
@@ -162,6 +290,7 @@ export function registerAuthCommands(program: Command) {
 			try {
 				// Headless path: a pasted API key skips the browser entirely and is an
 				// explicit re-auth, so it overwrites any current session.
+				// authenticateWithToken warns about an untrusted --api-url itself.
 				if (options.token) {
 					await authenticateWithToken(options.token, options.apiUrl);
 					return;
@@ -187,18 +316,18 @@ export function registerAuthCommands(program: Command) {
 				}
 
 				const apiUrl = options.apiUrl;
+				warnIfUntrustedHost(apiUrl);
 				log("");
 				log("Opening browser to authenticate...");
 
 				// Start local server for callback
-				const authServer = await startAuthServer();
-				const callbackUrl = `http://localhost:${authServer.port}/callback?state=${encodeURIComponent(authServer.state)}`;
+				const authServer = await startCliBrowserAuth(apiUrl);
 
 				// Open browser to auth page. The launch may silently no-op (SSH/WSL,
 				// missing xdg-open) — openInBrowser also prints the URL so the user
 				// can complete auth by pasting it, while the callback server keeps
 				// waiting below.
-				const authUrl = `${apiUrl}/cli-authorize?callback=${encodeURIComponent(callbackUrl)}`;
+				const authUrl = authServer.authUrl;
 				const launched = await openInBrowser(authUrl, {
 					hint: "If the browser didn't open, visit this URL to authenticate:",
 				});
@@ -277,23 +406,7 @@ export function registerAuthCommands(program: Command) {
 		.description("Sign out and clear stored credentials")
 		.action(async () => {
 			try {
-				if (!isLoggedIn()) {
-					if (isJsonMode()) {
-						outputData({ success: true, message: "Already logged out" });
-					} else {
-						log("Already logged out.");
-					}
-					return;
-				}
-
-				const profile = getCurrentProfile();
-				clearConfig();
-
-				if (isJsonMode()) {
-					outputData({ success: true, message: "Logged out successfully" });
-				} else {
-					success(`Logged out from ${profile?.userEmail || "Tarout"}`);
-				}
+				await performLogout();
 			} catch (err) {
 				handleError(err);
 			}
@@ -324,12 +437,14 @@ export function registerAuthCommands(program: Command) {
 				}
 
 				const apiUrl = options.apiUrl;
+				warnIfUntrustedHost(apiUrl);
 				log("");
 				log("Opening browser to create your account...");
 
-				const authServer = await startAuthServer();
-				const callbackUrl = `http://localhost:${authServer.port}/callback?state=${encodeURIComponent(authServer.state)}`;
-				const authUrl = `${apiUrl}/cli-authorize?action=register&callback=${encodeURIComponent(callbackUrl)}`;
+				const authServer = await startCliBrowserAuth(apiUrl, {
+					action: "register",
+				});
+				const authUrl = authServer.authUrl;
 				const launched = await openInBrowser(authUrl, {
 					hint: "If the browser didn't open, visit this URL to create your account:",
 				});

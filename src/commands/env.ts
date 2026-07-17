@@ -238,9 +238,9 @@ export function registerEnvCommands(program: Command) {
 		.description("Remove an environment variable")
 		.option(
 			"--restart",
-			"Restart the app to apply now (default: apply on next restart)",
+			"Deprecated no-op: deleting a variable always restarts the app to apply (kept for backward compatibility)",
 		)
-		.action(async (appIdentifier, key, options) => {
+		.action(async (appIdentifier, key, _options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
@@ -260,24 +260,23 @@ export function registerEnvCommands(program: Command) {
 					throw new NotFoundError("Application", appIdentifier, suggestions);
 				}
 
-				// Default restart:false to match the dashboard (which never
-				// auto-restarts on an env change); opt in with --restart.
+				// The platform contract (apiDeleteEnvVariable) requires restart to be
+				// the literal `true` — a deletion is only complete once Tarout
+				// confirms a healthy replacement workload, so it always restarts.
+				// Sending restart:false was rejected by the server, which broke
+				// `env unset` whenever --restart was omitted.
 				await client.envVariable.delete.mutate({
 					applicationId: app.applicationId,
 					key,
-					restart: !!options.restart,
+					restart: true,
 				});
 
 				succeedSpinner(`Removed ${key}`);
 
 				if (isJsonMode()) {
-					outputData({ key, deleted: true, restarted: !!options.restart });
+					outputData({ key, deleted: true, restarted: true });
 				} else {
 					quietOutput(key);
-					if (!options.restart)
-						log(
-							colors.dim(`Apply now with: tarout apps restart ${appIdentifier}`),
-						);
 				}
 			} catch (err) {
 				handleError(err);
@@ -690,10 +689,17 @@ export function registerEnvCommands(program: Command) {
 				if (options.vars) {
 					vars = JSON.parse(options.vars);
 				} else {
-					const _raw = await import("node:process");
 					log('Enter JSON key-value object (e.g. {"KEY":"value"}):');
 					const input2 = await (await import("../utils/prompts.js")).input(
 						"JSON:",
+						undefined,
+						{
+							field: "vars",
+							flag: "--vars",
+							context: {
+								example: '{"KEY":"value","OTHER":"123"}',
+							},
+						},
 					);
 					vars = JSON.parse(input2);
 				}

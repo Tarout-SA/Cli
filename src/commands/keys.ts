@@ -232,6 +232,8 @@ export function registerKeysCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData({ keyId: key.keyId || key.id, isDefault: true });
+				} else {
+					quietOutput(key.keyId || key.id);
 				}
 			} catch (err) {
 				handleError(err);
@@ -263,6 +265,7 @@ export function registerKeysCommands(program: Command) {
 				succeedSpinner("SSH key deployed to server!");
 				if (isJsonMode())
 					outputData({ deployed: true, keyId: key.keyId || key.id, serverId });
+				else quietOutput(key.keyId || key.id);
 			} catch (err) {
 				handleError(err);
 			}
@@ -293,6 +296,7 @@ export function registerKeysCommands(program: Command) {
 				succeedSpinner("SSH key removed from server!");
 				if (isJsonMode())
 					outputData({ removed: true, keyId: key.keyId || key.id, serverId });
+				else quietOutput(key.keyId || key.id);
 			} catch (err) {
 				handleError(err);
 			}

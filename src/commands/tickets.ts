@@ -255,6 +255,8 @@ export function registerTicketsCommands(program: Command) {
 					return;
 				}
 
+				quietOutput(ticket.ticketId || ticket.id);
+
 				log("");
 				log(colors.bold(ticket.subject));
 				log(colors.dim(ticket.ticketId || ticket.id));
@@ -352,6 +354,7 @@ export function registerTicketsCommands(program: Command) {
 				if (isJsonMode()) {
 					outputData({ replied: true, ticketId });
 				} else {
+					quietOutput(ticketId);
 					log("");
 					log(colors.success("Reply sent successfully."));
 					log("");
@@ -410,6 +413,7 @@ export function registerTicketsCommands(program: Command) {
 				succeedSpinner();
 				if (isJsonMode()) outputData(data);
 				else {
+					quietOutput((data as any).storageKey || (data as any).uploadUrl || "");
 					log("");
 					log(colors.bold("Upload URL"));
 					log(`  URL:        ${colors.cyan((data as any).uploadUrl || "-")}`);
@@ -505,6 +509,7 @@ export function registerTicketsCommands(program: Command) {
 				succeedSpinner();
 				if (isJsonMode()) outputData(data);
 				else {
+					quietOutput((data as any).downloadUrl || "");
 					log("");
 					log(colors.bold("Download URL"));
 					log(`  URL: ${colors.cyan((data as any).downloadUrl || "-")}`);
@@ -568,6 +573,8 @@ export function registerTicketsCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData({ closed: true, ticketId });
+				} else {
+					quietOutput(ticketId);
 				}
 			} catch (err) {
 				handleError(err);

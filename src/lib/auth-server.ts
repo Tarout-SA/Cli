@@ -1,6 +1,8 @@
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Server } from "node:http";
 import express from "express";
+import { normalizeApiUrl } from "./api-url.js";
+import { platformFetch } from "./password-gate.js";
 
 export interface AuthCallbackData {
 	token: string;
@@ -17,12 +19,161 @@ export interface AuthCallbackData {
 	environmentName?: string;
 }
 
-interface StartAuthServerOptions {
+export type ExchangeAuthorizationCode = (
+	code: string,
+	codeVerifier: string,
+) => Promise<AuthCallbackData>;
+
+export interface StartAuthServerOptions {
 	state?: string;
+	codeVerifier?: string;
+	exchangeCode: ExchangeAuthorizationCode;
+	timeoutMs?: number;
+}
+
+export interface StartCliBrowserAuthOptions
+	extends Omit<StartAuthServerOptions, "exchangeCode"> {
+	action?: "login" | "register";
+	exchangeCode?: ExchangeAuthorizationCode;
 }
 
 function createAuthState(): string {
 	return randomBytes(32).toString("base64url");
+}
+
+export function createPkceVerifier(): string {
+	return randomBytes(32).toString("base64url");
+}
+
+export function createPkceChallenge(codeVerifier: string): string {
+	return createHash("sha256").update(codeVerifier, "ascii").digest("base64url");
+}
+
+function parseAuthCallbackData(value: unknown): AuthCallbackData {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error(
+			"Tarout returned an invalid response to the authorization-code exchange.",
+		);
+	}
+
+	const record = value as Record<string, unknown>;
+	const required = [
+		"token",
+		"userId",
+		"userEmail",
+		"organizationId",
+		"organizationName",
+		"projectId",
+		"projectName",
+	] as const;
+	const optional = [
+		"userName",
+		"projectSlug",
+		"environmentId",
+		"environmentName",
+	] as const;
+	const valid =
+		required.every(
+			(key) => typeof record[key] === "string" && record[key].length > 0,
+		) &&
+		optional.every(
+			(key) => record[key] === undefined || typeof record[key] === "string",
+		);
+	if (!valid) {
+		throw new Error(
+			"Tarout returned an invalid response to the authorization-code exchange.",
+		);
+	}
+
+	return record as unknown as AuthCallbackData;
+}
+
+export async function exchangeCliAuthorizationCode(
+	apiUrl: string,
+	code: string,
+	codeVerifier: string,
+	options: { timeoutMs?: number } = {},
+): Promise<AuthCallbackData> {
+	if (
+		!/^[A-Za-z0-9_-]{43}$/.test(code) ||
+		!/^[A-Za-z0-9._~-]{43,128}$/.test(codeVerifier)
+	) {
+		throw new Error("Invalid authorization request.");
+	}
+	const normalizedApiUrl = normalizeApiUrl(apiUrl);
+	const controller = new AbortController();
+	const timeout = setTimeout(
+		() => controller.abort(),
+		options.timeoutMs ?? 15_000,
+	);
+	timeout.unref?.();
+
+	try {
+		const endpoint = `${normalizedApiUrl}/api/cli/exchange`;
+		const response = await platformFetch(endpoint, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ code, codeVerifier }),
+			redirect: "error",
+			signal: controller.signal,
+		});
+		if (!response.ok) {
+			throw new Error(
+				`Tarout rejected the authorization-code exchange (HTTP ${response.status}).`,
+			);
+		}
+		let body: unknown;
+		try {
+			body = await response.json();
+		} catch {
+			throw new Error(
+				"Tarout returned an invalid response to the authorization-code exchange.",
+			);
+		}
+		return parseAuthCallbackData(body);
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+export async function startCliBrowserAuth(
+	apiUrl: string,
+	options: StartCliBrowserAuthOptions = {},
+): Promise<
+	Awaited<ReturnType<typeof startAuthServer>> & {
+		authUrl: string;
+		callbackUrl: string;
+	}
+> {
+	const normalizedApiUrl = normalizeApiUrl(apiUrl);
+	const authServer = await startAuthServer({
+		state: options.state,
+		codeVerifier: options.codeVerifier,
+		timeoutMs: options.timeoutMs,
+		exchangeCode:
+			options.exchangeCode ??
+			((code, codeVerifier) =>
+				exchangeCliAuthorizationCode(normalizedApiUrl, code, codeVerifier)),
+	});
+	const callbackUrl = new URL(
+		`http://127.0.0.1:${authServer.port}/callback`,
+	);
+	callbackUrl.searchParams.set("state", authServer.state);
+	callbackUrl.searchParams.set("protocol", "2");
+	callbackUrl.searchParams.set("code_challenge", authServer.codeChallenge);
+	callbackUrl.searchParams.set("code_challenge_method", "S256");
+
+	const authUrl = new URL(`${normalizedApiUrl}/cli-authorize`);
+	if (options.action === "register") {
+		authUrl.searchParams.set("action", "register");
+	}
+	authUrl.searchParams.set("callback", callbackUrl.toString());
+
+	return {
+		...authServer,
+		authUrl: authUrl.toString(),
+		callbackUrl: callbackUrl.toString(),
+	};
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -41,15 +192,24 @@ function escapeHtml(value: unknown): string {
 		.replace(/'/g, "&#39;");
 }
 
-export function startAuthServer(options: StartAuthServerOptions = {}): Promise<{
+export function startAuthServer(options: StartAuthServerOptions): Promise<{
 	port: number;
 	state: string;
+	codeChallenge: string;
 	waitForCallback: () => Promise<AuthCallbackData>;
 	close: () => void;
 }> {
 	return new Promise((resolve) => {
 		const app = express();
 		const expectedState = options.state ?? createAuthState();
+		const codeVerifier = options.codeVerifier ?? createPkceVerifier();
+		if (!/^[A-Za-z0-9_-]{32,128}$/.test(expectedState)) {
+			throw new Error("Invalid authentication state.");
+		}
+		if (!/^[A-Za-z0-9._~-]{43,128}$/.test(codeVerifier)) {
+			throw new Error("Invalid PKCE verifier.");
+		}
+		const codeChallenge = createPkceChallenge(codeVerifier);
 		// biome-ignore lint/style/useConst: server is declared before assignment due to closure scope requirements
 		let server: Server;
 		let callbackResolver: (data: AuthCallbackData) => void;
@@ -60,22 +220,10 @@ export function startAuthServer(options: StartAuthServerOptions = {}): Promise<{
 			callbackRejecter = rej;
 		});
 
-		app.get("/callback", (req, res) => {
-			const {
-				token,
-				userId,
-				userEmail,
-				userName,
-				organizationId,
-				organizationName,
-				projectId,
-				projectName,
-				projectSlug,
-				environmentId,
-				environmentName,
-				error,
-				state,
-			} = req.query;
+		let callbackStarted = false;
+
+		app.get("/callback", async (req, res) => {
+			const { code, error, state } = req.query;
 
 			if (
 				!state ||
@@ -112,19 +260,32 @@ export function startAuthServer(options: StartAuthServerOptions = {}): Promise<{
 				return;
 			}
 
-			const missing: string[] = [];
-			if (!token) missing.push("token");
-			if (!userId) missing.push("userId");
-			if (!userEmail) missing.push("userEmail");
-			if (!organizationId) missing.push("organizationId");
-			if (!organizationName) missing.push("organizationName");
-			if (!projectId) missing.push("projectId");
-			if (!projectName) missing.push("projectName");
-			if (missing.length > 0) {
-				const list = missing.join(", ");
-				res.status(400).send(`Missing required parameters: ${list}`);
+			if (!code || Array.isArray(code)) {
+				res.status(400).send("Missing required authorization code");
+				return;
+			}
+			if (!/^[A-Za-z0-9_-]{43}$/.test(String(code))) {
+				res.status(400).send("Invalid authorization code");
+				return;
+			}
+
+			if (callbackStarted) {
+				res.status(409).send("Authentication callback already received");
+				return;
+			}
+			callbackStarted = true;
+
+			let authData: AuthCallbackData;
+			try {
+				authData = await options.exchangeCode(String(code), codeVerifier);
+			} catch (error) {
+				res
+					.status(502)
+					.send("Authentication exchange failed. Return to the terminal to retry.");
 				callbackRejecter(
-					new Error(`Missing required parameters from auth callback: ${list}`),
+					error instanceof Error
+						? error
+						: new Error("Authentication exchange failed"),
 				);
 				return;
 			}
@@ -152,19 +313,7 @@ export function startAuthServer(options: StartAuthServerOptions = {}): Promise<{
         </html>
       `);
 
-			callbackResolver({
-				token: String(token),
-				userId: String(userId),
-				userEmail: String(userEmail),
-				userName: userName ? String(userName) : undefined,
-				organizationId: String(organizationId),
-				organizationName: String(organizationName),
-				projectId: String(projectId),
-				projectName: String(projectName),
-				projectSlug: projectSlug ? String(projectSlug) : undefined,
-				environmentId: environmentId ? String(environmentId) : undefined,
-				environmentName: environmentName ? String(environmentName) : undefined,
-			});
+			callbackResolver(authData);
 		});
 
 		// Timeout after 5 minutes
@@ -175,7 +324,7 @@ export function startAuthServer(options: StartAuthServerOptions = {}): Promise<{
 				);
 				server.close();
 			},
-			5 * 60 * 1000,
+			options.timeoutMs ?? 5 * 60 * 1000,
 		);
 		timeout.unref?.();
 
@@ -192,6 +341,7 @@ export function startAuthServer(options: StartAuthServerOptions = {}): Promise<{
 			resolve({
 				port,
 				state: expectedState,
+				codeChallenge,
 				waitForCallback: () => callbackPromise,
 				close,
 			});

@@ -10,9 +10,9 @@ import { setGlobalOptions } from "../src/lib/output";
  * NEEDS_UPGRADE instead of silently billing a second time. These tests drive it
  * with a scripted fake tRPC client — no DB, no payment gateway.
  *
- * Display is forced OFF so the auto-buy path's injected `paymentBrowserOpener()`
- * is `undefined` (canLaunchBrowser() === false) and never spawns a real browser;
- * the purchase still runs through the billing engine against the fake client.
+ * Vitest sets `TAROUT_NO_BROWSER=1` globally, so the auto-buy path's injected
+ * `paymentBrowserOpener()` is always `undefined`. A fail-closed `open` mock in
+ * the Vitest setup also catches any browser-launch path that bypasses the helper.
  */
 
 type Tier = {
@@ -81,23 +81,14 @@ function fakeClient(opts: {
 	};
 }
 
-const savedDisplay = process.env.DISPLAY;
-const savedWayland = process.env.WAYLAND_DISPLAY;
-
 beforeEach(() => {
-	// Interactive session by default (no browser → auto-buy never launches a real
-	// one). Agent-mode tests opt into JSON/non-interactive explicitly.
+	// Interactive session by default. Vitest's TAROUT_NO_BROWSER guard prevents
+	// auto-buy from launching a real browser on every host OS.
 	setGlobalOptions({ json: false, nonInteractive: false });
-	delete process.env.DISPLAY;
-	delete process.env.WAYLAND_DISPLAY;
 });
 
 afterEach(() => {
 	setGlobalOptions({ json: false, nonInteractive: false });
-	if (savedDisplay === undefined) delete process.env.DISPLAY;
-	else process.env.DISPLAY = savedDisplay;
-	if (savedWayland === undefined) delete process.env.WAYLAND_DISPLAY;
-	else process.env.WAYLAND_DISPLAY = savedWayland;
 });
 
 describe("ensureDatabasePlan", () => {

@@ -73,6 +73,7 @@ export function registerFirewallCommands(program: Command) {
 					return;
 				}
 				const t = tpl as any;
+				quietOutput(t.id || id);
 				log("");
 				log(colors.bold(t.name || "Firewall Template"));
 				log(colors.dim(t.id || id));
@@ -245,6 +246,7 @@ export function registerFirewallCommands(program: Command) {
 				} as any);
 				succeedSpinner("Firewall template updated!");
 				if (isJsonMode()) outputData(result);
+				else quietOutput((result as any)?.id || id);
 			} catch (err) {
 				handleError(err);
 			}
@@ -277,6 +279,7 @@ export function registerFirewallCommands(program: Command) {
 				await client.firewallTemplate.delete.mutate({ id } as any);
 				succeedSpinner("Firewall template deleted!");
 				if (isJsonMode()) outputData({ deleted: true, id });
+				else quietOutput(id);
 			} catch (err) {
 				handleError(err);
 			}

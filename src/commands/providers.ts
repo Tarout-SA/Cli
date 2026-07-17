@@ -143,6 +143,7 @@ export function registerProvidersCommands(program: Command) {
 				await client.gitProvider.remove.mutate({ gitProviderId });
 				succeedSpinner("Provider removed.");
 				if (isJsonMode()) outputData({ removed: true, gitProviderId });
+				else quietOutput(gitProviderId);
 			} catch (err) {
 				failSpinner();
 				handleError(err);
@@ -237,6 +238,7 @@ export function registerProvidersCommands(program: Command) {
 					return;
 				}
 				const p = data as any;
+				quietOutput(p.githubId || githubId);
 				log("");
 				log(colors.bold(p.name || githubId));
 				log(`  ID:            ${colors.dim(p.githubId || "-")}`);
@@ -307,6 +309,7 @@ export function registerProvidersCommands(program: Command) {
 					return;
 				}
 				const list = Array.isArray(branches) ? branches : [];
+				for (const b of list) quietOutput(b.name || b);
 				log("");
 				list.forEach((b: any) => log(`  ${b.name || b}`));
 				log("");
@@ -364,6 +367,7 @@ export function registerProvidersCommands(program: Command) {
 					});
 					succeedSpinner("Provider updated.");
 					if (isJsonMode()) outputData({ updated: true, githubId });
+					else quietOutput(githubId);
 				} catch (err) {
 					failSpinner();
 					handleError(err);
@@ -489,6 +493,7 @@ export function registerProvidersCommands(program: Command) {
 					return;
 				}
 				const p = data as any;
+				quietOutput(p.gitlabId || gitlabId);
 				log("");
 				log(colors.bold(p.name || gitlabId));
 				log(`  ID:       ${colors.dim(p.gitlabId || "-")}`);
@@ -553,6 +558,7 @@ export function registerProvidersCommands(program: Command) {
 					return;
 				}
 				const list = Array.isArray(branches) ? branches : [];
+				for (const b of list) quietOutput(b.name || b);
 				log("");
 				list.forEach((b: any) => log(`  ${b.name || b}`));
 				log("");
@@ -618,6 +624,7 @@ export function registerProvidersCommands(program: Command) {
 					} as any);
 					succeedSpinner("GitLab provider updated.");
 					if (isJsonMode()) outputData({ updated: true, gitlabId });
+					else quietOutput(gitlabId);
 				} catch (err) {
 					failSpinner();
 					handleError(err);
@@ -743,6 +750,7 @@ export function registerProvidersCommands(program: Command) {
 					return;
 				}
 				const p = data as any;
+				quietOutput(p.bitbucketId || bitbucketId);
 				log("");
 				log(colors.bold(p.name || bitbucketId));
 				log(`  ID:        ${colors.dim(p.bitbucketId || "-")}`);
@@ -806,6 +814,7 @@ export function registerProvidersCommands(program: Command) {
 					return;
 				}
 				const list = Array.isArray(branches) ? branches : [];
+				for (const b of list) quietOutput(b.name || b);
 				log("");
 				list.forEach((b: any) => log(`  ${b.name || b}`));
 				log("");
@@ -870,6 +879,7 @@ export function registerProvidersCommands(program: Command) {
 					} as any);
 					succeedSpinner("Bitbucket provider updated.");
 					if (isJsonMode()) outputData({ updated: true, bitbucketId });
+					else quietOutput(bitbucketId);
 				} catch (err) {
 					failSpinner();
 					handleError(err);

@@ -7,6 +7,7 @@ import {
 	isJsonMode,
 	log,
 	outputData,
+	quietOutput,
 	shouldSkipConfirmation,
 	table,
 } from "../lib/output.js";
@@ -94,6 +95,8 @@ export function registerNotificationsCommands(program: Command) {
 
 				const n = notif as any;
 
+				quietOutput(n.notificationId || n.id || "");
+
 				log("");
 				log(colors.bold(n.name || "Notification Preferences"));
 				log(colors.dim(n.notificationId || n.id || ""));
@@ -179,6 +182,10 @@ export function registerNotificationsCommands(program: Command) {
 					return;
 				}
 
+				quietOutput(
+					(result as any)?.notificationId || (result as any)?.id || name,
+				);
+
 				log("");
 				log(colors.success("Notification preferences saved."));
 				log(`Run ${colors.dim("tarout notifications get")} to review.`);
@@ -222,6 +229,8 @@ export function registerNotificationsCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData({ deleted: true, notificationId });
+				} else {
+					quietOutput(notificationId);
 				}
 			} catch (err) {
 				handleError(err);
@@ -247,6 +256,7 @@ export function registerNotificationsCommands(program: Command) {
 					return;
 				}
 				const n = notif as any;
+				quietOutput(n.notificationId || n.id || "");
 				log("");
 				log(colors.bold(n.name || "Notification Configuration"));
 				log(colors.dim(n.notificationId || n.id || ""));
@@ -391,6 +401,9 @@ export function registerNotificationsCommands(program: Command) {
 				succeedSpinner("Notification config created!");
 				if (isJsonMode()) outputData(result);
 				else {
+					quietOutput(
+						(result as any)?.notificationId || (result as any)?.id || name,
+					);
 					log("");
 					log(colors.success(`Notification configuration "${name}" created.`));
 					log("");
@@ -426,6 +439,7 @@ export function registerNotificationsCommands(program: Command) {
 				} as any);
 				succeedSpinner("Notification config updated!");
 				if (isJsonMode()) outputData({ updated: true, notificationId });
+				else quietOutput(notificationId);
 			} catch (err) {
 				handleError(err);
 			}

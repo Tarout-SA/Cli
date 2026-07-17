@@ -562,7 +562,7 @@ export function registerUpCommand(program: Command): void {
 						providerList[0]?.githubId ?? providerList[0]?.id ?? "";
 					if (!githubId) {
 						throw new NotFoundError("GitHub connection", "none", [
-							"Install the Tarout GitHub App: visit your Tarout dashboard → Integrations → GitHub.",
+							"Install the Tarout GitHub App: visit your Tarout dashboard → Settings → Git Providers.",
 						]);
 					}
 					await client.application.saveGithubProvider.mutate({

@@ -9,6 +9,7 @@ import {
 	isJsonMode,
 	log,
 	outputData,
+	quietOutput,
 	table,
 } from "../lib/output.js";
 import { input } from "../utils/prompts.js";
@@ -38,6 +39,9 @@ export function registerWalletCommands(program: Command) {
 					outputData(data);
 					return;
 				}
+
+				// Quiet mode: emit the raw halala balance for scripting/piping.
+				quietOutput(String(data.balanceHalalas));
 
 				const halalaBalance = Number(data.balanceHalalas);
 				const sarBalance = (halalaBalance / 100).toFixed(2);
@@ -157,6 +161,9 @@ export function registerWalletCommands(program: Command) {
 					outputData(result);
 					return;
 				}
+
+				// Quiet mode: emit the order ID (confirm with `wallet confirm <id>`).
+				quietOutput(result.orderId || "");
 
 				const paymentUrl = result.paymentUrl || result.url || "";
 

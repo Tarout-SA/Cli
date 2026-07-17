@@ -11,10 +11,11 @@ describe("planFamily / isPaidFamily", () => {
 	it("classifies known plan keys", () => {
 		expect(planFamily("free")).toBe("FREE");
 		expect(planFamily("shared")).toBe("SHARED");
-		expect(planFamily("bundle_starter")).toBe("SHARED");
 		expect(planFamily("dedicated_medium")).toBe("DEDICATED");
 		expect(planFamily("nope")).toBeNull();
 		expect(planFamily(undefined)).toBeNull();
+		// bundle_* plans were removed from the catalog — no longer a known family.
+		expect(planFamily("bundle_starter")).toBeNull();
 	});
 
 	it("treats only SHARED/DEDICATED as paid families", () => {
@@ -53,7 +54,6 @@ describe("dbAddonKeyForPlanFamily", () => {
 		// Distinct from resourceAddonKeysForPlan's db.starter estimator key — these
 		// are the keys assertResourceAddonsMatchPlan accepts for a standalone buy.
 		expect(dbAddonKeyForPlanFamily("shared")).toBe("db.standard");
-		expect(dbAddonKeyForPlanFamily("bundle_starter")).toBe("db.standard");
 		expect(dbAddonKeyForPlanFamily("dedicated_small")).toBe("db.pro");
 		expect(dbAddonKeyForPlanFamily("dedicated_large")).toBe("db.pro");
 	});

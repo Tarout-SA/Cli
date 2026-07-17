@@ -89,7 +89,7 @@ claude mcp add tarout -- tarout-mcp
 
 ### Auth
 
-The server reads your CLI profile (`~/.tarout/config.json`) or the
+The server reuses your CLI profile (created by `tarout login`) or the
 `TAROUT_TOKEN` env var. If neither is set, tool calls return a structured
 `AUTH_ERROR` — run `tarout login` on the same machine.
 
@@ -163,8 +163,8 @@ tarout deploy:status my-app
 | `tarout logs <app>` | View application logs |
 
 ```bash
-# Stream logs continuously
-tarout logs my-app --follow
+# Fetch a snapshot of recent logs
+tarout logs my-app
 
 # Filter by log level
 tarout logs my-app --level error
@@ -173,8 +173,10 @@ tarout logs my-app --level error
 tarout logs my-app --since 1h
 
 # Last 100 lines
-tarout logs my-app --lines 100
+tarout logs my-app --limit 100
 ```
+
+> Continuous following (`--follow`) is not supported yet — `tarout logs` fetches a snapshot.
 
 ### Environment Variables
 
@@ -228,14 +230,14 @@ tarout db connect mydb
 
 | Command | Description |
 |---------|-------------|
-| `tarout domains list [app]` | List domains |
-| `tarout domains add <app> <domain>` | Add custom domain |
-| `tarout domains remove <domain>` | Remove domain |
+| `tarout domains list` | List domains |
+| `tarout domains link <app> <domain>` | Link a custom domain to an application |
+| `tarout domains unlink <domain>` | Unlink a domain from an application |
 | `tarout domains verify <domain>` | Check DNS configuration |
 
 ```bash
-# Add custom domain
-tarout domains add my-app api.example.com
+# Link a custom domain to an app
+tarout domains link my-app api.example.com
 
 # Verify DNS is configured correctly
 tarout domains verify api.example.com
@@ -257,6 +259,43 @@ tarout orgs switch "Acme Corp"
 # Switch to staging environment
 tarout envs switch staging
 ```
+
+## All commands
+
+The sections above cover the everyday flows. The full command surface (run any
+with `--help` for its subcommands and flags):
+
+| Namespace | Description |
+|-----------|-------------|
+| `tarout login` / `logout` / `whoami` | Authenticate, sign out, show current context |
+| `tarout apps` | Manage applications |
+| `tarout deploy` / `up` | Deploy an application (`up` = inspect + deploy the current folder) |
+| `tarout logs` | View application logs |
+| `tarout env` | Manage application environment variables |
+| `tarout db` | Manage databases |
+| `tarout domains` | Manage domains and DNS |
+| `tarout storage` | Manage cloud storage buckets |
+| `tarout servers` | Manage cloud servers (VMs) |
+| `tarout backups` | Manage database backup configurations |
+| `tarout destinations` | Manage backup storage destinations |
+| `tarout billing` | Manage subscription and billing |
+| `tarout wallet` | Manage AI Gateway wallet balance |
+| `tarout ai` | Manage AI Gateway models and API keys |
+| `tarout monitor` | Manage uptime monitors for applications |
+| `tarout projects` | Manage projects within the active organization |
+| `tarout orgs` / `envs` | Switch active organization / environment |
+| `tarout providers` | Manage Git providers (GitHub, GitLab, Bitbucket) |
+| `tarout keys` | Manage SSH keys for server access |
+| `tarout firewall` | Manage firewall templates for cloud servers |
+| `tarout tickets` | Manage support tickets |
+| `tarout notifications` | Manage notification preferences |
+| `tarout inbox` | Manage in-app notifications |
+| `tarout link` | Link the local directory to a Tarout application |
+| `tarout dev` | Run local dev server with cloud environment variables |
+| `tarout build` | Build locally with cloud environment variables |
+| `tarout settings` | Platform settings and information |
+| `tarout queues` | Background job queues (platform operators only) |
+| `tarout call` | Call any platform procedure directly (see above) |
 
 ## Global Flags
 
@@ -362,7 +401,16 @@ Flags currently supported by `tarout up` for skipping the relay:
 
 ## Configuration
 
-Configuration is stored at `~/.tarout/config.json`:
+Profiles are written by `tarout login`; you normally never edit them by hand.
+The config file lives in the OS-standard config directory (via the `conf`
+package), **not** `~/.tarout/`:
+
+- **macOS**: `~/Library/Preferences/tarout-nodejs/config.json`
+- **Linux**: `~/.config/tarout-nodejs/config.json` (or `$XDG_CONFIG_HOME`)
+- **Windows**: `%APPDATA%\tarout-nodejs\Config\config.json`
+
+To authenticate without a browser (CI / agents), run `tarout login --token <key>`
+or set the `TAROUT_TOKEN` env var. The file's shape:
 
 ```json
 {
@@ -370,7 +418,7 @@ Configuration is stored at `~/.tarout/config.json`:
   "profiles": {
     "default": {
       "token": "cli_xxx...",
-      "apiUrl": "https://app.tarout.sa",
+      "apiUrl": "https://tarout.sa",
       "organizationId": "...",
       "organizationName": "My Org",
       "environmentId": "...",

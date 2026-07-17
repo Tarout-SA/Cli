@@ -27,6 +27,7 @@ const { setGlobalOptions } = await import("../../src/lib/output");
 
 const savedDisplay = process.env.DISPLAY;
 const savedWayland = process.env.WAYLAND_DISPLAY;
+const savedNoBrowser = process.env.TAROUT_NO_BROWSER;
 
 function setDisplay(present: boolean) {
 	if (present) {
@@ -42,6 +43,7 @@ beforeEach(() => {
 	openedUrls.length = 0;
 	setOpenShouldThrow(false);
 	setGlobalOptions({ json: false, nonInteractive: false });
+	delete process.env.TAROUT_NO_BROWSER;
 	setDisplay(true);
 });
 
@@ -50,6 +52,8 @@ afterEach(() => {
 	else process.env.DISPLAY = savedDisplay;
 	if (savedWayland === undefined) delete process.env.WAYLAND_DISPLAY;
 	else process.env.WAYLAND_DISPLAY = savedWayland;
+	if (savedNoBrowser === undefined) delete process.env.TAROUT_NO_BROWSER;
+	else process.env.TAROUT_NO_BROWSER = savedNoBrowser;
 	setGlobalOptions({ json: false, nonInteractive: false });
 });
 
@@ -100,6 +104,13 @@ describe("openInBrowser: degrades gracefully without aborting", () => {
 		const ok = await openInBrowser("https://tarout.sa/opt-out", {
 			noOpen: true,
 		});
+		expect(ok).toBe(false);
+		expect(openedUrls).toEqual([]);
+	});
+
+	it("skips the launch when TAROUT_NO_BROWSER suppresses browsers", async () => {
+		process.env.TAROUT_NO_BROWSER = "1";
+		const ok = await openInBrowser("https://tarout.sa/suppressed");
 		expect(ok).toBe(false);
 		expect(openedUrls).toEqual([]);
 	});

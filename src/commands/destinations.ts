@@ -81,6 +81,7 @@ export function registerDestinationsCommands(program: Command) {
 					return;
 				}
 				const d = data as any;
+				quietOutput(d.id || d.destinationId || id);
 				log("");
 				log(colors.bold(d.name || id));
 				log(`  Provider: ${d.provider || "-"}`);
@@ -247,6 +248,7 @@ export function registerDestinationsCommands(program: Command) {
 					} as any);
 					succeedSpinner("Destination updated.");
 					if (isJsonMode()) outputData({ updated: true, destinationId });
+					else quietOutput(destinationId);
 				} catch (err) {
 					failSpinner();
 					handleError(err);
@@ -282,6 +284,7 @@ export function registerDestinationsCommands(program: Command) {
 				await client.destination.remove.mutate({ destinationId } as any);
 				succeedSpinner("Destination deleted.");
 				if (isJsonMode()) outputData({ deleted: true, destinationId });
+				else quietOutput(destinationId);
 			} catch (err) {
 				failSpinner();
 				handleError(err);

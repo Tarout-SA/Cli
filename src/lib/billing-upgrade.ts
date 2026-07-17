@@ -10,10 +10,12 @@
  * injects `openBrowser` only in interactive mode), so it is fully unit-testable
  * with a scripted fake client.
  *
- * Payment reality: StreamPay exposes no off-session "charge stored token" API,
- * so any positive charge returns a hosted-checkout `paymentUrl` a human must
- * complete. Only net-zero changes (free, downgrade, proration → 0) apply
- * instantly. The engine classifies both paths into one typed result.
+ * Payment reality: Moyasar has no native subscriptions and the CLI never
+ * charges a saved card off-session — any positive charge returns a hosted
+ * Moyasar checkout URL a human must complete (recurring renewals are charged
+ * from the tokenized card by the platform's renewal queue, not here). Only
+ * net-zero changes (free, downgrade, proration → 0) apply instantly. The engine
+ * classifies both paths into one typed result.
  */
 
 import { ExitCode } from "../utils/exit-codes.js";
@@ -37,6 +39,47 @@ import {
  */
 export const AGENT_BILLING_PERMISSION_HINT =
 	'If your agent\'s permission system blocks this billing command, ask the user to allowlist Tarout billing once so you can run it directly (Claude Code: add "Bash(tarout billing:*)" to .claude/settings.json). Running an upgrade only opens the hosted payment page — the user still completes payment in the browser.';
+
+/**
+ * The tax breakdown a billing preview returns alongside its charge fields
+ * (`subscription.previewPlanChange`, `previewAddonsPurchase`,
+ * `previewDatabaseUpgrade`). `vatRate` is a fraction (0.15 → 15%). It is 0 while
+ * Tarout is not VAT-registered, in which case gross == net and no VAT is shown.
+ */
+export interface PreviewTax {
+	netHalalas?: number;
+	vatHalalas?: number;
+	grossHalalas?: number;
+	vatRate?: number;
+}
+
+/** Render a fractional VAT rate as a percentage string (0.15 → "15"). */
+function formatVatRatePercent(vatRate: number): string {
+	return String(Number.parseFloat((vatRate * 100).toFixed(4)));
+}
+
+/**
+ * Resolve what a checkout preview should DISPLAY as "amount due now" plus the
+ * VAT parenthetical. Prefers `tax.grossHalalas` (what the gateway actually
+ * charges) and renders the ACTUAL rate from the preview — never a hardcoded
+ * 15%. Falls back to `fallbackHalalas` (the net charge field the caller already
+ * read) when an older server omits `tax`. The VAT note is empty while the
+ * seller is not VAT-registered (`vatRate` 0), so estimates read as plain prices.
+ */
+export function resolveCheckoutAmountDisplay(
+	tax: PreviewTax | undefined,
+	fallbackHalalas: number | undefined,
+): { amountHalalas: number | undefined; vatNote: string } {
+	const grossHalalas =
+		typeof tax?.grossHalalas === "number" ? tax.grossHalalas : undefined;
+	const amountHalalas = grossHalalas ?? fallbackHalalas;
+	const vatRate = typeof tax?.vatRate === "number" ? tax.vatRate : 0;
+	const vatNote =
+		vatRate > 0
+			? colors.dim(`(incl. ${formatVatRatePercent(vatRate)}% VAT)`)
+			: "";
+	return { amountHalalas, vatNote };
+}
 
 export type BillingChangeKind = "plan" | "addon" | "plan_quantity" | "database";
 

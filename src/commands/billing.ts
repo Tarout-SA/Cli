@@ -6,6 +6,7 @@ import {
 	finalizeBillingMutation,
 	performBillingChange,
 	pollCheckoutUntilTerminal,
+	resolveCheckoutAmountDisplay,
 	storageSlotTierForAddonKey,
 } from "../lib/billing-upgrade.js";
 import {
@@ -23,6 +24,7 @@ import {
 	outputData,
 	outputError,
 	outputJsonLine,
+	quietOutput,
 	shouldSkipConfirmation,
 	table,
 } from "../lib/output.js";
@@ -156,6 +158,9 @@ export function registerBillingCommands(program: Command) {
 					outputData(subscription);
 					return;
 				}
+
+				// Quiet mode: emit the active plan key (or "free" when none).
+				quietOutput(subscription?.planKey || "free");
 
 				log("");
 				log(colors.bold("Current Subscription"));
@@ -364,18 +369,6 @@ export function registerBillingCommands(program: Command) {
 					!addons &&
 					isPaidFamily(targetPlan)
 				) {
-					// Quantity-aware Starter: number of app slots → plan quantity.
-					if (
-						planQuantity === undefined &&
-						planFamily(targetPlan) === "SHARED"
-					) {
-						const apps = parsePositiveInt(
-							await input("How many apps (app slots)?", "1"),
-							1,
-						);
-						planQuantity = Math.max(1, apps);
-					}
-
 					const databases = parsePositiveInt(
 						await input("How many databases to include?", "1"),
 						0,
@@ -425,9 +418,14 @@ export function registerBillingCommands(program: Command) {
 						typeof preview?.proratedChargeHalalas === "number"
 							? preview.proratedChargeHalalas
 							: undefined;
-					if (amountDueHalalas !== undefined) {
+					// Show the grossed-up total the gateway actually charges and the
+					// ACTUAL VAT rate from the preview (0 while Tarout isn't VAT-
+					// registered → no VAT shown), never a hardcoded 15%.
+					const { amountHalalas: displayDueHalalas, vatNote } =
+						resolveCheckoutAmountDisplay(preview?.tax, amountDueHalalas);
+					if (displayDueHalalas !== undefined) {
 						log(
-							`Amount due now: ${colors.bold(`${(amountDueHalalas / 100).toFixed(2)} SAR`)} ${colors.dim("(incl. 15% VAT for SA orgs at checkout)")}`,
+							`Amount due now: ${colors.bold(`${(displayDueHalalas / 100).toFixed(2)} SAR`)}${vatNote ? ` ${vatNote}` : ""}`,
 						);
 					}
 					if (typeof preview?.newPeriodTotalHalalas === "number") {
@@ -437,7 +435,7 @@ export function registerBillingCommands(program: Command) {
 					}
 					log("");
 
-					// Agent path: a paid upgrade goes through StreamPay hosted
+					// Agent path: a paid upgrade goes through the hosted Moyasar
 					// checkout, where the user reviews the amount and enters card
 					// details in the browser — that page is the real consent surface.
 					// So when we're driving an agent (non-TTY) that can open a browser
@@ -1009,9 +1007,16 @@ export function registerBillingCommands(program: Command) {
 				log(colors.bold("Addon Purchase Preview"));
 				log(`  Addon:      ${colors.cyan(addonKey)}`);
 				log(`  Quantity:   ${options.quantity || 1}`);
-				if (typeof p?.totalProratedHalalas === "number") {
+				const { amountHalalas: dueHalalas, vatNote } =
+					resolveCheckoutAmountDisplay(
+						p?.tax,
+						typeof p?.totalProratedHalalas === "number"
+							? p.totalProratedHalalas
+							: undefined,
+					);
+				if (dueHalalas !== undefined) {
 					log(
-						`  Amount Due: ${colors.bold(`${(p.totalProratedHalalas / 100).toFixed(2)} SAR`)} ${colors.dim("(incl. 15% VAT for SA orgs at checkout)")}`,
+						`  Amount Due: ${colors.bold(`${(dueHalalas / 100).toFixed(2)} SAR`)}${vatNote ? ` ${vatNote}` : ""}`,
 					);
 				}
 				if (typeof p?.newPeriodTotalHalalas === "number") {
@@ -1060,7 +1065,7 @@ export function registerBillingCommands(program: Command) {
 						quantity,
 					);
 					// Parity with `billing upgrade`: a paid addon goes through the
-					// StreamPay hosted checkout, which is the real consent surface. In
+					// hosted Moyasar checkout, which is the real consent surface. In
 					// a non-TTY agent context that can open a browser, skip the local
 					// y/n (it would otherwise halt with `needs_input`) and let the
 					// payment page collect consent. `--json` keeps the structured
@@ -1361,6 +1366,7 @@ export function registerBillingCommands(program: Command) {
 					outputData(inv);
 					return;
 				}
+				quietOutput(String(inv.externalNumber || inv.id));
 				log("");
 				log(colors.bold(`Invoice ${inv.externalNumber || inv.id}`));
 				log(`  Status:   ${inv.status || "-"}`);
@@ -1407,6 +1413,8 @@ export function registerBillingCommands(program: Command) {
 					outputData({ url });
 					return;
 				}
+				// Quiet mode: emit the bare PDF URL for scripting/piping.
+				quietOutput(url);
 				log("");
 				log(`PDF: ${colors.cyan(url || "-")}`);
 				log("");
@@ -1443,7 +1451,7 @@ export function registerBillingCommands(program: Command) {
  * Commander `--addon <key[:qty]>` accumulator. Repeated flags push onto the
  * array; the optional `:qty` suffix is parsed as a positive integer
  * (defaults to 1). Used by `tarout billing upgrade` to forward bundled
- * addons into the same StreamPay checkout as the plan change.
+ * addons into the same Moyasar checkout as the plan change.
  *
  * Throws `InvalidArgumentError` so Commander surfaces a clean
  * `INVALID_ARGUMENTS` failure (exit 2) instead of leaking a Node stack
@@ -1496,7 +1504,7 @@ function formatSubStatus(status: string): string {
 		active: colors.success("active"),
 		trialing: colors.info("trialing"),
 		past_due: colors.warn("past due"),
-		cancelled: colors.error("cancelled"),
+		cancelled: colors.warn("cancelled"),
 		none: colors.dim("none"),
 	};
 	return map[status] || status;

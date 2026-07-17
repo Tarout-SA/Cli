@@ -5,6 +5,7 @@ import type {
 } from "../src/lib/entitlement-remedy";
 import {
 	buildConfigFromOptions,
+	buildNeedsUpgradeHint,
 	buildRemedyOptions,
 	formatPlanPrice,
 	inferAppSlotKey,
@@ -291,14 +292,14 @@ describe("buildRemedyOptions", () => {
 		expect(opts[1]?.command).toBe("tarout billing upgrade dedicated_small --wait");
 	});
 
-	it("Starter app-slot gate → add-slot + upgrade + per-app reuse options", () => {
+	it("Starter's flat five-app cap → upgrade + per-app reuse, never quantity", () => {
 		const remedy: EntitlementRemedy = {
-			kind: "plan_quantity",
+			kind: "plan",
 			failedKey: "app.shared.slots",
-			targetKey: "shared",
-			targetName: "Starter",
-			command: "tarout billing plan:quantity 3 --wait",
-			hint: "",
+			targetKey: "dedicated_small",
+			targetName: "Pro Small",
+			command: "tarout billing upgrade dedicated_small --wait",
+			hint: "Starter includes five applications.",
 		};
 		const apps = [
 			{ id: "7f3a2b00", name: "api" },
@@ -306,13 +307,21 @@ describe("buildRemedyOptions", () => {
 		];
 		const opts = buildRemedyOptions(remedy, "shared", catalog, "shared", apps);
 		expect(opts.map((o) => o.action)).toEqual([
-			"add_app_slot",
 			"upgrade_plan",
 			"reuse_app",
 			"reuse_app",
 		]);
-		expect(opts[2]?.command).toBe("tarout up --app 7f3a2b00");
-		expect(opts[3]?.label).toBe('Reuse "web"');
+		expect(opts[0]?.command).toBe(
+			"tarout billing upgrade dedicated_small --wait",
+		);
+		expect(opts[1]?.command).toBe("tarout up --app 7f3a2b00");
+		expect(opts[2]?.label).toBe('Reuse "web"');
+		expect(opts.map((o) => o.command).join(" ")).not.toContain("plan:quantity");
+
+		const hint = buildNeedsUpgradeHint(remedy, opts, "tarout deploy");
+		expect(hint).toMatch(/five applications/i);
+		expect(hint).toContain("upgrade_plan");
+		expect(hint).not.toContain("add_app_slot");
 	});
 
 	it("Dedicated app-slot gate → upgrade (no add-slot) + reuse options", () => {

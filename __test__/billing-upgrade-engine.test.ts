@@ -5,6 +5,7 @@ import {
 	finalizeBillingMutation,
 	nextCommandFor,
 	performBillingChange,
+	resolveCheckoutAmountDisplay,
 	storageSlotTierForAddonKey,
 } from "../src/lib/billing-upgrade";
 import { ExitCode } from "../src/utils/exit-codes";
@@ -321,6 +322,51 @@ describe("nextCommandFor / exitCodeForBillingResult", () => {
 		expect(exitCodeForBillingResult({ ...base, status: "expired" })).toBe(
 			ExitCode.GENERAL_ERROR,
 		);
+	});
+});
+
+describe("resolveCheckoutAmountDisplay", () => {
+	it("shows the grossed-up amount and the ACTUAL VAT rate when vatRate > 0", () => {
+		const { amountHalalas, vatNote } = resolveCheckoutAmountDisplay(
+			{ netHalalas: 1900, vatHalalas: 285, grossHalalas: 2185, vatRate: 0.15 },
+			1900,
+		);
+		// Gross (2185), not the net fallback (1900).
+		expect(amountHalalas).toBe(2185);
+		expect(vatNote).toContain("15% VAT");
+		// Never a hardcoded rate — a different rate renders verbatim.
+		const other = resolveCheckoutAmountDisplay(
+			{ netHalalas: 1000, vatHalalas: 50, grossHalalas: 1050, vatRate: 0.05 },
+			1000,
+		);
+		expect(other.vatNote).toContain("5% VAT");
+	});
+
+	it("shows no VAT note and gross == net when vatRate is 0 (seller not VAT-registered)", () => {
+		const { amountHalalas, vatNote } = resolveCheckoutAmountDisplay(
+			{ netHalalas: 1900, vatHalalas: 0, grossHalalas: 1900, vatRate: 0 },
+			1900,
+		);
+		expect(amountHalalas).toBe(1900);
+		expect(vatNote).toBe("");
+	});
+
+	it("falls back to the net charge field and shows no VAT when the preview omits tax", () => {
+		const { amountHalalas, vatNote } = resolveCheckoutAmountDisplay(
+			undefined,
+			1900,
+		);
+		expect(amountHalalas).toBe(1900);
+		expect(vatNote).toBe("");
+	});
+
+	it("returns undefined amount when neither tax nor a fallback is available", () => {
+		const { amountHalalas, vatNote } = resolveCheckoutAmountDisplay(
+			undefined,
+			undefined,
+		);
+		expect(amountHalalas).toBeUndefined();
+		expect(vatNote).toBe("");
 	});
 });
 

@@ -16,15 +16,43 @@ import {
 } from "../../lib/surface-manifest.js";
 import { errorResult, withAuth } from "../runtime.js";
 
+// Discovery tools reach the hosted control plane; a hung host must surface a
+// clean MCP error instead of blocking the call forever. Every network await
+// below is bounded by this budget.
+const DISCOVERY_TIMEOUT_MS = 30_000;
+
+function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+	let timer: ReturnType<typeof setTimeout>;
+	const timeout = new Promise<never>((_, reject) => {
+		timer = setTimeout(() => {
+			reject(
+				Object.assign(
+					new Error(`${label} timed out after ${DISCOVERY_TIMEOUT_MS}ms.`),
+					{ data: { code: "TIMEOUT" } },
+				),
+			);
+		}, DISCOVERY_TIMEOUT_MS);
+	});
+	return Promise.race([promise, timeout]).finally(() =>
+		clearTimeout(timer),
+	) as Promise<T>;
+}
+
 async function resolveEntry(procedure: string): Promise<ManifestEntry | undefined> {
 	const client = getApiClient();
 	const apiUrl = getApiUrl();
-	let manifest = await loadManifest(client, apiUrl);
+	let manifest = await withTimeout(
+		loadManifest(client, apiUrl),
+		"Manifest load",
+	);
 	let entry = manifest.find((m) => m.path === procedure);
 	if (!entry) {
 		// Cache MISS — refetch to guard against stale cache never seeing a new
 		// procedure. If it's still absent, it's genuinely unknown.
-		manifest = await fetchManifestFresh(client, apiUrl);
+		manifest = await withTimeout(
+			fetchManifestFresh(client, apiUrl),
+			"Manifest refetch",
+		);
 		entry = manifest.find((m) => m.path === procedure);
 	}
 	return entry;
@@ -109,7 +137,10 @@ export function registerCallTools(server: McpServer): void {
 		},
 		async ({ filter }) =>
 			await withAuth(async (client) => {
-				const manifest = await fetchManifestFresh(client, getApiUrl());
+				const manifest = await withTimeout(
+					fetchManifestFresh(client, getApiUrl()),
+					"Manifest fetch",
+				);
 				const matched = manifest.filter(
 					(m) => !filter || m.path.includes(filter),
 				);
@@ -167,8 +198,8 @@ async function describeCache(): Promise<Map<string, any>> {
 			new URL(`${getApiUrl()}/api/mcp`),
 			{ requestInit: { headers: token ? { "x-api-key": token } : {} } },
 		);
-		await client.connect(transport);
-		const list = await client.listTools();
+		await withTimeout(client.connect(transport), "MCP connect");
+		const list = await withTimeout(client.listTools(), "MCP tools/list");
 		await client.close();
 		// biome-ignore lint/suspicious/noExplicitAny: MCP tool objects are untyped here.
 		const map = new Map<string, any>();

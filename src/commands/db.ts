@@ -13,6 +13,7 @@ import {
 	type BillingChangeResult,
 	emitBillingResult,
 	finalizeBillingMutation,
+	resolveCheckoutAmountDisplay,
 } from "../lib/billing-upgrade.js";
 import { paymentBrowserOpener, shouldAutoConfirmPaidCheckout } from "../lib/browser.js";
 import {
@@ -21,6 +22,7 @@ import {
 	getStatusBadge,
 	isJsonMode,
 	isNonInteractiveMode,
+	isQuietMode,
 	log,
 	outputData,
 	outputJsonLine,
@@ -91,6 +93,29 @@ export function resolveDbTierTarget(
 		);
 	}
 	return plan as "STARTER" | "STANDARD" | "PRO";
+}
+
+/**
+ * Amount due now for a database tier upgrade, read from the server preview.
+ * `previewDatabaseUpgrade` returns `totalProratedHalalas`; an older preview
+ * shape used `proratedChargeHalalas`, so prefer the current field and fall back
+ * for compatibility. This value decides whether an agent checkout auto-confirms
+ * (`shouldAutoConfirmPaidCheckout`) — reading the wrong field left it
+ * permanently `undefined`, so auto-confirm never fired for db upgrades.
+ */
+export function resolveDatabaseUpgradeDueHalalas(
+	preview:
+		| { totalProratedHalalas?: unknown; proratedChargeHalalas?: unknown }
+		| null
+		| undefined,
+): number | undefined {
+	if (typeof preview?.totalProratedHalalas === "number") {
+		return preview.totalProratedHalalas;
+	}
+	if (typeof preview?.proratedChargeHalalas === "number") {
+		return preview.proratedChargeHalalas;
+	}
+	return undefined;
 }
 
 export interface DatabaseTierChangeInput {
@@ -196,6 +221,13 @@ export function registerDbCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData(databases);
+					return;
+				}
+
+				if (isQuietMode()) {
+					for (const db of databases) {
+						if (db.id) quietOutput(db.id);
+					}
 					return;
 				}
 
@@ -943,9 +975,14 @@ export function registerDbCommands(program: Command) {
 					}));
 				const targetPlan = resolveDbTierTarget("upgrade", rawPlan);
 
-				// Interactive-only preview + confirm; agent/--json/--yes go straight to
-				// the mutation (fewer round-trips, deterministic).
-				if (!isJsonMode() && !isNonInteractiveMode() && !shouldSkipConfirmation()) {
+				// Preview + confirm — mirrors `billing upgrade`. `--json` and `--yes`
+				// still go straight to the mutation, but a non-interactive agent run
+				// now ENTERS this block so a paid checkout with a launchable browser
+				// reaches `shouldAutoConfirmPaidCheckout` below and auto-confirms (the
+				// hosted Moyasar page is the real consent surface). Gating this on
+				// `!isNonInteractiveMode()` too made that auto-confirm branch
+				// structurally unreachable. Interactive TTY runs still get the y/n.
+				if (!isJsonMode() && !shouldSkipConfirmation()) {
 					const _p = startSpinner("Calculating change...");
 					// biome-ignore lint/suspicious/noExplicitAny: server preview shape varies.
 					let preview: any = null;
@@ -958,18 +995,34 @@ export function registerDbCommands(program: Command) {
 					} catch {
 						failSpinner();
 					}
-					const dueHalalas =
-						typeof preview?.proratedChargeHalalas === "number"
-							? preview.proratedChargeHalalas
-							: undefined;
-					if (dueHalalas !== undefined) {
+					const dueHalalas = resolveDatabaseUpgradeDueHalalas(preview);
+					// Show the grossed-up total the gateway actually charges and the
+					// ACTUAL VAT rate from the preview (0 while Tarout isn't VAT-
+					// registered → no VAT shown), never a hardcoded 15%.
+					const { amountHalalas: displayDueHalalas, vatNote } =
+						resolveCheckoutAmountDisplay(preview?.tax, dueHalalas);
+					if (displayDueHalalas !== undefined) {
 						log(
-							`Amount due now: ${colors.bold(`${(dueHalalas / 100).toFixed(2)} SAR`)} ${colors.dim("(incl. 15% VAT at checkout)")}`,
+							`Amount due now: ${colors.bold(`${(displayDueHalalas / 100).toFixed(2)} SAR`)}${vatNote ? ` ${vatNote}` : ""}`,
 						);
 					}
+					// Branch on what actually gates consent:
+					//   • payable + launchable browser → the hosted Moyasar page IS the
+					//     consent surface, so auto-confirm and open it.
+					//   • non-interactive + nothing payable (a free / already-entitled
+					//     upgrade, dueHalalas 0 or undefined) → there's no payment page to
+					//     gate and no TTY to confirm at, so apply immediately. This
+					//     restores the pre-guard behavior instead of dead-ending at the
+					//     annotated confirm's needs_input/exit 6.
+					//   • everything else (payable+headless, or an interactive TTY) →
+					//     require the explicit confirm.
+					const isPayable =
+						typeof dueHalalas === "number" && dueHalalas > 0;
+					const skipConfirmForFreeChange =
+						isNonInteractiveMode() && !isPayable;
 					if (shouldAutoConfirmPaidCheckout(dueHalalas)) {
 						log("Opening the secure payment page in your browser to complete the upgrade...");
-					} else {
+					} else if (!skipConfirmForFreeChange) {
 						const confirmed = await confirm(
 							`Upgrade "${dbSummary.name}" to ${targetPlan}?`,
 							false,

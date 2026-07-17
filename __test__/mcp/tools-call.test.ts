@@ -78,4 +78,22 @@ describe("list_procedures tool", () => {
 		const body = JSON.parse(r.content[0].text) as { count: number };
 		expect(body.count).toBe(1);
 	});
+
+	it("times out cleanly when the host hangs instead of blocking forever", async () => {
+		vi.useFakeTimers();
+		try {
+			// Never resolves — the discovery bound must reject the await.
+			fakeClient.settings.getSurfaceManifest.query.mockReturnValueOnce(
+				new Promise(() => {}),
+			);
+			const pending = invoke("list_procedures", {});
+			await vi.advanceTimersByTimeAsync(30_000);
+			const r = await pending;
+			expect(r.isError).toBe(true);
+			const body = JSON.parse(r.content[0].text) as { code: string };
+			expect(body.code).toBe("TIMEOUT");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });

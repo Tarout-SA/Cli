@@ -10,11 +10,13 @@
  * @module lib/agent-setup
  */
 
+import { stringifyJson } from "../utils/json.js";
 import { hasTaroutAgentConfig, scaffoldAgentConfig } from "./agent-scaffold.js";
 import {
 	colors,
 	isJsonMode,
 	isNonInteractiveMode,
+	isQuietMode,
 	log,
 	outputJsonLine,
 	warn,
@@ -60,11 +62,19 @@ export function emitAgentSetupHint(cwd: string): void {
 	if (!isAgentDriven() || hasTaroutAgentConfig(cwd)) return;
 
 	if (isJsonMode()) {
-		outputJsonLine({
-			type: "event",
-			event: "agent_setup_required",
-			hint: SETUP_HINT,
-		});
+		// This advisory fires before the command's real work, so writing it to
+		// stdout would make `--json` stdout multi-line NDJSON and break a naive
+		// `JSON.parse(stdout)`. Keep stdout to exactly one envelope; emit the same
+		// shape on stderr for agents that watch the error stream. Silent in quiet
+		// mode, matching outputJsonLine.
+		if (isQuietMode()) return;
+		console.error(
+			stringifyJson({
+				type: "event",
+				event: "agent_setup_required",
+				hint: SETUP_HINT,
+			}),
+		);
 	} else {
 		warn(SETUP_HINT);
 	}

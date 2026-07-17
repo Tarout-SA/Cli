@@ -18,6 +18,12 @@ const m = vi.hoisted(() => ({
 	getToken: vi.fn(() => "tk_123"),
 	getApiUrl: vi.fn(() => "https://tarout.sa"),
 	resolveProfileFromCredential: vi.fn(),
+	getConfig: vi.fn(() => ({ currentProfile: "default", profiles: {} })),
+	deleteProfile: vi.fn(),
+	listProfiles: vi.fn(() => [] as string[]),
+	clearConfig: vi.fn(),
+	revokeCurrentCliKey: vi.fn(),
+	getApiClient: vi.fn(),
 }));
 const {
 	setProfile,
@@ -34,7 +40,14 @@ vi.mock("../src/lib/config.js", () => ({
 	getCurrentProfile: m.getCurrentProfile,
 	getToken: m.getToken,
 	getApiUrl: m.getApiUrl,
-	clearConfig: vi.fn(),
+	getConfig: m.getConfig,
+	deleteProfile: m.deleteProfile,
+	listProfiles: m.listProfiles,
+	clearConfig: m.clearConfig,
+}));
+
+vi.mock("../src/lib/api.js", () => ({
+	getApiClient: m.getApiClient,
 }));
 
 vi.mock("../src/lib/auth-profile.js", () => ({
@@ -50,7 +63,9 @@ vi.mock("../src/utils/spinner.js", () => ({
 import {
 	authenticateWithToken,
 	buildProjectKeyMetadata,
+	performLogout,
 	resolveVerifiedCurrentProfile,
+	warnIfUntrustedHost,
 } from "../src/commands/auth";
 import { setGlobalOptions } from "../src/lib/output";
 
@@ -158,6 +173,14 @@ describe("authenticateWithToken", () => {
 		expect(setProfile).not.toHaveBeenCalled();
 		expect(setCurrentProfile).not.toHaveBeenCalled();
 	});
+
+	it("never sends a token over plaintext outside loopback", async () => {
+		await expect(
+			authenticateWithToken("must-not-be-sent", "http://evil.example"),
+		).rejects.toThrow(/HTTPS is required/i);
+		expect(resolveProfileFromCredential).not.toHaveBeenCalled();
+		expect(setProfile).not.toHaveBeenCalled();
+	});
 });
 
 describe("buildProjectKeyMetadata", () => {
@@ -198,5 +221,157 @@ describe("resolveVerifiedCurrentProfile", () => {
 			apiUrl: "https://tarout.sa",
 			fallback: null,
 		});
+	});
+});
+
+function jsonEvents() {
+	return logs
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+			}
+		})
+		.filter(Boolean) as Array<Record<string, any>>;
+}
+
+describe("performLogout", () => {
+	beforeEach(() => {
+		isLoggedIn.mockReturnValue(true);
+		getCurrentProfile.mockReturnValue({
+			...RESOLVED,
+			userEmail: "owner@example.com",
+		} as never);
+		m.getConfig.mockReturnValue({ currentProfile: "default", profiles: {} });
+		m.getApiClient.mockReturnValue({
+			user: { revokeCurrentCliKey: { mutate: m.revokeCurrentCliKey } },
+		});
+	});
+
+	it("revokes the server-side key, then drops local state (last profile → full reset)", async () => {
+		m.revokeCurrentCliKey.mockResolvedValueOnce({ revoked: true });
+		m.listProfiles.mockReturnValue([]);
+
+		await performLogout();
+
+		expect(m.revokeCurrentCliKey).toHaveBeenCalledTimes(1);
+		expect(m.deleteProfile).toHaveBeenCalledWith("default");
+		expect(m.clearConfig).toHaveBeenCalledTimes(1);
+		const success = jsonEvents().find((e) => e.success === true);
+		expect(success?.data?.revoked).toBe(true);
+		// Fully logged out — nothing was promoted, so switchedTo is explicitly null.
+		expect(success?.data).toHaveProperty("switchedTo", null);
+	});
+
+	it("still clears local credentials when the revoke call fails (offline / old server)", async () => {
+		m.getApiClient.mockImplementation(() => {
+			throw new Error("network down");
+		});
+		m.listProfiles.mockReturnValue([]);
+
+		await performLogout();
+
+		// Best-effort revoke: a failure must NOT block the local logout.
+		expect(m.deleteProfile).toHaveBeenCalledWith("default");
+		expect(m.clearConfig).toHaveBeenCalledTimes(1);
+		const success = jsonEvents().find((e) => e.success === true);
+		expect(success?.success).toBe(true);
+		expect(success?.data?.revoked).toBe(false);
+	});
+
+	it("deletes ONLY the current profile, leaving other profiles intact", async () => {
+		m.revokeCurrentCliKey.mockResolvedValueOnce({ revoked: true });
+		// After deleting "default", a "work" profile remains.
+		m.listProfiles.mockReturnValue(["work"]);
+
+		await performLogout();
+
+		expect(m.deleteProfile).toHaveBeenCalledWith("default");
+		expect(m.clearConfig).not.toHaveBeenCalled();
+		expect(setCurrentProfile).toHaveBeenCalledWith("work");
+		// The identity switch must be announced, not silent: the JSON envelope
+		// names the profile now active (and its email, from the promoted profile).
+		const success = jsonEvents().find((e) => e.success === true);
+		expect(success?.data?.switchedTo?.profile).toBe("work");
+		expect(success?.data?.switchedTo?.userEmail).toBe("owner@example.com");
+	});
+
+	it("announces the newly-active profile in human mode after a silent switch", async () => {
+		setGlobalOptions({ json: false, nonInteractive: false });
+		m.revokeCurrentCliKey.mockResolvedValueOnce({ revoked: true });
+		m.listProfiles.mockReturnValue(["work"]);
+
+		await performLogout();
+
+		// Human-readable output must state which profile/email is now in effect so
+		// the user isn't left unknowingly operating as a different identity.
+		const line = logs.find((l) => /Now using profile 'work'/.test(l));
+		expect(line, "expected a 'now using' announcement").toBeTruthy();
+		expect(line).toMatch(/owner@example\.com/);
+	});
+
+	it("is a no-op when already logged out", async () => {
+		isLoggedIn.mockReturnValue(false);
+
+		await performLogout();
+
+		expect(m.revokeCurrentCliKey).not.toHaveBeenCalled();
+		expect(m.deleteProfile).not.toHaveBeenCalled();
+		expect(m.clearConfig).not.toHaveBeenCalled();
+	});
+});
+
+describe("warnIfUntrustedHost", () => {
+	let errSpy: ReturnType<typeof vi.spyOn>;
+	let errLines: string[];
+
+	beforeEach(() => {
+		errLines = [];
+		errSpy = vi.spyOn(console, "error").mockImplementation((msg?: unknown) => {
+			if (typeof msg === "string") errLines.push(msg);
+		});
+	});
+
+	afterEach(() => {
+		errSpy.mockRestore();
+	});
+
+	it("stays silent for Tarout hosts and loopback", () => {
+		for (const url of [
+			"https://tarout.sa",
+			"https://staging.tarout.sa",
+			"http://localhost:8000",
+			"http://127.0.0.1:8000",
+		]) {
+			warnIfUntrustedHost(url);
+		}
+		expect(errLines).toEqual([]);
+		expect(logs).toEqual([]);
+	});
+
+	it("emits a structured stderr warning for a non-Tarout host in json mode", () => {
+		setGlobalOptions({ json: true, nonInteractive: true });
+		warnIfUntrustedHost("https://evil.example.com");
+
+		// Never on stdout — that stream carries the single result envelope.
+		expect(logs.some((l) => l.includes("untrusted_host_warning"))).toBe(false);
+		const evt = errLines
+			.map((l) => {
+				try {
+					return JSON.parse(l);
+				} catch {
+					return null;
+				}
+			})
+			.find((e) => e?.event === "untrusted_host_warning");
+		expect(evt?.host).toBe("evil.example.com");
+		expect(typeof evt?.message).toBe("string");
+	});
+
+	it("warns on stderr in human mode for a non-Tarout host", () => {
+		setGlobalOptions({ json: false, nonInteractive: false });
+		warnIfUntrustedHost("https://evil.example.com");
+		expect(errLines.join("\n")).toMatch(/evil\.example\.com/);
 	});
 });

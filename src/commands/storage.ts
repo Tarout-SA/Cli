@@ -13,6 +13,7 @@ import {
 	colors,
 	isJsonMode,
 	isNonInteractiveMode,
+	isQuietMode,
 	log,
 	outputData,
 	quietOutput,
@@ -73,6 +74,14 @@ export function registerStorageCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData(buckets);
+					return;
+				}
+
+				if (isQuietMode()) {
+					for (const b of (buckets || []) as any[]) {
+						const id = b.bucketId || b.id;
+						if (id) quietOutput(String(id));
+					}
 					return;
 				}
 
@@ -328,6 +337,8 @@ export function registerStorageCommands(program: Command) {
 
 				const bucketId = bucket.bucketId || bucket.id;
 
+				quietOutput(bucketId);
+
 				log("");
 				log(colors.bold(bucket.name));
 				log(colors.dim(bucketId));
@@ -481,6 +492,8 @@ export function registerStorageCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData({ deleted: true, fileName });
+				} else {
+					quietOutput(fileName);
 				}
 			} catch (err) {
 				handleError(err);
@@ -567,6 +580,9 @@ export function registerStorageCommands(program: Command) {
 					outputData(result);
 					return;
 				}
+
+				// Quiet mode: emit the bare download URL for scripting/piping.
+				quietOutput(String((result as any)?.url || result));
 
 				log("");
 				log(`Download URL for ${colors.cyan(fileName)}:`);
@@ -752,6 +768,8 @@ export function registerStorageCommands(program: Command) {
 					return;
 				}
 				const r = result as any;
+				// Quiet mode: emit the bare upload URL for scripting/piping.
+				quietOutput(String(r.url || r.uploadUrl || result));
 				log("");
 				log(
 					`Upload URL: ${colors.cyan(r.url || r.uploadUrl || String(result))}`,
@@ -1037,6 +1055,8 @@ export function registerStorageCommands(program: Command) {
 					return;
 				}
 				const r = result as any;
+				// Quiet mode: emit the bare version download URL for scripting/piping.
+				quietOutput(String(r.url || result));
 				log("");
 				log(`Version URL: ${colors.cyan(r.url || String(result))}`);
 				log("");

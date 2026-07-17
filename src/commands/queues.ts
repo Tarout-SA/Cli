@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { CliError, handleError } from "../lib/errors.js";
+import { handleError, PermissionError } from "../lib/errors.js";
 
 /**
  * The `queues` tRPC router is platform-ops only: every procedure calls
@@ -29,7 +29,7 @@ export function registerQueuesCommands(program: Command) {
 	// FORBIDDEN from the server.
 	const unavailable = () => {
 		try {
-			throw new CliError(QUEUES_UNAVAILABLE_MESSAGE);
+			throw new PermissionError(QUEUES_UNAVAILABLE_MESSAGE);
 		} catch (err) {
 			handleError(err);
 		}

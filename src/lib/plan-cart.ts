@@ -16,11 +16,7 @@ export type PlanFamily = "FREE" | "SHARED" | "DEDICATED" | null;
 export function planFamily(planKey?: string | null): PlanFamily {
 	if (!planKey) return null;
 	if (planKey === "free") return "FREE";
-	if (
-		planKey === "shared" ||
-		planKey.startsWith("shared_") ||
-		planKey.startsWith("bundle_")
-	) {
+	if (planKey === "shared" || planKey.startsWith("shared_")) {
 		return "SHARED";
 	}
 	if (planKey === "dedicated" || planKey.startsWith("dedicated_")) {

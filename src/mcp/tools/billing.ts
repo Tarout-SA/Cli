@@ -21,7 +21,7 @@ export function registerBillingTools(server: McpServer): void {
 		{
 			title: "Current subscription + usage summary",
 			description:
-				"Returns subscription.getCurrent + subscription.getUsage in one call.",
+				"Returns subscription.getCurrent + billing.getUsageBreakdown in one call.",
 			inputSchema: {},
 			annotations: { readOnlyHint: true },
 		},
@@ -29,7 +29,7 @@ export function registerBillingTools(server: McpServer): void {
 			withAuth(async (client) => {
 				const [subscription, usage] = await Promise.all([
 					client.subscription.getCurrent.query(),
-					client.subscription.getUsage.query().catch(() => null),
+					client.billing.getUsageBreakdown.query({}).catch(() => null),
 				]);
 				return { subscription, usage };
 			}),
@@ -77,13 +77,15 @@ export function registerBillingTools(server: McpServer): void {
 				if (plan) {
 					input.planKey = plan;
 					input.billingPeriod = billingPeriod;
-				}
-				if (addon) {
+					// PerformBillingChangeInput carries the plan-quantity under
+					// `quantity`; the engine forwards it as `planQuantity` to
+					// subscription.changePlan / setPlanQuantity.
+					if (planQuantity !== undefined) input.quantity = planQuantity;
+				} else if (addon) {
 					input.addonKey = addon;
 					input.quantity = quantity ?? 1;
-				}
-				if (planQuantity !== undefined) {
-					input.planQuantity = planQuantity;
+				} else if (planQuantity !== undefined) {
+					input.quantity = planQuantity;
 				}
 				const result = await performBillingChange(client, input);
 				return result;

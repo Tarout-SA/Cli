@@ -322,6 +322,8 @@ export function registerMonitorCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData({ deleted: true, monitorId });
+				} else {
+					quietOutput(monitorId);
 				}
 			} catch (err) {
 				handleError(err);

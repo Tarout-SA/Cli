@@ -5,7 +5,7 @@
  *
  * The key insight the old `inferSuggestedPlan` got wrong: not every gate is
  * resolved by a plan switch.
- *   - `app.shared.slots`        → bump the quantity-aware Starter plan
+ *   - `app.shared.slots`        → upgrade after Starter's flat five-app cap
  *   - `app.dedicated.slots`/host → upgrade to a (bigger) dedicated plan
  *   - `db.*` / `storage.*` slots → buy a resource addon
  *   - `app.free.slots` / none    → upgrade Free → a paid plan
@@ -136,19 +136,21 @@ export function resolveEntitlementRemedy(
 	const plans = catalog?.plans ?? [];
 	const addons = catalog?.addons ?? [];
 
-	// app.shared.slots → quantity bump on the quantity-aware Starter plan.
+	// Starter is a flat five-app bundle. It is deliberately not quantity-aware,
+	// so an exhausted shared slot cannot be cleared with setPlanQuantity. The
+	// supported paid path is the next Pro tier; callers may additionally offer
+	// reuse/delete options for an existing app.
 	if (failedKey?.startsWith("app.shared")) {
-		const sharedPlan = plans.find((p) => p.quantityAware);
-		const targetKey = sharedPlan ? planKeyOf(sharedPlan) : "shared";
-		const next = (opts?.currentSharedQuantity ?? 1) + 1;
+		const targetKey = "dedicated_small";
+		const targetPlan = plans.find((p) => planKeyOf(p) === targetKey);
 		return {
-			kind: "plan_quantity",
+			kind: "plan",
 			failedKey,
 			targetKey,
-			targetName: sharedPlan?.name,
-			priceHalalas: sharedPlan?.priceHalalas,
-			command: `tarout billing plan:quantity ${next} --wait`,
-			hint: `Your ${sharedPlan?.name ?? "Starter"} plan is quantity-aware — add an app slot by raising the plan quantity to ${next}.`,
+			targetName: targetPlan?.name,
+			priceHalalas: targetPlan?.priceHalalas,
+			command: `tarout billing upgrade ${targetKey} --wait`,
+			hint: `Starter includes five applications. Reuse or delete an existing app, or upgrade to ${targetPlan?.name ?? "Pro Small"} for more capacity.`,
 		};
 	}
 

@@ -93,10 +93,23 @@ export function registerContextTools(server: McpServer): void {
 					changes.project = match;
 				}
 				if (environment) {
+					const envs = (await client.environment.all.query()) as Array<{
+						environmentId: string;
+						slug?: string;
+						displayName?: string;
+					}>;
+					const lower = environment.toLowerCase();
+					const match = envs.find(
+						(e) =>
+							e.environmentId === environment ||
+							e.slug?.toLowerCase() === lower ||
+							e.displayName?.toLowerCase() === lower,
+					);
+					if (!match) throw new Error(`Unknown environment: ${environment}`);
 					await client.environment.setActive.mutate({
-						environmentId: environment,
+						environmentId: match.environmentId,
 					});
-					changes.environment = { id: environment };
+					changes.environment = match;
 				}
 				return changes;
 			}),

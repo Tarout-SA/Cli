@@ -25,7 +25,7 @@ import {
 	isCredentialError,
 	resolveProfileFromCredential,
 } from "../lib/auth-profile.js";
-import { startAuthServer } from "../lib/auth-server.js";
+import { startCliBrowserAuth } from "../lib/auth-server.js";
 import {
 	AGENT_BILLING_PERMISSION_HINT,
 	type BillingChangeResult,
@@ -395,12 +395,8 @@ async function authenticateViaBrowser(
 	action: "login" | "register",
 	apiUrl: string,
 ): Promise<Profile> {
-	const authServer = await startAuthServer();
-	const callbackUrl = `http://localhost:${authServer.port}/callback?state=${encodeURIComponent(authServer.state)}`;
-	const authUrl =
-		action === "register"
-			? `${apiUrl}/cli-authorize?action=register&callback=${encodeURIComponent(callbackUrl)}`
-			: `${apiUrl}/cli-authorize?callback=${encodeURIComponent(callbackUrl)}`;
+	const authServer = await startCliBrowserAuth(apiUrl, { action });
+	const authUrl = authServer.authUrl;
 
 	// Human output is suppressed in --json mode, so surface the auth URL through
 	// a structured event — that's the agent's signal to tell the user a browser
@@ -1095,8 +1091,9 @@ export async function createAppFromCurrentDirectory(
 	client: any,
 	profile: Profile,
 	options: DeployOptions = {},
+	workingDirectory = process.cwd(),
 ): Promise<AppSummary> {
-	const defaultName = basename(process.cwd()) || "tarout-app";
+	const defaultName = basename(workingDirectory) || "tarout-app";
 	const providedName = options.name?.trim();
 	let appName = providedName || defaultName;
 
@@ -1132,12 +1129,15 @@ export async function createAppFromCurrentDirectory(
 	});
 	succeedSpinner("Application created!");
 
-	setProjectConfig({
-		applicationId: application.applicationId,
-		name: application.name,
-		organizationId: profile.organizationId,
-		linkedAt: new Date().toISOString(),
-	});
+	setProjectConfig(
+		{
+			applicationId: application.applicationId,
+			name: application.name,
+			organizationId: profile.organizationId,
+			linkedAt: new Date().toISOString(),
+		},
+		workingDirectory,
+	);
 
 	if (!isJsonMode()) {
 		box("Project Linked", [
@@ -1145,7 +1145,7 @@ export async function createAppFromCurrentDirectory(
 			`Plan: ${colors.bold(application.plan ?? plan ?? "auto")}`,
 			"Source: current directory upload (no GitHub required)",
 			`ID: ${colors.dim(application.applicationId)}`,
-			`Directory: ${colors.dim(process.cwd())}`,
+			`Directory: ${colors.dim(workingDirectory)}`,
 		]);
 	}
 
@@ -1812,6 +1812,34 @@ export function buildRemedyOptions(
 	return options;
 }
 
+/**
+ * Agent-facing entitlement guidance derived from the options actually offered.
+ * This deliberately avoids naming retired actions (for example Starter plan
+ * quantity changes) when they are not present in the authoritative option list.
+ */
+export function buildNeedsUpgradeHint(
+	remedy: EntitlementRemedy,
+	options: RemedyOption[],
+	retryCommand: string,
+): string {
+	const context = remedy.hint.trim();
+	const prefix = context ? `${context} ` : "";
+	const hasReuse = options.some((o) => o.action === "reuse_app");
+	const billingActions = [
+		...new Set(
+			options
+				.filter((o) => o.action !== "reuse_app")
+				.map((o) => o.action),
+		),
+	];
+
+	if (options.length > 1) {
+		return `${prefix}Present the available options to the user and let them choose; do not choose for them. Billing options (${billingActions.join(" / ")}) open the payment page and wait until confirmed, then retry: ${retryCommand}.${hasReuse ? " reuse_app options deploy to an existing app instead (no charge)." : ""}`;
+	}
+
+	return `${prefix}The billing command opens the payment page and waits until confirmed, then retry: ${retryCommand}.`;
+}
+
 /** Map the project's apps (current environment) to `{id,name}` for reuse options. Best-effort: [] on error. */
 async function listAppsSafely(
 	// biome-ignore lint/suspicious/noExplicitAny: untyped tRPC proxy client.
@@ -1857,11 +1885,7 @@ export async function emitNeedsUpgrade(
 		existingApps,
 	);
 
-	const hasReuse = options.some((o) => o.action === "reuse_app");
-	const hint =
-		options.length > 1
-			? `Multiple ways to resolve this — present the options to the user and let them choose; do not choose for them. Billing options (add_app_slot / buy_addon / upgrade_plan) open the payment page and wait until it's confirmed, then retry: ${retryCommand}.${hasReuse ? " reuse_app options deploy to an existing app instead (no charge)." : ""}`
-			: `${remedy.hint} That command opens the payment page and waits until it's confirmed, then retry: ${retryCommand}.`;
+	const hint = buildNeedsUpgradeHint(remedy, options, retryCommand);
 
 	outputError("NEEDS_UPGRADE", message, {
 		failedEntitlementKey: failedKey,
@@ -2559,12 +2583,18 @@ async function clearDeployEntitlementGate(
 						name: `Reuse ${a.name} ${colors.dim(`(${a.id.slice(0, 8)})`)}`,
 						value: a.id,
 					})),
-					{ name: "Add an app slot / upgrade the plan", value: REMEDY },
+					{
+						name:
+							failedKey === "app.shared.slots"
+								? "Upgrade to Pro for more capacity (Starter includes 5 apps)"
+								: "Upgrade the plan for more capacity",
+						value: REMEDY,
+					},
 					{ name: "Cancel", value: CANCEL },
 				],
 				{
 					field: "app_slot_gate",
-					flag: "--app <id|name> to reuse an existing app, or tarout billing plan:quantity / upgrade to add capacity",
+					flag: "--app <id|name> to reuse an existing app, or tarout billing upgrade <plan> to add capacity",
 					context: { apps: apps.map((a) => ({ id: a.id, name: a.name })) },
 				},
 			);
@@ -2575,7 +2605,7 @@ async function clearDeployEntitlementGate(
 			if (choice !== REMEDY) {
 				return { action: "reuse", appIdentifier: choice };
 			}
-			// REMEDY → fall through to the add-slot / upgrade picker below.
+			// REMEDY → fall through to the supported billing remedy below.
 		}
 	}
 
@@ -2590,14 +2620,15 @@ async function clearDeployEntitlementGate(
 	return { action: "retry" };
 }
 
-async function resolveDatabaseChoice(
+export async function resolveDatabaseChoice(
 	options: DeployOptions,
 	inspection: ProjectInspection,
 ): Promise<DatabaseKind> {
 	if (options.skipDatabase) return "none";
 	const explicitChoice = normalizeDatabaseKind(options.database);
 	if (explicitChoice) return explicitChoice;
-	if (isJsonMode() || shouldSkipConfirmation()) return inspection.database;
+	if (isJsonMode() || isNonInteractiveMode() || shouldSkipConfirmation())
+		return inspection.database;
 
 	if (inspection.database !== "none") {
 		log("");
@@ -2622,13 +2653,14 @@ async function resolveDatabaseChoice(
 	]);
 }
 
-async function resolveStorageChoice(
+export async function resolveStorageChoice(
 	options: DeployOptions,
 	inspection: ProjectInspection,
 ): Promise<boolean> {
 	if (options.skipStorage) return false;
 	if (options.storage === true) return true;
-	if (isJsonMode() || shouldSkipConfirmation()) return inspection.storage;
+	if (isJsonMode() || isNonInteractiveMode() || shouldSkipConfirmation())
+		return inspection.storage;
 
 	if (inspection.storage) {
 		log("");
@@ -3957,8 +3989,9 @@ export async function uploadCurrentDirectorySource(
 	client: any,
 	applicationId: string,
 	appName: string,
+	sourceDirectory = process.cwd(),
 ): Promise<void> {
-	const archivePath = await createSourceArchive();
+	const archivePath = await createSourceArchive(sourceDirectory);
 	const archiveDir = dirname(archivePath);
 
 	try {
@@ -4006,28 +4039,38 @@ export async function uploadCurrentDirectorySource(
 	}
 }
 
-export async function createSourceArchive(): Promise<string> {
+export async function createSourceArchive(
+	sourceDirectory = process.cwd(),
+): Promise<string> {
 	const tempDir = mkdtempSync(join(tmpdir(), "tarout-source-"));
 	const archivePath = join(tempDir, "source.zip");
 
 	const excludes = [
 		".git/*",
+		"*/.git/*",
 		".tarout/*",
+		"*/.tarout/*",
 		".next/*",
+		"*/.next/*",
 		"dist/*",
+		"*/dist/*",
 		"build/*",
+		"*/build/*",
 		"coverage/*",
+		"*/coverage/*",
 		"node_modules/*",
 		"*/node_modules/*",
 		".env",
 		".env.*",
+		"*/.env",
+		"*/.env.*",
 		"*.log",
 	];
 
 	const _spinner = startSpinner("Packaging current directory...");
 	try {
 		await execFileAsync("zip", ["-qry", archivePath, ".", "-x", ...excludes], {
-			cwd: process.cwd(),
+			cwd: sourceDirectory,
 			maxBuffer: 1024 * 1024,
 		});
 		succeedSpinner("Source packaged.");

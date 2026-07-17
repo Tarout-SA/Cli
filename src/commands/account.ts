@@ -13,6 +13,7 @@ import {
 	isJsonMode,
 	log,
 	outputData,
+	quietOutput,
 	shouldSkipConfirmation,
 	table,
 } from "../lib/output.js";
@@ -41,6 +42,7 @@ export function registerAccountCommands(program: Command) {
 					return;
 				}
 				const u = user as any;
+				quietOutput(String(u.id || u.email || "-"));
 				log("");
 				log(colors.bold(u.name || u.email || "-"));
 				log(`  Email:  ${u.email || "-"}`);
@@ -254,6 +256,9 @@ export function registerAccountCommands(program: Command) {
 						return;
 					}
 					const r = result as any;
+					// Quiet mode: emit the key ID (the secret token stays in the
+					// human box / --json payload, never leaked to bare quiet stdout).
+					quietOutput(String(r.id || "-"));
 					log("");
 					log(colors.bold("API Key Created"));
 					log(colors.warn("Save this key — it won't be shown again!"));
@@ -329,6 +334,9 @@ export function registerAccountCommands(program: Command) {
 					return;
 				}
 				const r = result as any;
+				// Quiet mode: emit the key ID (the rotated secret stays in the
+				// human output / --json payload, never bare quiet stdout).
+				quietOutput(String(r.id || apiKeyId));
 				log("");
 				log(colors.bold("API Key Rotated"));
 				log(colors.warn("Save this key — it won't be shown again!"));
@@ -369,6 +377,7 @@ export function registerAccountCommands(program: Command) {
 				await client.user.deleteApiKey.mutate({ apiKeyId } as any);
 				succeedSpinner("API key deleted.");
 				if (isJsonMode()) outputData({ deleted: true, apiKeyId });
+				else quietOutput(apiKeyId);
 			} catch (err) {
 				failSpinner();
 				handleError(err);
@@ -396,6 +405,9 @@ export function registerAccountCommands(program: Command) {
 					return;
 				}
 				const r = result as any;
+				// Quiet mode: emit the bare metrics token (the primary datum) for
+				// scripting/piping.
+				quietOutput(String(r.token || result));
 				log("");
 				log(`Metrics token: ${colors.cyan(r.token || String(result))}`);
 				log("");
@@ -422,6 +434,7 @@ export function registerAccountCommands(program: Command) {
 					return;
 				}
 				const user = u as any;
+				quietOutput(String(user.id || userId));
 				log("");
 				log(colors.bold(user.name || user.email || userId));
 				log(`  Email: ${user.email || "-"}`);

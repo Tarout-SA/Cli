@@ -17,10 +17,22 @@
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { getCurrentProfile } from "../../lib/config.js";
 import { resolveAppRef } from "../../lib/env-core.js";
-import { withAuth } from "../runtime.js";
+import { errorResult, withAuth } from "../runtime.js";
 
 const app = z.string().describe("Application name or id.");
+
+// URL-safe slug, mirroring generateSlug() in commands/apps.ts. The platform
+// application.create schema requires a distinct `appName` slug alongside the
+// display `name`.
+function generateSlug(name: string): string {
+	return name
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-+|-+$/g, "")
+		.slice(0, 63);
+}
 
 export function registerAppsTools(server: McpServer): void {
 	server.registerTool(
@@ -77,11 +89,30 @@ export function registerAppsTools(server: McpServer): void {
 				plan: z.enum(["FREE", "SHARED", "DEDICATED"]).optional(),
 			},
 		},
-		async (input) =>
-			withAuth(async (client) => {
-				const created = (await client.application.create.mutate(input)) as unknown;
+		async ({ name, description, plan }) => {
+			// application.create requires `appName` (slug) + `organizationId`; the
+			// tRPC input schema does not inject them. Derive the slug the same way
+			// the CLI command does and take the org from the active profile.
+			const profile = getCurrentProfile();
+			if (!profile) {
+				return errorResult({
+					error: "No CLI profile — cannot create an app without one.",
+					code: "AUTH_ERROR",
+					remediation:
+						"Run `tarout login` on the machine running this MCP server.",
+				});
+			}
+			return withAuth(async (client) => {
+				const created = (await client.application.create.mutate({
+					name,
+					appName: generateSlug(name),
+					description,
+					organizationId: profile.organizationId,
+					plan,
+				})) as unknown;
 				return { created };
-			}),
+			});
+		},
 	);
 
 	server.registerTool(

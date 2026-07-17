@@ -7,6 +7,7 @@ import {
 	isJsonMode,
 	log,
 	outputData,
+	quietOutput,
 	shouldSkipConfirmation,
 	table,
 } from "../lib/output.js";
@@ -85,6 +86,7 @@ export function registerInboxCommands(program: Command) {
 					return;
 				}
 				const count = (result as any)?.count ?? result;
+				quietOutput(String(count));
 				log(`Unread notifications: ${colors.cyan(String(count))}`);
 			} catch (err) {
 				failSpinner();
@@ -104,6 +106,7 @@ export function registerInboxCommands(program: Command) {
 				await client.appNotification.markRead.mutate({ notificationId } as any);
 				succeedSpinner("Marked as read.");
 				if (isJsonMode()) outputData({ read: true, notificationId });
+				else quietOutput(notificationId);
 			} catch (err) {
 				failSpinner();
 				handleError(err);
@@ -141,6 +144,7 @@ export function registerInboxCommands(program: Command) {
 				await client.appNotification.delete.mutate({ notificationId } as any);
 				succeedSpinner("Notification deleted.");
 				if (isJsonMode()) outputData({ deleted: true, notificationId });
+				else quietOutput(notificationId);
 			} catch (err) {
 				failSpinner();
 				handleError(err);

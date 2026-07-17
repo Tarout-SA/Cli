@@ -13,12 +13,16 @@ import { registerDeployTools } from "./tools/deploy.js";
 import { registerDomainTools } from "./tools/domains.js";
 import { registerEnvTools } from "./tools/env.js";
 import { registerStorageTools } from "./tools/storage.js";
+import { guardServerHandlers } from "./runtime.js";
 
 export function createMcpServer(): McpServer {
 	const server = new McpServer(
 		{ name: "tarout", version: packageJson.version },
 		{ capabilities: { tools: {} } },
 	);
+	// Wrap every handler (exit guard + result sanitization) before any tool is
+	// registered so all of them are covered.
+	guardServerHandlers(server);
 	registerCallTools(server);
 	registerContextTools(server);
 	registerEnvTools(server);

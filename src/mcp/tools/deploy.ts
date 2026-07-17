@@ -24,7 +24,7 @@ import {
 	isEntitlementError,
 	uploadCurrentDirectorySource,
 } from "../../commands/deploy.js";
-import { getProjectConfig, setProjectConfig } from "../../lib/config.js";
+import { getProjectConfig } from "../../lib/config.js";
 import { resolveAppRef } from "../../lib/env-core.js";
 import { resolveEntitlementRemedy } from "../../lib/entitlement-remedy.js";
 import { errorResult, okResult, withAuth } from "../runtime.js";
@@ -192,18 +192,10 @@ export function registerDeployTools(server: McpServer): void {
 							client,
 							profile,
 							options,
+							cwd,
 						)) as { applicationId: string; name: string; organizationId?: string };
 						applicationId = created.applicationId;
 						appName = created.name;
-						setProjectConfig(
-							{
-								applicationId,
-								name: appName,
-								organizationId: created.organizationId ?? profile.organizationId,
-								linkedAt: new Date().toISOString(),
-							},
-							cwd,
-						);
 					} catch (err) {
 						if (isEntitlementError(err)) {
 							// biome-ignore lint/suspicious/noExplicitAny: catalog shape narrows via optional chaining.
@@ -227,7 +219,12 @@ export function registerDeployTools(server: McpServer): void {
 				}
 
 				// 3) Upload source archive.
-				await uploadCurrentDirectorySource(client, applicationId, appName ?? "app");
+				await uploadCurrentDirectorySource(
+					client,
+					applicationId,
+					appName ?? "app",
+					cwd,
+				);
 
 				// 4) Trigger deploy.
 				const started = (await client.application.deployToCloud.mutate({

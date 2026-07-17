@@ -36,6 +36,11 @@ const fakeClient = {
 		getActive: {
 			query: vi.fn().mockResolvedValue({ id: "e1", slug: "production" }),
 		},
+		all: {
+			query: vi.fn().mockResolvedValue([
+				{ environmentId: "e1", slug: "production", displayName: "Production" },
+			]),
+		},
 		setActive: { mutate: vi.fn().mockResolvedValue({ ok: true }) },
 	},
 	application: {
@@ -61,6 +66,7 @@ beforeEach(() => {
 	fakeClient.organization.setActive.mutate.mockClear();
 	fakeClient.project.setActive.mutate.mockClear();
 	fakeClient.environment.setActive.mutate.mockClear();
+	fakeClient.environment.all.query.mockClear();
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -130,6 +136,25 @@ describe("context_switch", () => {
 		expect(fakeClient.environment.setActive.mutate).toHaveBeenCalledWith({
 			environmentId: "e1",
 		});
+	});
+
+	it("switches environment by slug/name (resolves to its id)", async () => {
+		// Regression: the old code passed the raw name straight to setActive as
+		// an environmentId; it must be resolved via environment.all first.
+		const r = await invoke("context_switch", { environment: "production" });
+		expect(r.isError).toBeUndefined();
+		expect(fakeClient.environment.all.query).toHaveBeenCalled();
+		expect(fakeClient.environment.setActive.mutate).toHaveBeenCalledWith({
+			environmentId: "e1",
+		});
+	});
+
+	it("returns an error when the environment is unknown", async () => {
+		const r = await invoke("context_switch", { environment: "nope" });
+		expect(r.isError).toBe(true);
+		const body = JSON.parse(r.content[0].text) as { error: string };
+		expect(body.error).toContain("Unknown environment");
+		expect(fakeClient.environment.setActive.mutate).not.toHaveBeenCalled();
 	});
 
 	it("only mutates the fields supplied", async () => {

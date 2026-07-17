@@ -1,6 +1,7 @@
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import superjson from "superjson";
 import type { Profile } from "./config.js";
+import { normalizeApiUrl } from "./api-url.js";
 import { platformFetch } from "./password-gate.js";
 
 type ApiClient = any;
@@ -9,11 +10,12 @@ export function createCredentialClient(
 	apiUrl: string,
 	token: string,
 ): ApiClient {
+	const normalizedApiUrl = normalizeApiUrl(apiUrl);
 	return createTRPCProxyClient({
 		transformer: superjson,
 		links: [
 			httpBatchLink({
-				url: `${apiUrl.replace(/\/+$/, "")}/api/trpc`,
+				url: `${normalizedApiUrl}/api/trpc`,
 				headers: () => ({ "x-api-key": token }),
 				fetch: platformFetch,
 			}),
@@ -48,7 +50,7 @@ export async function resolveProfileFromCredential(params: {
 	token: string;
 	fallback?: Partial<Profile> | null;
 }): Promise<Profile> {
-	const apiUrl = params.apiUrl.replace(/\/+$/, "");
+	const apiUrl = normalizeApiUrl(params.apiUrl);
 	const client = createCredentialClient(apiUrl, params.token);
 
 	const member = await client.user.get.query();

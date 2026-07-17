@@ -19,7 +19,14 @@ import { ensureAgentSetup } from "../lib/agent-setup.js";
 import { getApiClient } from "../lib/api.js";
 import { getProjectConfig } from "../lib/config.js";
 import { AuthError, handleError } from "../lib/errors.js";
-import { box, colors, isJsonMode, log, outputJsonLine } from "../lib/output.js";
+import {
+	box,
+	colors,
+	isJsonMode,
+	log,
+	outputJsonLine,
+	quietOutput,
+} from "../lib/output.js";
 import { envVarsToObject } from "../lib/process.js";
 import { ExitCode, exit } from "../utils/exit-codes.js";
 import { formatAppUrl } from "../utils/url.js";
@@ -313,6 +320,8 @@ export function registerInitCommand(program: Command): void {
 					});
 					return;
 				}
+
+				quietOutput(app.applicationId);
 
 				box("Project initialized", [
 					`Application: ${colors.cyan(app.name)}`,

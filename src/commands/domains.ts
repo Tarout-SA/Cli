@@ -13,6 +13,7 @@ import {
 	colors,
 	error,
 	isJsonMode,
+	isQuietMode,
 	log,
 	outputData,
 	outputError,
@@ -103,6 +104,14 @@ export function registerDomainsCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData(domainsList);
+					return;
+				}
+
+				if (isQuietMode()) {
+					for (const d of domainsList) {
+						const id = d.domainId || d.domainName;
+						if (id) quietOutput(String(id));
+					}
 					return;
 				}
 
@@ -1001,73 +1010,6 @@ export function registerDomainsCommands(program: Command) {
 			}
 		});
 
-	// ── Nameservers ──
-	domains
-		.command("ns")
-		.argument("<domain>", "Domain ID or domain name")
-		.description("Show nameservers for a domain")
-		.action(async (domainIdentifier) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-
-				const client = getApiClient();
-
-				const _spinner = startSpinner("Fetching nameservers...");
-				const allDomains: any[] = await client.domainRegistrar.getAll.query();
-				const domain = findRegisteredDomain(allDomains, domainIdentifier);
-
-				if (!domain) {
-					failSpinner();
-					const suggestions = findSimilar(
-						domainIdentifier,
-						allDomains.map((d: any) => d.domainName),
-					);
-					throw new NotFoundError("Domain", domainIdentifier, suggestions);
-				}
-
-				const nsData = await client.dns.getNameservers.query({
-					registeredDomainId: domain.domainId,
-				});
-
-				succeedSpinner();
-
-				if (isJsonMode()) {
-					outputData(nsData);
-					return;
-				}
-
-				log("");
-				log(`Nameservers for ${colors.cyan(domain.domainName)}:`);
-				log("");
-
-				if (
-					nsData.cloudflareNameservers &&
-					nsData.cloudflareNameservers.length > 0
-				) {
-					log(`  ${colors.bold("Cloudflare (assigned):")}`);
-					for (const ns of nsData.cloudflareNameservers) {
-						log(`    ${colors.cyan(ns)}`);
-					}
-				}
-
-				if (nsData.currentNameservers && nsData.currentNameservers.length > 0) {
-					log("");
-					log(`  ${colors.bold("Current nameservers:")}`);
-					for (const ns of nsData.currentNameservers) {
-						log(`    ${ns}`);
-					}
-				}
-
-				if (nsData.cloudflareZoneStatus) {
-					log("");
-					log(`  Zone status: ${formatCfStatus(nsData.cloudflareZoneStatus)}`);
-				}
-
-				log("");
-			} catch (err) {
-				handleError(err);
-			}
-		});
 	// ── Registrar readiness ──────────────────────────────────────────────────────
 	domains
 		.command("registrar-status")
@@ -1664,39 +1606,6 @@ export function registerDomainsCommands(program: Command) {
 			}
 		});
 
-	// ── Set nameservers ───────────────────────────────────────────────────────────
-	domains
-		.command("set-nameservers")
-		.argument("<domain>", "Domain ID or name")
-		.argument("<nameservers>", "Comma-separated nameserver list")
-		.description("Set custom nameservers for a domain")
-		.action(async (domainIdentifier: string, nameserversArg: string) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-				const nameservers = nameserversArg
-					.split(",")
-					.map((ns: string) => ns.trim());
-				const client = getApiClient();
-				const _spinner = startSpinner("Fetching domain...");
-				const allDomains: any[] = await client.domainRegistrar.getAll.query();
-				const domain = findRegisteredDomain(allDomains, domainIdentifier);
-				if (!domain) {
-					failSpinner();
-					throw new NotFoundError("Domain", domainIdentifier);
-				}
-				const _nsSpinner = startSpinner("Setting nameservers...");
-				await client.domainRegistrar.setNameservers.mutate({
-					domainId: domain.domainId,
-					nameservers,
-				});
-				succeedSpinner("Nameservers updated.");
-				if (isJsonMode()) outputData({ updated: true, nameservers });
-			} catch (err) {
-				failSpinner();
-				handleError(err);
-			}
-		});
-
 	// ── SSL status ────────────────────────────────────────────────────────────────
 	domains
 		.command("ssl")
@@ -1990,7 +1899,7 @@ export function registerDomainsCommands(program: Command) {
 			}
 		});
 
-	// ── DNS update, getById, sync, setupCommonRecords, updateNameservers, checkPropagation ──
+	// ── DNS update, getById, sync, setupCommonRecords, checkPropagation ──
 	// Extend the existing dns subgroup:
 	const dnsCmd = domains
 		.command("dns-ext")
@@ -2107,37 +2016,6 @@ export function registerDomainsCommands(program: Command) {
 				});
 				succeedSpinner("Common DNS records created.");
 				if (isJsonMode()) outputData({ setup: true });
-			} catch (err) {
-				failSpinner();
-				handleError(err);
-			}
-		});
-
-	dnsCmd
-		.command("update-nameservers <domain>")
-		.argument("<nameservers>", "Comma-separated nameservers")
-		.description("Update nameservers for a domain via DNS")
-		.action(async (domainIdentifier: string, nameserversArg: string) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-				const nameservers = nameserversArg
-					.split(",")
-					.map((ns: string) => ns.trim());
-				const client = getApiClient();
-				const _spinner = startSpinner("Fetching domain...");
-				const allDomains: any[] = await client.domainRegistrar.getAll.query();
-				const domain = findRegisteredDomain(allDomains, domainIdentifier);
-				if (!domain) {
-					failSpinner();
-					throw new NotFoundError("Domain", domainIdentifier);
-				}
-				const _nsSpinner = startSpinner("Updating nameservers...");
-				await client.dns.updateNameservers.mutate({
-					domainId: domain.domainId,
-					nameservers,
-				});
-				succeedSpinner("Nameservers updated.");
-				if (isJsonMode()) outputData({ updated: true, nameservers });
 			} catch (err) {
 				failSpinner();
 				handleError(err);

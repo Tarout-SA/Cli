@@ -11,8 +11,10 @@ const fakeClient = {
 		getCurrent: {
 			query: vi.fn().mockResolvedValue({ planKey: "shared", status: "ACTIVE" }),
 		},
-		getUsage: {
-			query: vi.fn().mockResolvedValue({ apps: 3, storageGB: 2 }),
+	},
+	billing: {
+		getUsageBreakdown: {
+			query: vi.fn().mockResolvedValue({ totalHalalas: 1900, items: [] }),
 		},
 	},
 };
@@ -54,8 +56,13 @@ describe("billing tools", () => {
 		const r = await invoke("billing_status", {});
 		const body = JSON.parse(r.content[0].text) as {
 			subscription: { planKey: string };
+			usage: { totalHalalas: number } | null;
 		};
 		expect(body.subscription.planKey).toBe("shared");
+		// Regression: usage must come from the real billing.getUsageBreakdown
+		// procedure (the old subscription.getUsage does not exist).
+		expect(fakeClient.billing.getUsageBreakdown.query).toHaveBeenCalledWith({});
+		expect(body.usage?.totalHalalas).toBe(1900);
 	});
 
 	it("billing_upgrade delegates to performBillingChange", async () => {
@@ -84,6 +91,32 @@ describe("billing tools", () => {
 		expect(performBillingChange).toHaveBeenCalledWith(
 			expect.anything(),
 			expect.objectContaining({ billingPeriod: "yearly" }),
+		);
+	});
+
+	it("billing_upgrade maps planQuantity onto the engine's `quantity`", async () => {
+		(performBillingChange as any).mockClear();
+		await invoke("billing_upgrade", {
+			plan: "shared",
+			planQuantity: 5,
+			wait: true,
+		});
+		expect(performBillingChange).toHaveBeenCalledWith(
+			expect.anything(),
+			expect.objectContaining({ kind: "plan", planKey: "shared", quantity: 5 }),
+		);
+		// Regression: the engine input has no `planQuantity` field — the old code
+		// set it there where it was silently dropped.
+		const arg = (performBillingChange as any).mock.calls[0][1];
+		expect(arg.planQuantity).toBeUndefined();
+	});
+
+	it("billing_upgrade with only planQuantity uses plan_quantity kind", async () => {
+		(performBillingChange as any).mockClear();
+		await invoke("billing_upgrade", { planQuantity: 3, wait: false });
+		expect(performBillingChange).toHaveBeenCalledWith(
+			expect.anything(),
+			expect.objectContaining({ kind: "plan_quantity", quantity: 3 }),
 		);
 	});
 });

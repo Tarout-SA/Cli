@@ -129,6 +129,61 @@ describe("deployment_logs", () => {
 });
 
 describe("deploy tool", () => {
+	it("creates and links a missing app relative to the requested directory", async () => {
+		const { createAppFromCurrentDirectory } = await import(
+			"../../src/commands/deploy"
+		);
+		const create = createAppFromCurrentDirectory as ReturnType<typeof vi.fn>;
+		create.mockClear();
+		// biome-ignore lint/suspicious/noExplicitAny: augmenting fake for this test only.
+		(fakeClient.application as any).deployToCloud = {
+			mutate: vi.fn().mockResolvedValue({ deploymentId: "dep_created_path" }),
+		};
+		const requestedPath = "/tmp/tarout-new-requested-project";
+
+		const r = await invoke("deploy", {
+			path: requestedPath,
+			wait: false,
+			createIfMissing: true,
+		});
+
+		expect(r.isError).toBeUndefined();
+		expect(create).toHaveBeenCalledWith(
+			expect.anything(),
+			expect.objectContaining({ organizationId: "org_test" }),
+			expect.objectContaining({ nonInteractive: true }),
+			requestedPath,
+		);
+	});
+
+	it("archives the exact directory supplied by the MCP caller", async () => {
+		const { uploadCurrentDirectorySource } = await import(
+			"../../src/commands/deploy"
+		);
+		const upload = uploadCurrentDirectorySource as ReturnType<typeof vi.fn>;
+		upload.mockClear();
+		// biome-ignore lint/suspicious/noExplicitAny: augmenting fake for this test only.
+		(fakeClient.application as any).deployToCloud = {
+			mutate: vi.fn().mockResolvedValue({ deploymentId: "dep_path" }),
+		};
+		const requestedPath = "/tmp/tarout-requested-project";
+
+		const r = await invoke("deploy", {
+			path: requestedPath,
+			name: "web",
+			wait: false,
+			createIfMissing: false,
+		});
+
+		expect(r.isError).toBeUndefined();
+		expect(upload).toHaveBeenCalledWith(
+			expect.anything(),
+			"app_1",
+			"web",
+			requestedPath,
+		);
+	});
+
 	it("wait=false returns the deployment id immediately", async () => {
 		// Stub the pieces the deploy tool needs.
 		const client = fakeClient as unknown as {

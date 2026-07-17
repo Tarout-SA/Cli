@@ -6,6 +6,7 @@
  * that writes to stdout (outputJsonLine / promptOrEmit / emitNeedsUpgrade).
  * They return one of the two shapes below via okResult()/errorResult().
  */
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getApiClient } from "../lib/api.js";
 import { isLoggedIn } from "../lib/config.js";
 import {
@@ -16,6 +17,9 @@ import {
 	DeploymentTimeoutError,
 	NotFoundError,
 } from "../lib/errors.js";
+import { resolveEntitlementRemedy } from "../lib/entitlement-remedy.js";
+import { ExitCode } from "../utils/exit-codes.js";
+import { sanitizeToolResult } from "./sanitize-result.js";
 
 export interface Envelope {
 	error: string;
@@ -33,6 +37,93 @@ export interface ToolText {
 
 // biome-ignore lint/suspicious/noExplicitAny: tRPC proxy client is untyped in the CLI package.
 export type TrpcClient = any;
+
+/**
+ * Thrown by the exit guard when a tool handler (transitively) reaches a
+ * `process.exit()` call — e.g. promptOrEmit → exit(NEEDS_INPUT). Catchable, so a
+ * single un-annotated prompt site can no longer kill the whole stdio server.
+ */
+export class ProcessExitAttemptedError extends Error {
+	constructor(public readonly exitCode: number) {
+		super(
+			`A tool handler attempted process.exit(${exitCode}); the MCP server suppressed it.`,
+		);
+		this.name = "ProcessExitAttemptedError";
+	}
+}
+
+// Reference count of tool handlers currently executing. process.exit is only
+// intercepted while this is > 0, so a genuine server-shutdown exit (startup
+// failure, transport close) still terminates the process. Race-safe for
+// concurrent handlers because the guard is a single patch gated on the count.
+let activeHandlerDepth = 0;
+let originalProcessExit: ((code?: number) => never) | undefined;
+
+/**
+ * Patch process.exit ONCE so that, while any tool handler is running, an exit
+ * attempt throws {@link ProcessExitAttemptedError} instead of terminating the
+ * process. Outside a handler (count 0) exits pass through untouched.
+ */
+export function installExitGuard(): void {
+	if (originalProcessExit) return;
+	originalProcessExit = process.exit.bind(process);
+	process.exit = ((code?: number): never => {
+		if (activeHandlerDepth > 0) {
+			throw new ProcessExitAttemptedError(typeof code === "number" ? code : 0);
+		}
+		return (originalProcessExit as (code?: number) => never)(code);
+	}) as typeof process.exit;
+}
+
+/**
+ * Wraps a single tool handler so that (1) the exit guard is armed for its
+ * duration, (2) a suppressed exit is converted into a clean error envelope, and
+ * (3) the result is sanitized (unless the tool is credential-allowlisted).
+ */
+function wrapToolHandler(
+	name: string,
+	// biome-ignore lint/suspicious/noExplicitAny: SDK handler args are broad/untyped.
+	handler: (...args: any[]) => Promise<unknown>,
+	// biome-ignore lint/suspicious/noExplicitAny: SDK handler args are broad/untyped.
+): (...args: any[]) => Promise<unknown> {
+	// biome-ignore lint/suspicious/noExplicitAny: SDK handler args are broad/untyped.
+	return async (...args: any[]) => {
+		activeHandlerDepth += 1;
+		try {
+			const result = await handler(...args);
+			return sanitizeToolResult(result, name);
+		} catch (err) {
+			if (err instanceof ProcessExitAttemptedError) {
+				return sanitizeToolResult(errorResult(toEnvelope(err)), name);
+			}
+			throw err;
+		} finally {
+			activeHandlerDepth -= 1;
+		}
+	};
+}
+
+/**
+ * Monkey-patches `server.registerTool` so every tool handler is wrapped by
+ * {@link wrapToolHandler}. Must run before any registerTools() call so all
+ * handlers are covered. The exit guard itself is installed separately via
+ * {@link installExitGuard} (a global side effect scoped to the stdio server).
+ */
+export function guardServerHandlers(server: McpServer): void {
+	const original = server.registerTool.bind(server);
+	// biome-ignore lint/suspicious/noExplicitAny: SDK registerTool is overloaded; we wrap the trailing handler.
+	(server as unknown as { registerTool: (...a: any[]) => unknown }).registerTool =
+		// biome-ignore lint/suspicious/noExplicitAny: SDK registerTool is overloaded; we wrap the trailing handler.
+		(...regArgs: any[]) => {
+			const name = typeof regArgs[0] === "string" ? regArgs[0] : "unknown";
+			const last = regArgs.length - 1;
+			if (typeof regArgs[last] === "function") {
+				regArgs[last] = wrapToolHandler(name, regArgs[last]);
+			}
+			// biome-ignore lint/suspicious/noExplicitAny: forwarding the original overloaded call.
+			return (original as (...a: any[]) => unknown)(...regArgs);
+		};
+}
 
 export function okResult(data: unknown): ToolText {
 	const text =
@@ -60,6 +151,21 @@ const AUTH_REMEDIATION =
 	"Run `tarout login` on the machine running this MCP server, or set the TAROUT_TOKEN env var to an API key.";
 
 export function toEnvelope(err: unknown, procedurePath?: string): Envelope {
+	if (err instanceof ProcessExitAttemptedError) {
+		if (err.exitCode === ExitCode.NEEDS_INPUT) {
+			return {
+				error:
+					"This tool needs additional interactive input that isn't available over MCP. Supply the missing value as an explicit tool argument and retry.",
+				code: "NEEDS_INPUT",
+				details: { attemptedExitCode: err.exitCode },
+			};
+		}
+		return {
+			error: err.message,
+			code: "GENERAL_ERROR",
+			details: { attemptedExitCode: err.exitCode },
+		};
+	}
 	if (err instanceof AuthError) {
 		return {
 			error: err.message,
@@ -135,6 +241,49 @@ export async function withAuth(
 		const result = await fn(client);
 		return okResult(result);
 	} catch (err) {
-		return errorResult(toEnvelope(err, procedurePath));
+		const env = toEnvelope(err, procedurePath);
+		if (env.code === "FORBIDDEN") {
+			await enrichForbiddenEnvelope(env, err);
+		}
+		return errorResult(env);
+	}
+}
+
+/**
+ * Parses the failed entitlement key from a server-side `assertEntitlement`
+ * message of the form `Plan limit reached for <key>: <used>/<limit>.` (mirrors
+ * commands/deploy.ts::extractEntitlementKeyFromError without importing that
+ * heavy module into the runtime hot path).
+ */
+function entitlementKeyFromError(err: unknown): string | undefined {
+	const msg = err instanceof Error ? err.message : "";
+	return msg.match(/Plan limit reached for ([\w.]+)/i)?.[1];
+}
+
+/**
+ * Best-effort: turn a bare FORBIDDEN entitlement rejection into an actionable
+ * remedy (the exact `billing_upgrade`/addon command), the way tools/deploy.ts
+ * does. Wrapped so a catalog-fetch or resolver failure never masks the original
+ * error — on any failure the envelope is left as the plain FORBIDDEN it was.
+ */
+async function enrichForbiddenEnvelope(
+	env: Envelope,
+	err: unknown,
+): Promise<void> {
+	try {
+		const client = getApiClient();
+		// biome-ignore lint/suspicious/noExplicitAny: catalog shape narrows in resolveEntitlementRemedy.
+		const catalog: any = await client.subscription.getCatalog
+			.query()
+			.catch(() => ({ plans: [], addons: [] }));
+		const failedKey = entitlementKeyFromError(err);
+		const remedy = resolveEntitlementRemedy(failedKey, catalog, {});
+		env.remediation =
+			"Upgrade or add an addon: call `billing_upgrade` with the remedy in `details`.";
+		const prior =
+			env.details && typeof env.details === "object" ? env.details : {};
+		env.details = { ...prior, remedy, entitlementKey: failedKey };
+	} catch {
+		// best-effort enrichment; keep the original FORBIDDEN envelope intact.
 	}
 }

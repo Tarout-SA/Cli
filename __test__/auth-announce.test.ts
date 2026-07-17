@@ -1,5 +1,9 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { announceAuthUrl } from "../src/commands/auth";
+import { emitAgentSetupHint } from "../src/lib/agent-setup";
 import { setGlobalOptions } from "../src/lib/output";
 
 /**
@@ -81,5 +85,57 @@ describe("announceAuthUrl", () => {
 		} else {
 			expect(logs.join("\n")).toMatch(/tarout login --token/);
 		}
+	});
+});
+
+/**
+ * The agent-setup advisory runs before a command's real work. Under --json it
+ * MUST go to stderr, not stdout, so `JSON.parse(stdout)` still sees exactly one
+ * envelope. It keeps the same structured `agent_setup_required` shape so agents
+ * watching stderr aren't blinded.
+ */
+describe("emitAgentSetupHint (--json advisory routing)", () => {
+	const dirs: string[] = [];
+	let errSpy: ReturnType<typeof vi.spyOn>;
+	let errLines: string[];
+
+	beforeEach(() => {
+		errLines = [];
+		errSpy = vi.spyOn(console, "error").mockImplementation((m?: unknown) => {
+			if (typeof m === "string") errLines.push(m);
+		});
+	});
+
+	afterEach(() => {
+		errSpy.mockRestore();
+		for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+	});
+
+	function freshCwd(): string {
+		const d = mkdtempSync(join(tmpdir(), "tarout-agent-setup-"));
+		dirs.push(d);
+		return d;
+	}
+
+	it("emits the advisory on stderr (not stdout) in json mode", () => {
+		setGlobalOptions({ json: true, nonInteractive: true });
+		emitAgentSetupHint(freshCwd());
+
+		// stdout stays clean — no agent_setup_required line leaked into `logs`.
+		expect(logs.some((l) => l.includes("agent_setup_required"))).toBe(false);
+
+		const events = errLines
+			.map((l) => {
+				try {
+					return JSON.parse(l);
+				} catch {
+					return null;
+				}
+			})
+			.filter(Boolean) as Array<Record<string, unknown>>;
+		const evt = events.find((e) => e.event === "agent_setup_required");
+		expect(evt).toBeTruthy();
+		expect(evt?.type).toBe("event");
+		expect(typeof evt?.hint).toBe("string");
 	});
 });

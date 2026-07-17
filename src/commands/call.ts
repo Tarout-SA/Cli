@@ -2,13 +2,19 @@ import { readFileSync } from "node:fs";
 import type { Command } from "commander";
 import { getApiClient } from "../lib/api.js";
 import { getApiUrl, isLoggedIn } from "../lib/config.js";
-import { AuthError, handleError } from "../lib/errors.js";
+import {
+	AuthError,
+	CliError,
+	handleError,
+	InvalidArgumentError,
+} from "../lib/errors.js";
 import { colors, isJsonMode, log, outputData, table } from "../lib/output.js";
 import {
 	fetchManifestFresh,
 	loadManifest,
 	type ManifestEntry,
 } from "../lib/surface-manifest.js";
+import { ExitCode } from "../utils/exit-codes.js";
 import {
 	failSpinner,
 	startSpinner,
@@ -29,7 +35,7 @@ export function registerCallCommand(program: Command) {
 	program
 		.command("call [procedure]")
 		.description(
-			"Call any platform API procedure directly (e.g. application.create). Use --list to discover.",
+			"Call any platform API procedure directly (e.g. application.create). Use --list to discover. Exit codes: an unknown/non-exposed procedure exits NOT_FOUND (4); malformed --input JSON exits INVALID_ARGUMENTS (2).",
 		)
 		.option("-i, --input <json>", "JSON input for the procedure", "{}")
 		.option("--input-file <path>", "Read JSON input from a file")
@@ -88,8 +94,9 @@ export function registerCallCommand(program: Command) {
 					entry = manifest.find((m) => m.path === procedure);
 				}
 				if (!entry) {
-					throw new Error(
+					throw new CliError(
 						`Unknown or non-exposed procedure: "${procedure}". Run \`tarout call --list\` to see what's available.`,
+						ExitCode.NOT_FOUND,
 					);
 				}
 
@@ -102,7 +109,7 @@ export function registerCallCommand(program: Command) {
 					try {
 						input = JSON.parse(rawInput);
 					} catch {
-						throw new Error(
+						throw new InvalidArgumentError(
 							`--input must be valid JSON. Received: ${rawInput}`,
 						);
 					}

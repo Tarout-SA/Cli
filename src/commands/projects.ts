@@ -5,6 +5,7 @@ import { AuthError, handleError } from "../lib/errors.js";
 import {
 	colors,
 	isJsonMode,
+	isQuietMode,
 	log,
 	outputData,
 	quietOutput,
@@ -69,6 +70,13 @@ export function registerProjectsCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData(all);
+					return;
+				}
+
+				if (isQuietMode()) {
+					for (const p of all) {
+						if (p.projectId) quietOutput(p.projectId);
+					}
 					return;
 				}
 
@@ -138,6 +146,8 @@ export function registerProjectsCommands(program: Command) {
 						slug: target.slug,
 						verified: true,
 					});
+				} else {
+					quietOutput(target.projectId);
 				}
 			} catch (err) {
 				failSpinner();
@@ -215,6 +225,8 @@ export function registerProjectsCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData({ updated: true, projectId });
+				} else {
+					quietOutput(projectId);
 				}
 			} catch (err) {
 				handleError(err);
@@ -262,6 +274,8 @@ export function registerProjectsCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData({ deleted: true, projectId });
+				} else {
+					quietOutput(projectId);
 				}
 			} catch (err) {
 				handleError(err);
@@ -291,6 +305,8 @@ export function registerProjectsCommands(program: Command) {
 
 				const p = (data as any).project;
 				const c = (data as any).counts;
+
+				quietOutput(p?.projectId || projectId);
 
 				log("");
 				log(colors.bold(p?.name || projectId));
@@ -327,6 +343,7 @@ export function registerProjectsCommands(program: Command) {
 				if (isJsonMode()) {
 					outputData({ default: true, projectId });
 				} else {
+					quietOutput(projectId);
 					log("");
 					log(
 						`${colors.success("Default project set.")} New resources will be created in this project.`,
@@ -372,6 +389,7 @@ export function registerProjectsCommands(program: Command) {
 					return;
 				}
 				const p = full as any;
+				quietOutput(p.projectId || p.id || projectIdentifier);
 				log("");
 				log(colors.bold(p.name || "Project"));
 				log(colors.dim(p.projectId || p.id || ""));
@@ -405,6 +423,8 @@ export function registerProjectsCommands(program: Command) {
 					log("\nNo active project set.\n");
 					return;
 				}
+				const activeProjectId = p.projectId || p.id;
+				if (activeProjectId) quietOutput(activeProjectId);
 				log("");
 				log(colors.bold("Active Project"));
 				log(`  Name: ${colors.cyan(p.name || "-")}`);

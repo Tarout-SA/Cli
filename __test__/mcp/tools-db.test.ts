@@ -4,6 +4,7 @@ vi.mock("../../src/lib/config", () => ({
 	isLoggedIn: () => true,
 	getToken: () => "tok",
 	getApiUrl: () => "https://api.test",
+	getCurrentProfile: () => ({ organizationId: "org_1" }),
 }));
 
 const fakeClient = {
@@ -22,8 +23,10 @@ const fakeClient = {
 				postgresId: "pg_1",
 				name: "prod",
 				host: "pg.internal",
-				externalHost: "pg.external",
 				port: 5432,
+				externalAccessEnabled: true,
+				externalPoolerHost: "pg.external",
+				externalPoolerPort: 6432,
 				databaseName: "prod_db",
 				databaseUser: "prod_owner",
 				databasePassword: "s3cret",
@@ -55,6 +58,7 @@ const fakeClient = {
 				name: "reports",
 				host: "my.internal",
 				port: 3306,
+				externalAccessSupported: false,
 				databaseName: "reports_db",
 				databaseUser: "reports_owner",
 				databasePassword: "my-pass",
@@ -120,10 +124,15 @@ describe("db tools", () => {
 			description: "warehouse",
 		});
 		expect(r.isError).toBeUndefined();
+		// Regression: postgres.create requires appName (slug), dockerImage, and
+		// organizationId in addition to name/plan — the old payload sent none.
 		expect(fakeClient.postgres.create.mutate).toHaveBeenCalledWith({
 			name: "analytics",
-			plan: "STARTER",
+			appName: "analytics",
+			dockerImage: "postgres:17",
+			organizationId: "org_1",
 			description: "warehouse",
+			plan: "STARTER",
 		});
 		expect(fakeClient.mysql.create.mutate).not.toHaveBeenCalled();
 	});
@@ -137,8 +146,11 @@ describe("db tools", () => {
 		expect(r.isError).toBeUndefined();
 		expect(fakeClient.mysql.create.mutate).toHaveBeenCalledWith({
 			name: "cache",
-			plan: "STANDARD",
+			appName: "cache",
+			dockerImage: "mysql:8",
+			organizationId: "org_1",
 			description: undefined,
+			plan: "STANDARD",
 		});
 	});
 
@@ -156,7 +168,7 @@ describe("db tools", () => {
 		expect(fakeClient.mysql.one.query).toHaveBeenCalledWith({ mysqlId: "my_1" });
 	});
 
-	it("db_credentials returns the credential fields for postgres", async () => {
+	it("db_credentials returns only the external Postgres endpoint", async () => {
 		const r = await invoke("db_credentials", {
 			type: "postgres",
 			db: "prod",
@@ -171,33 +183,54 @@ describe("db tools", () => {
 			password: string;
 		};
 		expect(body.type).toBe("postgres");
-		expect(body.host).toBe("pg.internal");
-		expect(body.port).toBe(5432);
+		expect(body.host).toBe("pg.external");
+		expect(body.port).toBe(6432);
 		expect(body.database).toBe("prod_db");
 		expect(body.user).toBe("prod_owner");
 		expect(body.password).toBe("s3cret");
+		expect(r.content[0].text).not.toContain("pg.internal");
 	});
 
-	it("db_credentials returns the credential fields for mysql", async () => {
+	it("db_credentials rejects MySQL when no external endpoint is supported", async () => {
 		const r = await invoke("db_credentials", {
 			type: "mysql",
 			db: "reports",
 		});
-		expect(r.isError).toBeUndefined();
+		expect(r.isError).toBe(true);
 		const body = JSON.parse(r.content[0].text) as {
-			type: string;
-			host: string;
-			port: number;
-			database: string;
-			user: string;
-			password: string;
+			code: string;
+			remediation?: string;
 		};
-		expect(body.type).toBe("mysql");
-		expect(body.host).toBe("my.internal");
-		expect(body.port).toBe(3306);
-		expect(body.database).toBe("reports_db");
-		expect(body.user).toBe("reports_owner");
-		expect(body.password).toBe("my-pass");
+		expect(body.code).toBe("PRECONDITION_FAILED");
+		expect(body.remediation).toMatch(/dashboard/i);
+		expect(r.content[0].text).not.toContain("my.internal");
+		expect(r.content[0].text).not.toContain("my-pass");
+	});
+
+	it("db_credentials never falls back to an internal Postgres route", async () => {
+		fakeClient.postgres.one.query.mockResolvedValueOnce({
+			postgresId: "pg_1",
+			name: "prod",
+			host: "pg.internal",
+			port: 5432,
+			externalAccessEnabled: false,
+			externalPoolerHost: null,
+			externalPoolerPort: null,
+			databaseName: "prod_db",
+			databaseUser: "prod_owner",
+			databasePassword: "s3cret",
+		});
+
+		const r = await invoke("db_credentials", {
+			type: "postgres",
+			db: "prod",
+		});
+
+		expect(r.isError).toBe(true);
+		const body = JSON.parse(r.content[0].text) as { code: string };
+		expect(body.code).toBe("PRECONDITION_FAILED");
+		expect(r.content[0].text).not.toContain("pg.internal");
+		expect(r.content[0].text).not.toContain("s3cret");
 	});
 
 	it("db_sql calls postgres.executeSql for a postgres db", async () => {

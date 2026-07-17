@@ -13,6 +13,7 @@ import {
 	colors,
 	getStatusBadge,
 	isJsonMode,
+	isQuietMode,
 	log,
 	outputData,
 	quietOutput,
@@ -57,6 +58,16 @@ export function registerServersCommands(program: Command) {
 				}
 
 				const servers = serverList?.servers || serverList || [];
+
+				if (isQuietMode()) {
+					if (Array.isArray(servers)) {
+						for (const s of servers as any[]) {
+							const id = s.id || s.serverId;
+							if (id) quietOutput(String(id));
+						}
+					}
+					return;
+				}
 
 				if (!Array.isArray(servers) || servers.length === 0) {
 					log("");
@@ -285,6 +296,8 @@ export function registerServersCommands(program: Command) {
 					outputData(details);
 					return;
 				}
+
+				quietOutput(String(details.id || details.serverId));
 
 				log("");
 				log(colors.bold(details.name || serverIdentifier));
@@ -738,6 +751,9 @@ export function registerServersCommands(program: Command) {
 				if (isJsonMode()) {
 					outputData(result);
 				} else {
+					quietOutput(
+						String((result as any)?.snapshotId || (result as any)?.id || name),
+					);
 					box("Snapshot Created", [
 						`Name: ${colors.cyan(name)}`,
 						`Server: ${server.name || serverIdentifier}`,
@@ -782,6 +798,8 @@ export function registerServersCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData({ deleted: true, snapshotId });
+				} else {
+					quietOutput(snapshotId);
 				}
 			} catch (err) {
 				handleError(err);
@@ -944,6 +962,8 @@ export function registerServersCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData({ deleted: true, ruleId });
+				} else {
+					quietOutput(ruleId);
 				}
 			} catch (err) {
 				handleError(err);
@@ -1277,6 +1297,9 @@ export function registerServersCommands(program: Command) {
 				if (isJsonMode()) {
 					outputData(vol);
 				} else {
+					quietOutput(
+						String((vol as any)?.id || (vol as any)?.volumeId || name),
+					);
 					log("");
 					log(colors.success(`Volume "${name}" created and attached.`));
 					log("");
@@ -1321,6 +1344,8 @@ export function registerServersCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData({ deleted: true, volumeId });
+				} else {
+					quietOutput(volumeId);
 				}
 			} catch (err) {
 				handleError(err);
@@ -1489,6 +1514,8 @@ export function registerServersCommands(program: Command) {
 					outputData(result);
 				} else {
 					const r = result as any;
+					const reservedIpId = r.id || r.ipId || r.ip || r.address;
+					if (reservedIpId) quietOutput(String(reservedIpId));
 					log("");
 					box("IP Reserved", [
 						`IP: ${colors.cyan(r.ip || r.address || "")}`,
@@ -1799,6 +1826,8 @@ export function registerServersCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData({ deleted: true, metric, alertId: alert.id });
+				} else {
+					quietOutput(String(alert.id));
 				}
 			} catch (err) {
 				handleError(err);
@@ -1849,6 +1878,7 @@ export function registerServersCommands(program: Command) {
 				} as any);
 				succeedSpinner("Server terminated!");
 				if (isJsonMode()) outputData({ terminated: true });
+				else quietOutput(String(server.id || server.serverId));
 			} catch (err) {
 				handleError(err);
 			}
@@ -2153,6 +2183,7 @@ export function registerServersCommands(program: Command) {
 					return;
 				}
 				const sv = s as any;
+				quietOutput(String(sv.id || sv.coolifyServerId || id));
 				log("");
 				log(colors.bold(sv.name || `Server ${id}`));
 				log(`  Type:   ${sv.serverType || "-"}`);

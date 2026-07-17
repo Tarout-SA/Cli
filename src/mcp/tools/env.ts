@@ -82,36 +82,51 @@ export function registerEnvTools(server: McpServer): void {
 		{
 			title: "Remove environment variables from an app",
 			description:
-				"Removes the given keys from the app's environment. Re-uploads the current environment minus the removed keys via envVariable.import with merge=false — destructive: any drift between list and import is overwritten.",
+				"Removes the given keys from the app's environment (envVariable.delete for a single key, envVariable.bulkDelete for many). Deleting ALWAYS triggers an application restart so the removed values stop being live in the running container — important for secret rotation. The `restarted` field reports whether that restart was actually issued (single-key deletes restart atomically; the bulk path issues a best-effort application.restart afterward). Any `restart` argument sent by older clients is ignored — deletion restarts unconditionally when the platform supports it.",
 			inputSchema: {
 				app,
 				keys: z.array(z.string()).min(1),
-				restart: z.boolean().optional().default(false),
 			},
 			annotations: { destructiveHint: true },
 		},
-		async ({ app: appRef, keys, restart }) =>
+		async ({ app: appRef, keys }) =>
 			withAuth(async (client) => {
 				const { applicationId, name } = await resolveAppRef(client, appRef);
-				const existing = (await client.envVariable.list.query({
-					applicationId,
-					includeValues: true,
-				})) as Array<{ key: string; value?: string }>;
-				const keep = existing
-					.filter((v) => !keys.includes(v.key))
-					.reduce<Record<string, string>>((acc, v) => {
-						acc[v.key] = v.value ?? "";
-						return acc;
-					}, {});
-				const content = serializeDotenv(keep);
-				const result = (await client.envVariable.import.mutate({
-					applicationId,
-					content,
-					format: "dotenv",
-					merge: false,
-					restart: restart ?? false,
-				})) as unknown;
-				return { app: { applicationId, name }, removed: keys, result };
+				// The old merge=false re-import path is always rejected by the
+				// platform (apiImportEnvVariables.superRefine). Delete keys directly:
+				// single via envVariable.delete, many via envVariable.bulkDelete.
+				let result: unknown;
+				let restarted: boolean;
+				if (keys.length === 1) {
+					// Platform apiDeleteEnvVariable requires restart:true (a healthy
+					// replacement workload must be confirmed) — it is a Zod literal, so
+					// this path always redeploys the app.
+					result = (await client.envVariable.delete.mutate({
+						applicationId,
+						key: keys[0],
+						restart: true,
+					})) as unknown;
+					restarted = true;
+				} else {
+					result = (await client.envVariable.bulkDelete.mutate({
+						applicationId,
+						keys,
+					})) as unknown;
+					// bulkDelete does NOT redeploy — the deleted values stay live in the
+					// running container until the next deploy. Issue a best-effort
+					// application.restart so multi-key deletes match single-key semantics
+					// (deleted secrets actually leave the running container). Deletion has
+					// already succeeded; a restart failure only downgrades `restarted`.
+					restarted = false;
+					try {
+						await client.application.restart.mutate({ applicationId });
+						restarted = true;
+					} catch {
+						// best-effort — report restarted:false so the caller knows the
+						// removed values may remain live until the app's next deploy.
+					}
+				}
+				return { app: { applicationId, name }, removed: keys, restarted, result };
 			}),
 	);
 

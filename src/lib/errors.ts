@@ -7,6 +7,7 @@
 
 import { ExitCode, exit } from "../utils/exit-codes.js";
 import { jsonError, outputJson } from "../utils/json.js";
+import { isLoggedIn } from "./config.js";
 import { error, isJsonMode } from "./output.js";
 
 /**
@@ -68,6 +69,33 @@ export class CliError extends Error {
  */
 export const AGENT_LOGIN_HINT =
 	"Run `tarout login` directly to authenticate — it opens a browser on this machine and waits for the user to sign in, then your command works. Do not ask the user to run it for you, and don't treat it as interactive. On a headless/CI host with no browser, use `tarout login --token <key>` (create one at https://tarout.sa/dashboard/agent/keys).";
+
+/**
+ * Guidance for the case where a credential IS stored locally but the SERVER
+ * rejected it (expired 30-day CLI key, revoked from the dashboard, or a wiped
+ * account). The no-token AuthError already covers "never logged in"; without
+ * this, a stale token surfaces as a bare "UNAUTHORIZED" with no way forward.
+ */
+export const STALE_CREDENTIAL_HINT =
+	"session expired or revoked — run `tarout login` to re-authenticate.";
+
+/**
+ * When a server UNAUTHORIZED lands while a credential IS stored locally, return
+ * the re-auth guidance (mirroring the no-token AuthError's structured details)
+ * so an agent/user knows the fix is `tarout login`, not that the request shape
+ * was wrong. Returns null for any other code, or when nothing is stored (the
+ * AuthError path already handles "not logged in").
+ */
+export function staleCredentialGuidance(code: string): {
+	hint: string;
+	details: { hint: string; nextCommand: string };
+} | null {
+	if (code !== "UNAUTHORIZED" || !isLoggedIn()) return null;
+	return {
+		hint: STALE_CREDENTIAL_HINT,
+		details: { hint: AGENT_LOGIN_HINT, nextCommand: "tarout login" },
+	};
+}
 
 /**
  * Error thrown when the user is not authenticated.
@@ -190,9 +218,13 @@ export function handleError(err: unknown): never {
 		const code = e.code ?? e.data?.code;
 		if (code) {
 			const exitCode = mapTrpcErrorCode(code);
-			const message = e.message ?? "Request failed";
+			const rawMessage = e.message ?? "Request failed";
+			// A rejected stored credential (vs. no credential) gets an actionable
+			// re-auth hint; exit code stays AUTH_ERROR (3) via mapTrpcErrorCode.
+			const stale = staleCredentialGuidance(code);
+			const message = stale ? `${rawMessage} — ${stale.hint}` : rawMessage;
 			if (isJsonMode()) {
-				outputJson(jsonError(code, message));
+				outputJson(jsonError(code, message, undefined, stale?.details));
 			} else {
 				error(message);
 			}

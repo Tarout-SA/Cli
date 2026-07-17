@@ -12,6 +12,7 @@ import {
 	box,
 	colors,
 	isJsonMode,
+	isQuietMode,
 	log,
 	outputData,
 	quietOutput,
@@ -43,6 +44,13 @@ export function registerOrgsCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData(organizations);
+					return;
+				}
+
+				if (isQuietMode()) {
+					for (const org of organizations as any[]) {
+						if (org.id) quietOutput(org.id);
+					}
 					return;
 				}
 
@@ -110,6 +118,8 @@ export function registerOrgsCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData({ updated: true, name });
+				} else {
+					quietOutput(profile.organizationId);
 				}
 			} catch (err) {
 				handleError(err);
@@ -165,6 +175,7 @@ export function registerOrgsCommands(program: Command) {
 				if (isJsonMode()) {
 					outputData({ deleted: true, organizationId: profile.organizationId });
 				} else {
+					quietOutput(profile.organizationId);
 					log("");
 					log(
 						colors.success(
@@ -230,6 +241,7 @@ export function registerOrgsCommands(program: Command) {
 				if (isJsonMode()) {
 					outputData({ transferred: true, newOwnerId: userId });
 				} else {
+					quietOutput(userId);
 					log("");
 					log(colors.success("Ownership transferred successfully."));
 					log("");
@@ -372,6 +384,8 @@ export function registerOrgsCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData({ revoked: true, invitationId });
+				} else {
+					quietOutput(invitationId);
 				}
 			} catch (err) {
 				handleError(err);
@@ -468,6 +482,7 @@ export function registerOrgsCommands(program: Command) {
 					return;
 				}
 				const s = sub as { status?: string; trialEndsAt?: string | null };
+				quietOutput(s?.status || "none");
 				log("");
 				log(colors.bold("Organization Billing Status"));
 				log(`  Status: ${s?.status ? colors.cyan(s.status) : colors.dim("none")}`);
@@ -509,6 +524,7 @@ export function registerOrgsCommands(program: Command) {
 				succeedSpinner(`Organization "${org.name}" is now active!`);
 				if (isJsonMode())
 					outputData({ organizationId: org.id, organizationName: org.name });
+				else quietOutput(org.id);
 			} catch (err) {
 				handleError(err);
 			}
@@ -539,6 +555,13 @@ export function registerEnvsCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData(environments);
+					return;
+				}
+
+				if (isQuietMode()) {
+					for (const env of environments as any[]) {
+						if (env.environmentId) quietOutput(env.environmentId);
+					}
 					return;
 				}
 
@@ -609,6 +632,8 @@ export function registerEnvsCommands(program: Command) {
 					outputData(env);
 					return;
 				}
+
+				quietOutput(env.environmentId);
 
 				box("Environment Created", [
 					`ID: ${colors.cyan(env.environmentId)}`,
@@ -769,6 +794,7 @@ export function registerEnvsCommands(program: Command) {
 					return;
 				}
 				const e = data as any;
+				quietOutput(e.environmentId || envIdentifier);
 				log("");
 				log(colors.bold(e.displayName || e.slug || envIdentifier));
 				log(`  Slug:       ${e.slug || "-"}`);
@@ -847,6 +873,8 @@ export function registerEnvsCommands(program: Command) {
 				succeedSpinner(`${envLabel(env)} is now the default environment.`);
 				if (isJsonMode()) {
 					outputData({ default: true, environmentId: env.environmentId });
+				} else {
+					quietOutput(env.environmentId);
 				}
 			} catch (err) {
 				handleError(err);
@@ -878,6 +906,7 @@ export function registerEnvsCommands(program: Command) {
 					return;
 				}
 				const s = data as any;
+				quietOutput(env.environmentId);
 				log("");
 				log(colors.bold(envLabel(env)));
 				log(`  Applications: ${colors.cyan(String(s.applications || 0))}`);
@@ -906,6 +935,7 @@ export function registerEnvsCommands(program: Command) {
 					return;
 				}
 				const e = data as any;
+				if (e.environmentId) quietOutput(e.environmentId);
 				log("");
 				log(colors.bold("Active Environment"));
 				log(`  Name: ${e.displayName || e.slug || "-"}`);
@@ -939,6 +969,12 @@ export function registerEnvsCommands(program: Command) {
 				const envList = Array.isArray(result)
 					? result
 					: (result as any)?.environments || [];
+				if (isQuietMode()) {
+					for (const e of envList as any[]) {
+						if (e.environmentId) quietOutput(e.environmentId);
+					}
+					return;
+				}
 				if (!envList.length) {
 					log("\nNo environments found for this project.\n");
 					return;
@@ -984,6 +1020,7 @@ export function registerEnvsCommands(program: Command) {
 				succeedSpinner(`Environment "${envLabel(env)}" is now active!`);
 				if (isJsonMode())
 					outputData({ environmentId: env.environmentId, name: envLabel(env) });
+				else quietOutput(env.environmentId);
 			} catch (err) {
 				handleError(err);
 			}

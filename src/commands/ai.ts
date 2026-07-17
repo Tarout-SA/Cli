@@ -49,6 +49,12 @@ export function registerAiCommands(program: Command) {
 					return;
 				}
 
+				// Quiet mode: emit one model id per line (this list doesn't use
+				// table(), so there is no automatic quiet rendering).
+				for (const model of modelList) {
+					quietOutput(String(model.id || model.modelId || ""));
+				}
+
 				log("");
 				log(colors.bold("Available AI Models"));
 				log("");
@@ -266,6 +272,8 @@ export function registerAiCommands(program: Command) {
 					return;
 				}
 
+				quietOutput(String((key as any).keyId || keyId));
+
 				log("");
 				log(colors.bold((key as any).keyName || (key as any).name || keyId));
 				log(colors.dim((key as any).keyId || keyId));
@@ -452,6 +460,8 @@ export function registerAiCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData({ deleted: true, keyId });
+				} else {
+					quietOutput(keyId);
 				}
 			} catch (err) {
 				handleError(err);
@@ -578,6 +588,7 @@ export function registerAiCommands(program: Command) {
 					return;
 				}
 				const prov = p as any;
+				quietOutput(String(prov.aiId || prov.id || aiId));
 				log("");
 				log(colors.bold(prov.name || "AI Provider"));
 				log(`  ID:  ${colors.dim(aiId)}`);
@@ -602,6 +613,7 @@ export function registerAiCommands(program: Command) {
 				if (isJsonMode()) outputData(p);
 				else {
 					const prov = p as any;
+					quietOutput(String(prov.aiId || prov.id || id));
 					log(
 						`\n${colors.bold(prov.name || "AI Config")}: ${prov.apiUrl || "-"}\n`,
 					);
@@ -734,6 +746,7 @@ export function registerAiCommands(program: Command) {
 				await client.ai.update.mutate(payload as any);
 				succeedSpinner("AI provider updated!");
 				if (isJsonMode()) outputData({ updated: true, aiId });
+				else quietOutput(aiId);
 			} catch (err) {
 				handleError(err);
 			}
@@ -766,6 +779,7 @@ export function registerAiCommands(program: Command) {
 				await client.ai.delete.mutate({ aiId } as any);
 				succeedSpinner("AI provider deleted!");
 				if (isJsonMode()) outputData({ deleted: true, aiId });
+				else quietOutput(aiId);
 			} catch (err) {
 				handleError(err);
 			}

@@ -108,9 +108,12 @@ export function success(message: string): void {
 }
 
 export function warn(message: string): void {
-	if (!globalOptions.json) {
-		console.log(colors.warn(`⚠ ${message}`));
+	// Warnings are diagnostics, not data: always go to stderr so stdout stays
+	// clean for piping, and stay silent in quiet mode (errors remain visible).
+	if (globalOptions.json || globalOptions.quiet) {
+		return;
 	}
+	console.error(colors.warn(`⚠ ${message}`));
 }
 
 export function error(message: string, suggestions?: string[]): void {
@@ -136,9 +139,28 @@ export function verbose(message: string): void {
 	}
 }
 
+// Matches ANSI SGR/color escape sequences so quiet rows stay grep/cut-able.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escapes are control chars by definition.
+const ANSI_ESCAPE = /\[[0-9;]*m/g;
+
+function stripAnsi(str: string): string {
+	return str.replace(ANSI_ESCAPE, "");
+}
+
 // Table output
 export function table(headers: string[], rows: string[][]): void {
 	if (globalOptions.json) {
+		return;
+	}
+
+	// Quiet mode emits machine-lean, grep/cut-able rows: plain tab-separated
+	// values with no colors, borders, or header line. Cell values may carry
+	// ANSI color codes (status badges, colored ids) from the human path, so
+	// strip them here to keep the quiet output pipe-safe.
+	if (globalOptions.quiet) {
+		for (const row of rows) {
+			console.log(row.map(stripAnsi).join("\t"));
+		}
 		return;
 	}
 

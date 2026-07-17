@@ -6,6 +6,7 @@
 
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import superjson from "superjson";
+import { normalizeApiUrl } from "./api-url.js";
 import { getApiUrl, getToken, isLoggedIn } from "./config.js";
 import { AuthError } from "./errors.js";
 import { platformFetch } from "./password-gate.js";
@@ -25,7 +26,7 @@ let client: TaroutApiClient | null = null;
  * @throws {AuthError} If the user is not logged in
  * @example
  * const client = createApiClient();
- * const apps = await client.application.all.query();
+ * const apps = await client.application.allByOrganization.query();
  */
 export function createApiClient(): TaroutApiClient {
 	if (!isLoggedIn()) {
@@ -33,7 +34,7 @@ export function createApiClient(): TaroutApiClient {
 	}
 
 	const token = getToken();
-	const apiUrl = getApiUrl();
+	const apiUrl = normalizeApiUrl(getApiUrl());
 
 	return createTRPCProxyClient({
 		transformer: superjson,

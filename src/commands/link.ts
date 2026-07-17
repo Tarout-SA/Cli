@@ -226,6 +226,8 @@ export function registerLinkCommands(program: Command) {
 					return;
 				}
 
+				quietOutput(config.applicationId);
+
 				if (removed) {
 					log("");
 					log(colors.success(`Unlinked from ${config.name}`));
@@ -284,6 +286,8 @@ export function registerLinkCommands(program: Command) {
 							return;
 						}
 
+						quietOutput(config.applicationId);
+
 						log("");
 						log(colors.bold("Project Status"));
 						log("");
@@ -315,6 +319,8 @@ export function registerLinkCommands(program: Command) {
 						});
 						return;
 					}
+
+					quietOutput(config.applicationId);
 
 					log("");
 					log(colors.bold("Project Status"));

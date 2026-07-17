@@ -59,8 +59,9 @@ export async function openInBrowser(
 
 /**
  * The browser opener injected into the billing engine for hosted-checkout
- * payment URLs. Returns `undefined` (engine skips opening) only when the caller
- * opted out via `--no-open` or no GUI is reachable. Crucially it opens in
+ * payment URLs. Returns `undefined` (engine skips opening) when the caller
+ * opted out via `--no-open`, `TAROUT_NO_BROWSER` suppresses launches, or no GUI
+ * is reachable. Crucially it opens in
  * `--json` mode too: the CLI runs on the user's machine, so opening the payment
  * page locally saves a manual click while the agent still receives `paymentUrl`
  * in the JSON envelope. Open failures are swallowed — the URL is always printed
@@ -69,7 +70,8 @@ export async function openInBrowser(
 export function paymentBrowserOpener(opts?: {
 	noOpen?: boolean;
 }): ((url: string) => Promise<void>) | undefined {
-	if (opts?.noOpen || !canLaunchBrowser()) return undefined;
+	if (opts?.noOpen || browserLaunchSuppressed() || !canLaunchBrowser())
+		return undefined;
 	return async (url: string) => {
 		try {
 			await open(url);
@@ -93,8 +95,8 @@ export function paymentBrowserOpener(opts?: {
 /**
  * Whether to skip the local y/n confirm on a paid plan change and go straight
  * to the hosted checkout. True only for an agent context (non-TTY, non-JSON)
- * that can open a browser, on a positive charge: there the StreamPay payment
- * page is the real consent surface, so a local confirm just halts the agent
+ * that can open a browser, on a positive charge: there the hosted Moyasar
+ * payment page is the real consent surface, so a local confirm just halts the agent
  * with `needs_input`. `--json` keeps the structured handoff; net-zero/free
  * changes (no amount due) still confirm — they apply instantly with no payment
  * page to gate them.

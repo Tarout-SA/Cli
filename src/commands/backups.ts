@@ -7,6 +7,7 @@ import {
 	isJsonMode,
 	log,
 	outputData,
+	quietOutput,
 	shouldSkipConfirmation,
 	table,
 } from "../lib/output.js";
@@ -139,6 +140,7 @@ export function registerBackupsCommands(program: Command) {
 				}
 
 				const b = backup as any;
+				quietOutput(String(b.backupId || backupId));
 				log("");
 				log(colors.bold(`Backup: ${b.backupId || backupId}`));
 				log("");
@@ -243,6 +245,8 @@ export function registerBackupsCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData({ deleted: true, backupId });
+				} else {
+					quietOutput(backupId);
 				}
 			} catch (err) {
 				handleError(err);
@@ -367,6 +371,9 @@ export function registerBackupsCommands(program: Command) {
 					outputData(result);
 					return;
 				}
+
+				// Quiet mode: emit the bare signed download URL for scripting/piping.
+				quietOutput(String((result as any)?.url || result));
 
 				log("");
 				log(`Download URL for ${colors.cyan(backupFile)}:`);

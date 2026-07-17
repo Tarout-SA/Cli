@@ -14,6 +14,7 @@ const fakeClient = {
 		allByOrganization: {
 			query: vi.fn().mockResolvedValue([{ applicationId: "app_1", name: "web" }]),
 		},
+		restart: { mutate: vi.fn().mockResolvedValue({ restarted: true }) },
 	},
 	envVariable: {
 		list: {
@@ -24,6 +25,8 @@ const fakeClient = {
 		},
 		import: { mutate: vi.fn().mockResolvedValue({ inserted: 2 }) },
 		export: { query: vi.fn().mockResolvedValue({ content: "A=1\nB=2\n" }) },
+		delete: { mutate: vi.fn().mockResolvedValue({ deleted: true }) },
+		bulkDelete: { mutate: vi.fn().mockResolvedValue({ deletedCount: 2 }) },
 	},
 };
 
@@ -47,9 +50,13 @@ async function invoke(name: string, args: unknown) {
 
 beforeEach(() => {
 	fakeClient.application.allByOrganization.query.mockClear();
+	fakeClient.application.restart.mutate.mockReset();
+	fakeClient.application.restart.mutate.mockResolvedValue({ restarted: true });
 	fakeClient.envVariable.list.query.mockClear();
 	fakeClient.envVariable.import.mutate.mockClear();
 	fakeClient.envVariable.export.query.mockClear();
+	fakeClient.envVariable.delete.mutate.mockClear();
+	fakeClient.envVariable.bulkDelete.mutate.mockClear();
 	fakeClient.envVariable.list.query.mockResolvedValue([
 		{ key: "A", value: "1" },
 		{ key: "B", value: "2" },
@@ -113,19 +120,53 @@ describe("env_set", () => {
 });
 
 describe("env_unset", () => {
-	it("re-uploads the remaining vars with merge=false", async () => {
+	it("deletes a single key via envVariable.delete with restart=true", async () => {
 		const r = await invoke("env_unset", { app: "web", keys: ["A"] });
 		expect(r.isError).toBeUndefined();
-		expect(fakeClient.envVariable.import.mutate).toHaveBeenCalledWith(
-			expect.objectContaining({
-				applicationId: "app_1",
-				format: "dotenv",
-				merge: false,
-			}),
+		expect(fakeClient.envVariable.delete.mutate).toHaveBeenCalledWith({
+			applicationId: "app_1",
+			key: "A",
+			restart: true,
+		});
+		// The single-key delete restarts atomically — no separate restart call.
+		expect(fakeClient.application.restart.mutate).not.toHaveBeenCalled();
+		const body = JSON.parse(r.content[0].text) as { restarted: boolean };
+		expect(body.restarted).toBe(true);
+		// Regression: the old merge=false re-import path is always rejected by
+		// the platform — it must never be used.
+		expect(fakeClient.envVariable.import.mutate).not.toHaveBeenCalled();
+		expect(fakeClient.envVariable.bulkDelete.mutate).not.toHaveBeenCalled();
+	});
+
+	it("deletes multiple keys via bulkDelete then forces a restart", async () => {
+		const r = await invoke("env_unset", { app: "web", keys: ["A", "B"] });
+		expect(r.isError).toBeUndefined();
+		expect(fakeClient.envVariable.bulkDelete.mutate).toHaveBeenCalledWith({
+			applicationId: "app_1",
+			keys: ["A", "B"],
+		});
+		// bulkDelete does not redeploy, so a best-effort restart must follow so the
+		// removed secrets actually leave the running container (rotation semantics).
+		expect(fakeClient.application.restart.mutate).toHaveBeenCalledWith({
+			applicationId: "app_1",
+		});
+		const body = JSON.parse(r.content[0].text) as { restarted: boolean };
+		expect(body.restarted).toBe(true);
+		expect(fakeClient.envVariable.delete.mutate).not.toHaveBeenCalled();
+		expect(fakeClient.envVariable.import.mutate).not.toHaveBeenCalled();
+	});
+
+	it("reports restarted:false when the bulk-path restart fails (delete still succeeds)", async () => {
+		fakeClient.application.restart.mutate.mockRejectedValueOnce(
+			new Error("restart unavailable"),
 		);
-		const call = fakeClient.envVariable.import.mutate.mock.calls[0][0];
-		expect(call.content).not.toContain("A=");
-		expect(call.content).toContain("B=2");
+		const r = await invoke("env_unset", { app: "web", keys: ["A", "B"] });
+		// Deletion succeeded; only the follow-up restart failed.
+		expect(r.isError).toBeUndefined();
+		expect(fakeClient.envVariable.bulkDelete.mutate).toHaveBeenCalled();
+		expect(fakeClient.application.restart.mutate).toHaveBeenCalled();
+		const body = JSON.parse(r.content[0].text) as { restarted: boolean };
+		expect(body.restarted).toBe(false);
 	});
 });
 

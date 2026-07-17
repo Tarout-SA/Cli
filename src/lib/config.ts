@@ -1,6 +1,12 @@
 /**
  * @fileoverview Configuration management for the Tarout CLI.
- * Stores user profiles, authentication tokens, and settings in ~/.tarout/config.json
+ * Stores user profiles, authentication tokens, and settings via the `conf`
+ * package, which resolves a per-OS user-config path (env-paths, name
+ * `tarout-nodejs`) — NOT `~/.tarout`. Typical locations:
+ *   - macOS:   ~/Library/Preferences/tarout-nodejs/config.json
+ *   - Linux:   $XDG_CONFIG_HOME/tarout-nodejs/config.json (default
+ *              ~/.config/tarout-nodejs/config.json)
+ *   - Windows: %APPDATA%\tarout-nodejs\Config\config.json
  * @module lib/config
  */
 
@@ -46,7 +52,11 @@ export interface Config {
 	profiles: Record<string, Profile>;
 }
 
-/** Configuration store using the Conf library. Persists to ~/.tarout/config.json */
+/**
+ * Configuration store using the Conf library. Persists to the per-OS user
+ * config path for name `tarout-nodejs` (see the file header for the resolved
+ * locations) — e.g. ~/Library/Preferences/tarout-nodejs/config.json on macOS.
+ */
 const config = new Conf<Config>({
 	projectName: "tarout",
 	configFileMode: 0o600,

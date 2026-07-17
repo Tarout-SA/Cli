@@ -20,10 +20,10 @@ const catalog: Catalog = {
 			key: "shared",
 			name: "Starter",
 			priceHalalas: 1900,
-			quantityAware: true,
+			quantityAware: false,
 			minQuantity: 1,
-			maxQuantity: 1000,
-			grants: [{ entitlementKey: "app.shared.slots", quantity: 1 }],
+			maxQuantity: 1,
+			grants: [{ entitlementKey: "app.shared.slots", quantity: 5 }],
 		},
 		{
 			key: "dedicated_small",
@@ -57,7 +57,6 @@ describe("nextPlanForCurrent", () => {
 		expect(nextPlanForCurrent("free")).toBe("shared");
 		// The key fix: a shared project upgrading goes to dedicated, not stays shared.
 		expect(nextPlanForCurrent("shared")).toBe("dedicated_small");
-		expect(nextPlanForCurrent("bundle_starter")).toBe("dedicated_small");
 		expect(nextPlanForCurrent("dedicated_small")).toBe("dedicated_medium");
 		expect(nextPlanForCurrent("dedicated_medium")).toBe("dedicated_large");
 		expect(nextPlanForCurrent("dedicated_large")).toBe("dedicated_large");
@@ -85,19 +84,17 @@ describe("resolveEntitlementRemedy", () => {
 		expect(r.command).toContain("billing upgrade shared");
 	});
 
-	it("app.shared.slots → bump quantity-aware plan quantity", () => {
+	it("app.shared.slots → report the flat five-app cap and upgrade to Pro", () => {
 		const r = resolveEntitlementRemedy("app.shared.slots", catalog, {
-			currentSharedQuantity: 2,
+			currentPlanKey: "shared",
 		});
-		expect(r.kind).toBe("plan_quantity");
-		expect(r.targetKey).toBe("shared");
-		expect(r.command).toContain("plan:quantity 3");
-	});
-
-	it("app.shared.slots defaults to quantity 2 when current is unknown", () => {
-		const r = resolveEntitlementRemedy("app.shared.slots", catalog);
-		expect(r.kind).toBe("plan_quantity");
-		expect(r.command).toContain("plan:quantity 2");
+		expect(r.kind).toBe("plan");
+		expect(r.targetKey).toBe("dedicated_small");
+		expect(r.command).toBe(
+			"tarout billing upgrade dedicated_small --wait",
+		);
+		expect(r.command).not.toContain("plan:quantity");
+		expect(r.hint).toMatch(/five|5/i);
 	});
 
 	it("app.dedicated.slots / host.* → dedicated plan upgrade", () => {

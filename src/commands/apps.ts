@@ -15,6 +15,7 @@ import {
 	error,
 	getStatusBadge,
 	isJsonMode,
+	isQuietMode,
 	log,
 	outputData,
 	quietOutput,
@@ -100,6 +101,13 @@ export function registerAppsCommands(program: Command) {
 
 				if (isJsonMode()) {
 					outputData(applications);
+					return;
+				}
+
+				if (isQuietMode()) {
+					for (const app of applications) {
+						if (app.applicationId) quietOutput(app.applicationId);
+					}
 					return;
 				}
 

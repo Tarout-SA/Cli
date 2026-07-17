@@ -21,7 +21,14 @@ import {
 	InvalidArgumentError,
 	NotFoundError,
 } from "../lib/errors.js";
-import { colors, isJsonMode, log, outputData } from "../lib/output.js";
+import {
+	colors,
+	isJsonMode,
+	log,
+	outputData,
+	outputError,
+} from "../lib/output.js";
+import { ExitCode, exit } from "../utils/exit-codes.js";
 import {
 	detectFramework,
 	detectPackageManager,
@@ -136,22 +143,46 @@ export function registerBuildCommand(program: Command) {
 					const result = await runCommand(buildCommand, envVars);
 					const duration = Math.round((Date.now() - startTime) / 1000);
 
-					outputData({
-						success: result.exitCode === 0,
-						applicationId,
-						appName,
-						command: buildCommand,
-						framework: framework?.name || "Unknown",
-						envVarCount: Object.keys(envVars).length,
-						packageManager: pm,
-						exitCode: result.exitCode,
-						duration,
-					});
-
-					if (result.exitCode !== 0) {
-						process.exit(result.exitCode);
+					if (result.exitCode === 0) {
+						outputData({
+							success: true,
+							applicationId,
+							appName,
+							command: buildCommand,
+							framework: framework?.name || "Unknown",
+							envVarCount: Object.keys(envVars).length,
+							packageManager: pm,
+							exitCode: result.exitCode,
+							details: { childExitCode: result.exitCode },
+							duration,
+						});
+						return;
 					}
-					return;
+
+					// A FAILED build must be a top-level failure envelope, not a
+					// jsonSuccess wrapper around `{ success: false }` — an agent keying
+					// on the top-level `.success` would otherwise misread the failure as
+					// a pass. Reuse the structured-error shape other commands emit
+					// (`{ success:false, error:{ code, message, details } }`); the child's
+					// real code stays in `details.childExitCode`, and the process still
+					// exits with the CLI's reserved BUILD_FAILED (12) rather than the raw
+					// child code (which could collide with 2/3/4/5).
+					outputError(
+						"BUILD_FAILED",
+						`Build failed with exit code ${result.exitCode}`,
+						{
+							applicationId,
+							appName,
+							command: buildCommand,
+							framework: framework?.name || "Unknown",
+							envVarCount: Object.keys(envVars).length,
+							packageManager: pm,
+							exitCode: result.exitCode,
+							childExitCode: result.exitCode,
+							duration,
+						},
+					);
+					exit(ExitCode.BUILD_FAILED);
 				}
 
 				// Display build info
