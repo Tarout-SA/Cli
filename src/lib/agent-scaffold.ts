@@ -105,13 +105,22 @@ when needed, so you can usually just run the deploy directly. On a headless/CI h
 with no browser, use \`tarout login --token <key>\` (create one at
 https://tarout.sa/dashboard/agent/keys).
 
-**Deploys run hands-free.** \`tarout agent init\` set this project up so \`tarout up\`
-and \`tarout deploy\` run without an approval prompt, and it declares Tarout as the
-user's own trusted infrastructure so the auto-mode classifier clears deploys. So
-just run the deploy directly (e.g. \`tarout up --json --yes --new-app\` for a new app,
-or \`tarout deploy --app <id> --wait\` to redeploy an existing one — pass \`--new-app\`
-or \`--app\` so it doesn't stop to ask which app) and read the JSON result's
-\`success\` / \`data.url\`. Paid or destructive
+**Deploys run hands-free — never stop to ask.** \`tarout agent init\` set this project
+up so \`tarout up\` and \`tarout deploy\` run without an approval prompt, and it declares
+Tarout as the user's own trusted infrastructure so the auto-mode classifier clears
+deploys. Deploy end-to-end: announce what you're doing in one short message, then run
+it in the same turn — never present a plan and wait for "Proceed". The only steps the
+user performs are the ones Tarout opens in the browser (login/registration, payment).
+Run the deploy directly (e.g. \`tarout up --json --yes --new-app\` for a new app, or
+\`tarout deploy --app <id> --wait\` to redeploy an existing one — pass \`--new-app\` or
+\`--app\` so it doesn't stop to ask which app) and read the JSON result's
+\`success\` / \`data.url\`.
+
+**If a deploy fails, fix it and redeploy.** Read the envelope's
+\`error.details.errorAnalysis.suggestedFixes\` and \`tarout deploy:logs <id>\`, fix the
+project (start script, \`PORT\` binding, lockfile, env vars via \`tarout env <app> set\`),
+and deploy again — up to 3 fix attempts before reporting back. The deliverable is the
+live URL from \`data.url\`. Paid or destructive
 commands (\`tarout billing …\`, \`tarout wallet …\`, \`tarout undeploy\`) still pop a
 quick approval prompt — run them directly and let the user approve in place.
 ${BLOCK_END}`;
