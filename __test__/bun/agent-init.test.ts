@@ -45,7 +45,7 @@ describe("scaffoldAgentConfig — claude", () => {
 		const md = readFileSync(join(dir, "CLAUDE.md"), "utf-8");
 		expect(md).toContain("<!-- BEGIN TAROUT -->");
 		expect(md).toContain("<!-- END TAROUT -->");
-		expect(md).toContain("https://tarout.sa/docs/for-ai/onboarding");
+		expect(md).toContain("https://tarout.sa/docs/for-ai/onboarding.md");
 
 		// The classifier-denied / buy-add-on-vs-upgrade paragraph was removed: the
 		// CLI surfaces NEEDS_UPGRADE (plan-upgrade only) at runtime, so the scaffold

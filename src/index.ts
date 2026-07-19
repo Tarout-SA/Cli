@@ -45,6 +45,7 @@ import { registerWalletCommands } from "./commands/wallet.js";
 import { emitAgentSetupHint } from "./lib/agent-setup.js";
 import { handleError } from "./lib/errors.js";
 import { outputError, setGlobalOptions } from "./lib/output.js";
+import { maybeSelfUpdate } from "./lib/update-check.js";
 import { ExitCode } from "./utils/exit-codes.js";
 
 const program = new Command();
@@ -106,6 +107,10 @@ program
 	.option("-q, --quiet", "Minimal output")
 	.option("-v, --verbose", "Extra debug information")
 	.option("--no-color", "Disable colored output")
+	.option(
+		"--no-update-check",
+		"Skip the automatic CLI self-update on up/deploy",
+	)
 	.hook("preAction", async (thisCommand, actionCommand) => {
 		const opts = thisCommand.opts();
 		// Auto-detect non-interactive sessions: when stdin is not a TTY (agent
@@ -125,10 +130,21 @@ program
 			noColor: opts.color === false,
 		});
 
+		// Self-update on deploy: if a newer @tarout/cli is published, install it
+		// and re-exec this invocation on the new version (fail-open; opt out with
+		// --no-update-check / TAROUT_NO_UPDATE_CHECK). Only the deploy entry
+		// points update — a stale CLI everywhere else is harmless until it ships.
+		const sub = actionCommand?.name();
+		if (sub === "up" || sub === "deploy") {
+			await maybeSelfUpdate({
+				currentVersion: packageJson.version,
+				disabled: opts.updateCheck === false,
+			});
+		}
+
 		// In agent mode, nudge the agent to run `tarout agent init` first when the
 		// project isn't allowlisted yet. Skipped for the `agent` namespace itself
 		// and for up/deploy/init, which auto-scaffold the allowlist in their action.
-		const sub = actionCommand?.name();
 		const isAgentNamespace = actionCommand?.parent?.name() === "agent";
 		const autoRunsSetup = !!sub && ["up", "deploy", "init"].includes(sub);
 		if (!isAgentNamespace && !autoRunsSetup) {

@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0]
+
+### Added
+
+- **Self-update on deploy.** `tarout up` / `tarout deploy` now check the npm
+  registry for a newer `@tarout/cli` before running; when one exists the CLI
+  installs it (`npm install -g`) and re-executes the same invocation on the new
+  version, so users are always deploying with the current CLI. Fail-open by
+  design (offline/registry/npm errors just continue on the current version).
+  Opt out with `--no-update-check` or `TAROUT_NO_UPDATE_CHECK=1`. Under
+  `--json`, the update announces itself as a `{ "type": "event", "event":
+  "cli_update" }` line on stderr; stdout stays a single envelope. Never wired
+  into `tarout-mcp` (a mid-session package swap would break the stdio stream).
+
+### Changed
+
+- The scaffolded agent block (`tarout agent init`) now links the raw-markdown
+  onboarding guide (`https://tarout.sa/docs/for-ai/onboarding.md`) instead of
+  the HTML page.
+
 ## [1.2.0]
 
 ### Added

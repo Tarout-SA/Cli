@@ -308,6 +308,17 @@ These flags work with all commands:
 | `--quiet, -q` | Minimal output (errors only) |
 | `--verbose, -v` | Extra debug information |
 | `--no-color` | Disable colored output |
+| `--no-update-check` | Skip the automatic CLI self-update on `up`/`deploy` |
+
+### Self-update on deploy
+
+`tarout up` and `tarout deploy` check npm for a newer `@tarout/cli` before
+running. When one exists, the CLI installs it globally and re-runs your exact
+command on the new version — no action needed. The check fails open (offline or
+npm errors just continue on the current version). Opt out per-invocation with
+`--no-update-check` or permanently with `TAROUT_NO_UPDATE_CHECK=1`. Under
+`--json` the update is announced as a `{ "type": "event", "event": "cli_update" }`
+line on stderr.
 
 ## AI & Automation Usage
 

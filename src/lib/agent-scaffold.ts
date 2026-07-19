@@ -89,7 +89,7 @@ don't hand-edit infrastructure.
   answer the \`deploy_app\` needs_input.
 - **Re-deploy** a specific app: \`tarout deploy --app <id> --wait\`.
 - **Run locally** with cloud env vars: \`tarout dev\`.
-- **Full agent guide:** https://tarout.sa/docs/for-ai/onboarding
+- **Full agent guide:** https://tarout.sa/docs/for-ai/onboarding.md
 
 Run Tarout commands with \`--json\` for machine-readable output, and run them
 **directly** in your shell (don't wrap them in pipes or redirects like \`2>&1\`, so
