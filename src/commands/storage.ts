@@ -1,3 +1,4 @@
+import { readFileSync, statSync, writeFileSync } from "node:fs";
 import type { Command } from "commander";
 import { getApiClient } from "../lib/api.js";
 import { getCurrentProfile, isLoggedIn } from "../lib/config.js";
@@ -836,6 +837,198 @@ export function registerStorageCommands(program: Command) {
 				} as any);
 				succeedSpinner("Upload completed.");
 				if (isJsonMode()) outputData({ completed: true, fileName });
+			} catch (err) {
+				failSpinner();
+				handleError(err);
+			}
+		});
+
+	// ── Upload a local file (real byte transfer) ──────────────────────────────────
+	storage
+		.command("put")
+		.argument("<bucket>", "Bucket name or ID")
+		.argument("<key>", "Destination object key / file name in the bucket")
+		.argument("<file>", "Path to the local file to upload")
+		.description("Upload a local file's bytes to a bucket via a pre-signed URL")
+		.option("--content-type <type>", "Content type of the uploaded object")
+		.option("--expires <seconds>", "Upload URL expiry in seconds", "3600")
+		.action(async (bucketIdentifier, key, filePath, options) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching buckets...");
+				const buckets = await client.storage.allByOrganization.query();
+				const bucket = findBucket(buckets as any[], bucketIdentifier);
+				if (!bucket) {
+					failSpinner();
+					const suggestions = findSimilar(
+						bucketIdentifier,
+						buckets.map((b: any) => b.name),
+					);
+					throw new NotFoundError(
+						"Storage bucket",
+						bucketIdentifier,
+						suggestions,
+					);
+				}
+				const bucketId = bucket.bucketId || bucket.id;
+				// Read the local file's bytes + size before requesting an upload URL —
+				// getUploadUrl reserves exactly fileSizeBytes of quota up front.
+				let body: Buffer;
+				let fileSizeBytes: number;
+				try {
+					body = readFileSync(filePath);
+					fileSizeBytes = statSync(filePath).size;
+				} catch (readErr) {
+					failSpinner();
+					throw new CliError(
+						`Could not read file "${filePath}": ${
+							readErr instanceof Error ? readErr.message : String(readErr)
+						}`,
+					);
+				}
+				if (fileSizeBytes <= 0) {
+					failSpinner();
+					throw new CliError(`File "${filePath}" is empty; nothing to upload.`);
+				}
+				const _urlSpinner = startSpinner("Generating upload URL...");
+				const upload = (await client.storage.getUploadUrl.mutate({
+					bucketId,
+					fileName: key,
+					fileSizeBytes,
+					contentType: options.contentType,
+					expiresIn: Number.parseInt(options.expires || "3600"),
+				} as any)) as any;
+				const uploadUrl = upload.url || upload.uploadUrl;
+				if (!uploadUrl) {
+					failSpinner();
+					throw new CliError("The platform did not return an upload URL.");
+				}
+				const _putSpinner = startSpinner(
+					`Uploading ${formatBytes(fileSizeBytes)}...`,
+				);
+				// The presigned PUT signs Content-Length (undici sets it from the
+				// Buffer automatically) plus every header in requiredHeaders (the
+				// generation precondition and, when given, Content-Type) — forward
+				// them verbatim or the signature/precondition check fails.
+				const putRes = await fetch(uploadUrl, {
+					method: "PUT",
+					headers: (upload.requiredHeaders || {}) as Record<string, string>,
+					body,
+				});
+				if (!putRes.ok) {
+					failSpinner();
+					const detail = await putRes.text().catch(() => "");
+					throw new CliError(
+						`Upload failed (HTTP ${putRes.status} ${putRes.statusText})${
+							detail ? `: ${detail.slice(0, 200)}` : ""
+						}.`,
+					);
+				}
+				// Finalize the reservation / quota accounting. Echo the reservation
+				// token + sizes returned by getUploadUrl (mirrors `complete-upload`).
+				await client.storage.completeUpload.mutate({
+					bucketId,
+					reservationToken: upload.reservationToken,
+					fileName: key,
+					expectedSizeBytes: upload.expectedSizeBytes ?? fileSizeBytes,
+					existingSizeBytes: upload.existingSizeBytes ?? 0,
+				} as any);
+				succeedSpinner("File uploaded.");
+				if (isJsonMode()) {
+					outputData({ uploaded: true, bucketId, key, size: fileSizeBytes });
+					return;
+				}
+				quietOutput(key);
+				log("");
+				log(
+					`Uploaded ${colors.cyan(key)} (${formatBytes(fileSizeBytes)}) to ${colors.bold(bucket.name)}.`,
+				);
+				log("");
+			} catch (err) {
+				failSpinner();
+				handleError(err);
+			}
+		});
+
+	// ── Download an object to a local file (real byte transfer) ───────────────────
+	storage
+		.command("get")
+		.argument("<bucket>", "Bucket name or ID")
+		.argument("<key>", "Object key / file name in the bucket")
+		.argument("<file>", "Local path to write the downloaded bytes to")
+		.description("Download an object's bytes from a bucket to a local file")
+		.option("--expires <seconds>", "Download URL expiry in seconds", "3600")
+		.action(async (bucketIdentifier, key, filePath, options) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching buckets...");
+				const buckets = await client.storage.allByOrganization.query();
+				const bucket = findBucket(buckets as any[], bucketIdentifier);
+				if (!bucket) {
+					failSpinner();
+					const suggestions = findSimilar(
+						bucketIdentifier,
+						buckets.map((b: any) => b.name),
+					);
+					throw new NotFoundError(
+						"Storage bucket",
+						bucketIdentifier,
+						suggestions,
+					);
+				}
+				const bucketId = bucket.bucketId || bucket.id;
+				const _urlSpinner = startSpinner("Generating download URL...");
+				const result = (await client.storage.getDownloadUrl.mutate({
+					bucketId,
+					fileName: key,
+					expiresIn: Number.parseInt(options.expires || "3600"),
+				} as any)) as any;
+				const downloadUrl = result.url || result;
+				if (!downloadUrl || typeof downloadUrl !== "string") {
+					failSpinner();
+					throw new CliError("The platform did not return a download URL.");
+				}
+				const _getSpinner = startSpinner("Downloading...");
+				const res = await fetch(downloadUrl, { method: "GET" });
+				if (!res.ok) {
+					failSpinner();
+					const detail = await res.text().catch(() => "");
+					throw new CliError(
+						`Download failed (HTTP ${res.status} ${res.statusText})${
+							detail ? `: ${detail.slice(0, 200)}` : ""
+						}.`,
+					);
+				}
+				const bytes = Buffer.from(await res.arrayBuffer());
+				try {
+					writeFileSync(filePath, bytes);
+				} catch (writeErr) {
+					failSpinner();
+					throw new CliError(
+						`Could not write to "${filePath}": ${
+							writeErr instanceof Error ? writeErr.message : String(writeErr)
+						}`,
+					);
+				}
+				succeedSpinner("File downloaded.");
+				if (isJsonMode()) {
+					outputData({
+						downloaded: true,
+						bucketId,
+						key,
+						path: filePath,
+						size: bytes.byteLength,
+					});
+					return;
+				}
+				quietOutput(filePath);
+				log("");
+				log(
+					`Downloaded ${colors.cyan(key)} → ${colors.bold(filePath)} (${formatBytes(bytes.byteLength)}).`,
+				);
+				log("");
 			} catch (err) {
 				failSpinner();
 				handleError(err);

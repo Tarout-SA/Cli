@@ -19,6 +19,7 @@
  *  CONTROL (mutating, not destructive — no hint):
  *   - db_create .......... postgres.create / mysql.create
  *   - db_sql ............. postgres.executeSql (postgres-only)
+ *   - db_import .......... postgres.executeSql from `sql` or a local `file` (postgres-only)
  *   - db_restart ......... postgres/mysql.changeStatus → "running"
  *   - db_stop ............ postgres/mysql.changeStatus → "stopped"
  *   - db_reactivate ...... postgres/mysql.reactivate
@@ -31,8 +32,8 @@
  *   - db_delete .......... postgres.remove / mysql.remove
  *   - db_restore ......... backup.restoreBackupWithLogs — see note below
  *
- * Postgres-only tools (db_sql / db_tables / db_preview / db_analytics /
- * db_external_access) reject MySQL with INVALID_ARGUMENTS BEFORE withAuth so
+ * Postgres-only tools (db_sql / db_import / db_tables / db_preview /
+ * db_analytics / db_external_access) reject MySQL with INVALID_ARGUMENTS BEFORE withAuth so
  * callers see the argument problem instead of an auth error when
  * unauthenticated. db_sql keeps its inline rejection; the tools added later
  * share postgresOnlyRejection().
@@ -57,6 +58,7 @@
  * firing a doomed request. Swap in a mutation-based restore endpoint if one is
  * added platform-side.
  */
+import { readFileSync } from "node:fs";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { getCurrentProfile } from "../../lib/config.js";
@@ -300,6 +302,65 @@ export function registerDbTools(server: McpServer): void {
 				const result = (await client.postgres.executeSql.mutate({
 					postgresId: id,
 					sql,
+				})) as unknown;
+				return result;
+			});
+		},
+	);
+
+	server.registerTool(
+		"db_import",
+		{
+			title: "Import/restore a Postgres database from SQL (Postgres only)",
+			description:
+				"Runs a SQL dump against a Postgres database via postgres.executeSql — the 'upload/restore a database' path. Provide the SQL inline as `sql`, OR a local `file` path the MCP server reads from disk. MySQL is not supported — use `call` for mysql-specific ops.",
+			inputSchema: {
+				type: dbType,
+				db: dbRef,
+				sql: z
+					.string()
+					.optional()
+					.describe("SQL to run. Provide this OR `file`."),
+				file: z
+					.string()
+					.optional()
+					.describe(
+						"Path to a local .sql file the MCP server reads. Provide this OR `sql`.",
+					),
+			},
+		},
+		async ({ type, db, sql, file }) => {
+			if (type !== "postgres") return postgresOnlyRejection("db_import");
+			if ((sql && file) || (!sql && !file)) {
+				return errorResult({
+					error: "Provide exactly one of `sql` or `file`.",
+					code: "INVALID_ARGUMENTS",
+				});
+			}
+			let sqlText = sql ?? "";
+			if (file) {
+				try {
+					sqlText = readFileSync(file, "utf8");
+				} catch (readErr) {
+					return errorResult({
+						error: `Could not read SQL file "${file}": ${
+							readErr instanceof Error ? readErr.message : String(readErr)
+						}`,
+						code: "INVALID_ARGUMENTS",
+					});
+				}
+			}
+			if (!sqlText.trim()) {
+				return errorResult({
+					error: file ? `SQL file "${file}" is empty.` : "`sql` is empty.",
+					code: "INVALID_ARGUMENTS",
+				});
+			}
+			return withAuth(async (client) => {
+				const { id } = await resolveDbRef(client, db, "postgres");
+				const result = (await client.postgres.executeSql.mutate({
+					postgresId: id,
+					sql: sqlText,
 				})) as unknown;
 				return result;
 			});

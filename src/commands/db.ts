@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import type { Command } from "commander";
 import { getApiClient } from "../lib/api.js";
 import { getCurrentProfile, isLoggedIn } from "../lib/config.js";
@@ -1452,6 +1453,96 @@ export function registerDbCommands(program: Command) {
 				);
 				log("");
 				log(colors.dim(`${rows.length} row${rows.length === 1 ? "" : "s"}`));
+			} catch (err) {
+				handleError(err);
+			}
+		});
+
+	// ── Import SQL dump (Postgres) ─────────────────────────────────────────────────
+	db.command("import")
+		.argument("<db>", "Postgres database ID or name")
+		.argument("<file>", "Path to a local .sql file to execute")
+		.description(
+			"Import/restore a PostgreSQL database from a local .sql dump (runs it as SQL)",
+		)
+		.action(async (dbIdentifier, filePath) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Finding database...");
+				const allDbs = await getAllDatabases(client);
+				const dbSummary = findDatabase(allDbs, dbIdentifier);
+				if (!dbSummary) {
+					failSpinner();
+					const suggestions = findSimilar(
+						dbIdentifier,
+						allDbs.map((d) => d.name),
+					);
+					throw new NotFoundError("Database", dbIdentifier, suggestions);
+				}
+				if (dbSummary.type !== "postgres") {
+					failSpinner();
+					throw new CliError(
+						"SQL import is only supported for PostgreSQL databases.",
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+				succeedSpinner();
+				// Read the whole dump and send it as one executeSql call, mirroring
+				// `db sql` (the server caps SQL length and rejects an over-large dump).
+				let sql: string;
+				try {
+					sql = readFileSync(filePath, "utf8");
+				} catch (readErr) {
+					throw new CliError(
+						`Could not read SQL file "${filePath}": ${
+							readErr instanceof Error ? readErr.message : String(readErr)
+						}`,
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+				if (!sql.trim()) {
+					throw new CliError(
+						`SQL file "${filePath}" is empty.`,
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+				const _importSpinner = startSpinner("Importing SQL...");
+				const result = await client.postgres.executeSql.mutate({
+					postgresId: dbSummary.id,
+					sql,
+				} as any);
+				succeedSpinner("SQL imported.");
+				if (isJsonMode()) {
+					outputData(result);
+					return;
+				}
+				const r = result as any;
+				const rows = Array.isArray(result) ? result : r?.rows || [];
+				if (rows.length > 0) {
+					const cols = Object.keys(rows[0]);
+					log("");
+					table(
+						cols,
+						rows.map((row: any) =>
+							cols.map((c) => String(row[c] ?? "NULL").slice(0, 40)),
+						),
+					);
+					log("");
+					log(colors.dim(`${rows.length} row${rows.length === 1 ? "" : "s"}`));
+				} else {
+					const affected = r?.rowCount;
+					const command = r?.command;
+					log("");
+					log(
+						`Import complete${command ? ` (${command})` : ""}${
+							typeof affected === "number"
+								? ` — ${affected} row${affected === 1 ? "" : "s"} affected`
+								: ""
+						}.`,
+					);
+					log("");
+				}
 			} catch (err) {
 				handleError(err);
 			}
