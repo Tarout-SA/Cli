@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0]
+
+### Added
+
+- **Full agent parity for databases and object storage over MCP.** The MCP
+  server grew from 39 to 65 tools so an agent can do everything a human can:
+  - DB: `db_tables`, `db_preview` (browse data), `db_import` (run a `.sql`
+    file), `db_analytics`, `db_stats`, `db_backups`, `db_backup_now`,
+    `db_backup_download`, `db_restore`, `db_restart`, `db_stop`,
+    `db_reactivate`, `db_update`, `db_attach`, `db_detach`,
+    `db_external_access` (on top of the existing list/create/info/credentials/
+    sql/delete).
+  - Storage: `storage_upload` / `storage_download` (real byte transfer, not
+    just signed URLs), `storage_delete_file`, `storage_create_folder`,
+    `storage_move`, `storage_file_versions`, `storage_restore_version`, and
+    S3 access-key custody (`storage_access_keys`, `storage_access_key_create`,
+    `storage_access_key_revoke`).
+- **CLI `tarout db import <db> <file>`** — runs a local `.sql` file against a
+  Postgres database (schema/seed/migration SQL; bounded by the server's 10k
+  statement cap — a full pg_dump restore uses the backup/restore flow instead).
+- **CLI `tarout storage put <bucket> <key> <file>` / `storage get <bucket>
+  <key> <file>`** — transfer real object bytes (presigned PUT/GET under the
+  hood).
+- `storage_access_key_create`'s one-time secret is allowlisted through the MCP
+  result sanitizer so the caller actually receives it.
+
+### Fixed
+
+- `tarout storage download-url` and `storage version-url` called
+  `getDownloadUrl` / `getVersionDownloadUrl` as tRPC queries, but both are
+  mutations on the platform — the commands failed. Now call `.mutate`.
+
 ## [1.3.2]
 
 ### Added
