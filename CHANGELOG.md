@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2]
+
+### Added
+
+- `domains add-external` output now renders the full routing contract: apex A
+  records or a CNAME with the correct record name (previously always `@`), the
+  one-time `_tarout-verification` ownership TXT (previously omitted), and the
+  **Proxied (orange cloud)** requirement for root domains on Cloudflare-hosted
+  DNS — matching the platform's new flattened-CNAME apex support.
+
+### Fixed
+
+- `domains instructions` read response fields the API doesn't send
+  (`cloudflareManaged`/`cloudflareNameservers`); now reads `managedDns`/
+  `nameservers`, so managed-DNS domains render correctly.
+- `PRECONDITION_FAILED` platform errors (e.g. a root-domain connect the
+  platform can't route) now exit with code 2 (invalid arguments) instead of a
+  generic 1.
+
 ## [1.3.1]
 
 ### Changed

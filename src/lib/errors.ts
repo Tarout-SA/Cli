@@ -264,6 +264,9 @@ function mapTrpcErrorCode(code: string): number {
 		NOT_FOUND: ExitCode.NOT_FOUND,
 		BAD_REQUEST: ExitCode.INVALID_ARGUMENTS,
 		PARSE_ERROR: ExitCode.INVALID_ARGUMENTS,
+		// A capability the platform has (deliberately) not enabled — e.g. root
+		// domain connects before Apex Proxying. Invalid input, not a crash.
+		PRECONDITION_FAILED: ExitCode.INVALID_ARGUMENTS,
 	};
 	return mapping[code] || ExitCode.GENERAL_ERROR;
 }

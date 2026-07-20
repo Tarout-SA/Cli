@@ -228,20 +228,32 @@ tarout db connect mydb
 
 ### Domains
 
+External (customer-owned) domains connect through one flow: **add-external → DNS records → verify → link to app**.
+
 | Command | Description |
 |---------|-------------|
 | `tarout domains list` | List domains |
-| `tarout domains link <app> <domain>` | Link a custom domain to an application |
+| `tarout domains add-external <hostname>` | Register an external hostname (creates the edge hostname) |
+| `tarout domains instructions <hostname>` | Show the exact DNS records to create |
+| `tarout domains verify <hostname>` | Check DNS configuration |
+| `tarout domains wait-verified <hostname>` | Poll until verified (`--timeout`, `--interval`) |
+| `tarout domains app link-to-app --domain-id <id> --app-id <id>` | Attach the verified domain to an app |
 | `tarout domains unlink <domain>` | Unlink a domain from an application |
-| `tarout domains verify <domain>` | Check DNS configuration |
 
 ```bash
-# Link a custom domain to an app
-tarout domains link my-app api.example.com
-
-# Verify DNS is configured correctly
-tarout domains verify api.example.com
+# 1. Register the hostname, 2. add the records it prints, 3. verify, 4. attach
+tarout domains add-external www.example.com
+tarout domains instructions www.example.com
+tarout domains wait-verified www.example.com --timeout 1800
+tarout domains app link-to-app --domain-id <domain-id> --app-id <app-id>
 ```
+
+Root domains (`example.com`) connect only when the domain's DNS is hosted on
+Cloudflare: the CLI instructs a root CNAME that must be set to **Proxied
+(orange cloud)**. On other DNS providers, connect `www.example.com` and
+redirect the root to it. Hostnames under a Tarout-registered domain use
+`tarout domains app link-registered` instead (`domains link` is retired and
+always rejected by the platform).
 
 ### Organizations & Environments
 

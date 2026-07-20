@@ -23,6 +23,7 @@ import {
 	shouldSkipConfirmation,
 	success,
 	table,
+	warn,
 } from "../lib/output.js";
 import { ExitCode, exit } from "../utils/exit-codes.js";
 import { confirm, input } from "../utils/prompts.js";
@@ -372,23 +373,64 @@ export function registerDomainsCommands(program: Command) {
 					`Domain ID: ${colors.dim(result.domain.domainId)}`,
 				]);
 
-				if (result.cnameTarget) {
-					log("Add a CNAME record at your DNS provider:");
+				// Render the routing contract the server computed (exact relative
+				// record names included). Older platforms don't send routingRecords —
+				// fall back to deriving A records for a proxied apex, else a CNAME.
+				const apexIps: string[] = Array.isArray(result.apexIps)
+					? result.apexIps
+					: [];
+				const routingRecords: Array<{
+					type: string;
+					name: string;
+					value: string;
+				}> = Array.isArray(result.routingRecords)
+					? result.routingRecords
+					: result.isApex && apexIps.length > 0
+						? apexIps.map((ip) => ({ type: "A", name: "@", value: ip }))
+						: result.cnameTarget
+							? [
+									{
+										type: "CNAME",
+										name: result.isApex ? "@" : domainName,
+										value: result.cnameTarget,
+									},
+								]
+							: [];
+				if (routingRecords.length > 0) {
+					log("Add this record at your DNS provider:");
 					log("");
-					log(`  Type:   ${colors.cyan("CNAME")}`);
-					log(`  Name:   ${colors.cyan("@")}`);
-					log(`  Target: ${colors.cyan(result.cnameTarget)}`);
-					log("");
-					log(
-						`Then verify: ${colors.dim(`tarout domains verify ${result.domain.domainId.slice(0, 8)}`)}`,
-					);
-					log("");
-					log(
-						colors.dim(
-							"SSL is provisioned automatically once the CNAME propagates (usually a few minutes).",
-						),
-					);
+					for (const record of routingRecords) {
+						log(`  Type:   ${colors.cyan(record.type)}`);
+						log(`  Name:   ${colors.cyan(record.name)}`);
+						log(`  Value:  ${colors.cyan(record.value)}`);
+						log("");
+					}
+					if (result.apexViaCname) {
+						warn(
+							"Set the root CNAME to Proxied (orange cloud) in Cloudflare — a DNS-only root record will not route.",
+						);
+						log("");
+					}
 				}
+				if (result.ownershipVerification) {
+					log("Also add this one-time ownership TXT record:");
+					log("");
+					log(`  Type:   ${colors.cyan("TXT")}`);
+					log(`  Name:   ${colors.cyan(result.ownershipVerification.name)}`);
+					log(
+						`  Value:  ${colors.cyan(result.ownershipVerification.value)}`,
+					);
+					log("");
+				}
+				log(
+					`Then verify: ${colors.dim(`tarout domains verify ${result.domain.domainId.slice(0, 8)}`)}`,
+				);
+				log("");
+				log(
+					colors.dim(
+						"SSL is provisioned automatically once the record propagates (usually a few minutes).",
+					),
+				);
 			} catch (err) {
 				handleError(err);
 			}
@@ -456,11 +498,43 @@ export function registerDomainsCommands(program: Command) {
 					);
 					log("");
 					if (isCfSaas && domain.cnameTarget) {
-						log("Ensure you have added a CNAME record at your DNS provider:");
+						// Same contract as add-external: A records only for a proxied
+						// apex (stored apexIps); a root CNAME for the flattened apex
+						// contract; the hostname-named CNAME for subdomains.
+						const pendingApexIps: string[] = Array.isArray(domain.apexIps)
+							? domain.apexIps
+							: [];
+						const pendingRecords =
+							domain.isApex && pendingApexIps.length > 0
+								? pendingApexIps.map((ip: string) => ({
+										type: "A",
+										name: "@",
+										value: ip,
+									}))
+								: [
+										{
+											type: "CNAME",
+											name: domain.isApex ? "@" : domain.domainName,
+											value: domain.cnameTarget,
+										},
+									];
+						log("Ensure you have added this record at your DNS provider:");
 						log("");
-						log(`  Type:   ${colors.cyan("CNAME")}`);
-						log(`  Name:   ${colors.cyan("@")}`);
-						log(`  Target: ${colors.cyan(domain.cnameTarget)}`);
+						for (const record of pendingRecords) {
+							log(`  Type:   ${colors.cyan(record.type)}`);
+							log(`  Name:   ${colors.cyan(record.name)}`);
+							log(`  Value:  ${colors.cyan(record.value)}`);
+							log("");
+						}
+						if (domain.isApex && pendingApexIps.length === 0) {
+							warn(
+								"Root CNAME records only work on Cloudflare-hosted DNS and must be set to Proxied (orange cloud) — a DNS-only root record will not route.",
+							);
+							log("");
+						}
+						log(
+							`Exact records: ${colors.dim(`tarout domains instructions ${domain.domainName}`)}`,
+						);
 						if (result.sslStatus && result.sslStatus !== "active") {
 							log("");
 							log(
@@ -470,7 +544,7 @@ export function registerDomainsCommands(program: Command) {
 						log("");
 						log(
 							colors.dim(
-								"CNAME changes propagate in minutes. SSL is provisioned automatically.",
+								"DNS changes propagate in minutes. SSL is provisioned automatically.",
 							),
 						);
 					} else if (
@@ -669,11 +743,11 @@ export function registerDomainsCommands(program: Command) {
 				box("DNS Setup", [
 					`Domain: ${colors.cyan(domain.host)}`,
 					`Status: ${domain.isVerified ? colors.success("Verified") : colors.warn("Pending verification")}`,
-					instructions.cloudflareManaged
+					instructions.managedDns
 						? colors.success("DNS automatically managed by Tarout")
 						: "Add these records at your DNS provider:",
 				]);
-				if (!instructions.cloudflareManaged && instructions.records?.length) {
+				if (!instructions.managedDns && instructions.records?.length) {
 					log("");
 					for (const r of instructions.records as Array<{
 						type: string;
@@ -688,10 +762,10 @@ export function registerDomainsCommands(program: Command) {
 					log("");
 					log(colors.dim(instructions.instructions));
 				}
-				if (instructions.cloudflareNameservers?.length) {
+				if (instructions.nameservers?.length) {
 					log("");
 					log("Or update nameservers to:");
-					for (const ns of instructions.cloudflareNameservers as string[]) {
+					for (const ns of instructions.nameservers as string[]) {
 						log(`  ${colors.cyan(ns)}`);
 					}
 				}
