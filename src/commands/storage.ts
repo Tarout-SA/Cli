@@ -568,7 +568,7 @@ export function registerStorageCommands(program: Command) {
 					throw new NotFoundError("Storage bucket", bucketIdentifier);
 				}
 
-				const result = await client.storage.getDownloadUrl.query({
+				const result = await client.storage.getDownloadUrl.mutate({
 					bucketId: bucket.bucketId || bucket.id,
 					fileName,
 					expiresIn: options.expires || 3600,
@@ -1043,7 +1043,7 @@ export function registerStorageCommands(program: Command) {
 				}
 				const bucketId = bucket.bucketId || bucket.id;
 				const _urlSpinner = startSpinner("Generating version download URL...");
-				const result = await client.storage.getVersionDownloadUrl.query({
+				const result = await client.storage.getVersionDownloadUrl.mutate({
 					bucketId,
 					fileName,
 					versionId,

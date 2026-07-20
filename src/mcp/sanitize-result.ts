@@ -27,6 +27,10 @@ const SENSITIVE_KEY_SUBSTRINGS = [
 export const CREDENTIAL_ALLOWLISTED_TOOLS = new Set([
 	"db_credentials",
 	"storage_credentials",
+	// Mints a new S3 access key and returns its ONE-TIME secret — the whole
+	// point of the tool. Without this the sanitizer masks the `secret` field and
+	// the caller can never recover it (the platform never shows it again).
+	"storage_access_key_create",
 ]);
 
 // Matches the password segment of a credential URL (scheme://user:pass@host)
