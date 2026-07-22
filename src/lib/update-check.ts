@@ -1,10 +1,16 @@
 /**
- * @fileoverview Self-update on deploy. When `tarout up` / `tarout deploy`
- * starts, the CLI asks the npm registry for the latest published version; if a
+ * @fileoverview Self-update on every command. Before running any `tarout`
+ * command, the CLI asks the npm registry for the latest published version; if a
  * newer one exists it installs it (`npm install -g @tarout/cli@<latest>` — the
  * same channel install.sh and the docs use) and re-executes the original
- * command with the fresh binary, so every deploy runs the current CLI without
- * the user doing anything.
+ * command with the fresh binary, so the CLI (and any agent driving it) always
+ * runs the current version without anyone doing anything.
+ *
+ * The network check is THROTTLED: it hits npm at most once per interval
+ * (default 3h, `TAROUT_UPDATE_CHECK_INTERVAL_SECONDS` overrides; 0 = every
+ * command), so ordinary commands stay fast — the throttle window is a single
+ * local config read. `tarout up` / `tarout deploy` force an immediate check
+ * (bypass the throttle) so a deploy is never on a stale CLI.
  *
  * Deliberately conservative:
  *   - Fail-open everywhere: registry unreachable, npm missing, install error —
@@ -18,11 +24,28 @@
  */
 
 import { spawnSync } from "node:child_process";
+import {
+	getLastUpdateCheckAt,
+	setLastUpdateCheckAt,
+} from "./config.js";
 import { stringifyJson } from "../utils/json.js";
 import { colors, info, isJsonMode, isQuietMode, warn } from "./output.js";
 
 const REGISTRY_LATEST_URL = "https://registry.npmjs.org/@tarout/cli/latest";
 const FETCH_TIMEOUT_MS = 2500;
+const DEFAULT_THROTTLE_MS = 3 * 60 * 60 * 1000; // check npm at most once per 3h
+
+/**
+ * Throttle window in ms. `TAROUT_UPDATE_CHECK_INTERVAL_SECONDS` overrides the
+ * 3h default; set it to 0 to check on literally every command.
+ */
+function throttleMs(): number {
+	const raw = process.env.TAROUT_UPDATE_CHECK_INTERVAL_SECONDS;
+	if (raw == null || raw === "") return DEFAULT_THROTTLE_MS;
+	const seconds = Number.parseInt(raw, 10);
+	if (Number.isNaN(seconds) || seconds < 0) return DEFAULT_THROTTLE_MS;
+	return seconds * 1000;
+}
 
 /** Numeric-triple semver comparison; prerelease/build suffixes are ignored. */
 export function isNewerVersion(current: string, latest: string): boolean {
@@ -87,6 +110,8 @@ function announceUpdate(from: string, to: string): void {
 export async function maybeSelfUpdate(options: {
 	currentVersion: string;
 	disabled?: boolean;
+	/** up/deploy pass true to check immediately, bypassing the throttle. */
+	force?: boolean;
 }): Promise<void> {
 	if (options.disabled) return;
 	if (process.env.TAROUT_UPDATE_REEXEC) return;
@@ -95,6 +120,22 @@ export async function maybeSelfUpdate(options: {
 		process.env.TAROUT_NO_UPDATE_CHECK !== "0"
 	) {
 		return;
+	}
+
+	// Throttle the network check on ordinary commands so the CLI stays current
+	// as it is used without adding a registry round-trip to every invocation.
+	if (!options.force) {
+		const interval = throttleMs();
+		if (interval > 0 && Date.now() - getLastUpdateCheckAt() < interval) {
+			return;
+		}
+	}
+	// Stamp the check time up front so a slow/failed registry call doesn't make
+	// every subsequent command retry it within the same window.
+	try {
+		setLastUpdateCheckAt(Date.now());
+	} catch {
+		// A read-only/unwritable config must not break the command — fail open.
 	}
 
 	const latest = await fetchLatestVersion();

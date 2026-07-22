@@ -1,18 +1,33 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * Self-update on deploy (src/lib/update-check.ts): the version comparison must
- * be strict (only a genuinely newer registry version triggers an update), the
- * registry probe must fail open (null on timeout/HTTP error/bad payload), and
- * every opt-out guard must short-circuit before any network call — a deploy
- * must never hang or die because the update path misbehaved.
+ * Self-update on every command (src/lib/update-check.ts): the version
+ * comparison must be strict (only a genuinely newer registry version triggers
+ * an update), the registry probe must fail open (null on timeout/HTTP error/bad
+ * payload), every opt-out guard must short-circuit before any network call, and
+ * the throttle must skip the registry unless the interval elapsed (force
+ * bypasses it) — a command must never hang or die because the update path
+ * misbehaved.
  */
+
+// Deterministic, side-effect-free throttle state (no real config writes).
+const mockConfig = vi.hoisted(() => ({ last: 0 }));
+vi.mock("../src/lib/config.js", () => ({
+	getLastUpdateCheckAt: () => mockConfig.last,
+	setLastUpdateCheckAt: (ts: number) => {
+		mockConfig.last = ts;
+	},
+}));
 
 import {
 	fetchLatestVersion,
 	isNewerVersion,
 	maybeSelfUpdate,
 } from "../src/lib/update-check.js";
+
+beforeEach(() => {
+	mockConfig.last = 0; // never checked → throttle allows the check
+});
 
 afterEach(() => {
 	vi.unstubAllGlobals();
@@ -123,5 +138,49 @@ describe("maybeSelfUpdate guards", () => {
 		await expect(
 			maybeSelfUpdate({ currentVersion: "1.2.0" }),
 		).resolves.toBeUndefined();
+	});
+});
+
+describe("maybeSelfUpdate throttle", () => {
+	it("skips the registry when checked within the interval", async () => {
+		mockConfig.last = Date.now(); // just checked
+		const fetchSpy = vi.fn();
+		vi.stubGlobal("fetch", fetchSpy);
+		await maybeSelfUpdate({ currentVersion: "1.2.0" });
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it("checks the registry again after the interval elapses", async () => {
+		mockConfig.last = Date.now() - 4 * 60 * 60 * 1000; // 4h ago (> 3h default)
+		const fetchSpy = vi.fn(async () => ({
+			ok: true,
+			json: async () => ({ version: "1.2.0" }),
+		}));
+		vi.stubGlobal("fetch", fetchSpy);
+		await maybeSelfUpdate({ currentVersion: "1.2.0" });
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("force bypasses the throttle even when just checked", async () => {
+		mockConfig.last = Date.now();
+		const fetchSpy = vi.fn(async () => ({
+			ok: true,
+			json: async () => ({ version: "1.2.0" }),
+		}));
+		vi.stubGlobal("fetch", fetchSpy);
+		await maybeSelfUpdate({ currentVersion: "1.2.0", force: true });
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("TAROUT_UPDATE_CHECK_INTERVAL_SECONDS=0 checks on every command", async () => {
+		vi.stubEnv("TAROUT_UPDATE_CHECK_INTERVAL_SECONDS", "0");
+		mockConfig.last = Date.now(); // just checked, but interval 0 → check anyway
+		const fetchSpy = vi.fn(async () => ({
+			ok: true,
+			json: async () => ({ version: "1.2.0" }),
+		}));
+		vi.stubGlobal("fetch", fetchSpy);
+		await maybeSelfUpdate({ currentVersion: "1.2.0" });
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
 	});
 });

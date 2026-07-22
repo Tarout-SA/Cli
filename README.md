@@ -320,17 +320,22 @@ These flags work with all commands:
 | `--quiet, -q` | Minimal output (errors only) |
 | `--verbose, -v` | Extra debug information |
 | `--no-color` | Disable colored output |
-| `--no-update-check` | Skip the automatic CLI self-update on `up`/`deploy` |
+| `--no-update-check` | Skip the automatic CLI self-update for this command |
 
-### Self-update on deploy
+### Self-update on every command
 
-`tarout up` and `tarout deploy` check npm for a newer `@tarout/cli` before
-running. When one exists, the CLI installs it globally and re-runs your exact
-command on the new version — no action needed. The check fails open (offline or
-npm errors just continue on the current version). Opt out per-invocation with
-`--no-update-check` or permanently with `TAROUT_NO_UPDATE_CHECK=1`. Under
-`--json` the update is announced as a `{ "type": "event", "event": "cli_update" }`
-line on stderr.
+Before running any command, the CLI checks npm for a newer `@tarout/cli`; when
+one exists it installs it globally and re-runs your exact command on the new
+version — so the CLI (and any agent driving it) always runs the latest, with no
+action needed. The network check is **throttled** to at most once every 3 hours
+(so ordinary commands stay fast — the throttle window is a single local read);
+`tarout up` / `tarout deploy` force an immediate check so a deploy is never on a
+stale CLI. It fails open (offline or npm errors just continue on the current
+version). Opt out per-invocation with `--no-update-check` or permanently with
+`TAROUT_NO_UPDATE_CHECK=1`; tune the throttle with
+`TAROUT_UPDATE_CHECK_INTERVAL_SECONDS` (set `0` to check on every command).
+Under `--json` the update is announced as a
+`{ "type": "event", "event": "cli_update" }` line on stderr.
 
 ## AI & Automation Usage
 

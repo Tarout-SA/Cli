@@ -96,6 +96,11 @@ Run Tarout commands with \`--json\` for machine-readable output, and run them
 approval rules match the command). New apps and databases automatically use this
 **project's subscribed tier** — don't pass \`--plan free\` / \`--database-plan free\`.
 
+**The CLI keeps itself up to date.** Before running a command it checks npm for a
+newer \`@tarout/cli\` (throttled) and, if found, installs it and re-runs the command
+on the new version — so you never need to update or reinstall it yourself. A
+\`{ "type": "event", "event": "cli_update" }\` line on stderr just means it upgraded.
+
 **Auth is hands-free — run it yourself.** If a command reports you're not logged in
 (\`AUTH_ERROR\` / exit 3), run \`tarout login\` **directly**. It opens a browser on the
 user's machine and waits for sign-in — tell the user to finish in the browser, then

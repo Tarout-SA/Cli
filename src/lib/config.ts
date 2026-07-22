@@ -50,6 +50,8 @@ export interface Config {
 	currentProfile: string;
 	/** Map of profile names to profile data */
 	profiles: Record<string, Profile>;
+	/** Epoch ms of the last npm update check — throttles the self-update. */
+	lastUpdateCheckAt?: number;
 }
 
 /**
@@ -238,6 +240,16 @@ export function updateProfile(updates: Partial<Profile>): void {
  */
 export function listProfiles(): string[] {
 	return Object.keys(config.get("profiles"));
+}
+
+/** Epoch ms of the last self-update npm check (0 if never). */
+export function getLastUpdateCheckAt(): number {
+	return config.get("lastUpdateCheckAt") ?? 0;
+}
+
+/** Record that a self-update check just ran, to throttle the next one. */
+export function setLastUpdateCheckAt(ts: number): void {
+	config.set("lastUpdateCheckAt", ts);
 }
 
 // ==========================================

@@ -130,17 +130,19 @@ program
 			noColor: opts.color === false,
 		});
 
-		// Self-update on deploy: if a newer @tarout/cli is published, install it
-		// and re-exec this invocation on the new version (fail-open; opt out with
-		// --no-update-check / TAROUT_NO_UPDATE_CHECK). Only the deploy entry
-		// points update — a stale CLI everywhere else is harmless until it ships.
+		// Self-update on every command: if a newer @tarout/cli is published,
+		// install it and re-exec this invocation on the new version, so the CLI
+		// (and any agent driving it) always runs the current version. The network
+		// check is throttled (at most once per few hours) so ordinary commands
+		// stay fast; up/deploy force an immediate check so a deploy is never on a
+		// stale CLI. Fail-open; opt out with --no-update-check /
+		// TAROUT_NO_UPDATE_CHECK.
 		const sub = actionCommand?.name();
-		if (sub === "up" || sub === "deploy") {
-			await maybeSelfUpdate({
-				currentVersion: packageJson.version,
-				disabled: opts.updateCheck === false,
-			});
-		}
+		await maybeSelfUpdate({
+			currentVersion: packageJson.version,
+			disabled: opts.updateCheck === false,
+			force: sub === "up" || sub === "deploy",
+		});
 
 		// In agent mode, nudge the agent to run `tarout agent init` first when the
 		// project isn't allowlisted yet. Skipped for the `agent` namespace itself

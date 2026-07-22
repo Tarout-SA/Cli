@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0]
+
+### Changed
+
+- **Self-update now runs on every command, not just `up`/`deploy`.** Before
+  running any command the CLI checks npm for a newer `@tarout/cli` and, when
+  one exists, installs it and re-runs the command on the new version — so the
+  CLI (and any agent driving it) always runs the latest without anyone doing
+  anything. The network check is **throttled** to at most once every 3 hours
+  (a single local config read otherwise), so ordinary commands stay fast;
+  `up`/`deploy` still force an immediate check. Tune with
+  `TAROUT_UPDATE_CHECK_INTERVAL_SECONDS` (`0` = check on every command).
+  Fail-open and the existing opt-outs (`--no-update-check`,
+  `TAROUT_NO_UPDATE_CHECK=1`) are unchanged. The scaffolded agent block now
+  tells agents the CLI keeps itself up to date.
+
 ## [1.4.0]
 
 ### Added
