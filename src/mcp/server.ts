@@ -12,6 +12,7 @@ import { registerDbTools } from "./tools/db.js";
 import { registerDeployTools } from "./tools/deploy.js";
 import { registerDomainTools } from "./tools/domains.js";
 import { registerEnvTools } from "./tools/env.js";
+import { registerJobsTools } from "./tools/jobs.js";
 import { registerStorageTools } from "./tools/storage.js";
 import { guardServerHandlers } from "./runtime.js";
 
@@ -32,5 +33,6 @@ export function createMcpServer(): McpServer {
 	registerDomainTools(server);
 	registerBillingTools(server);
 	registerDeployTools(server);
+	registerJobsTools(server);
 	return server;
 }

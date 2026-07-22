@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Scheduled tasks (cron) in the CLI and for agents.** The platform's
+  `scheduledJob` router now has a dedicated command namespace and curated MCP
+  tools, so neither a human nor an agent has to fall back to `tarout call`.
+  - CLI `tarout jobs`: `list`, `info`, `create`, `update`, `delete` (alias
+    `rm`), `enable`, `disable`, `run`, `runs`. `--app` defaults to the linked
+    application (like `tarout dev` / `build`); `jobs list` without a link shows
+    every task in the organization.
+  - Both task kinds are covered: `--type http` fires a signed request at the
+    app's own URL, `--type command` runs a shell command inside the app's
+    running container (which requires a deployed app and a `--command`).
+  - `tarout jobs run <id> --wait` handles the asymmetry between them: HTTP runs
+    return their outcome inline, command runs are queued, so `--wait` polls the
+    run history until the new run lands and then prints its exit code and
+    captured output.
+  - Rejections come back actionable: not-yet-deployed app, the 60s HTTP timeout
+    cap, plan task limits and minimum interval, and bad cron/timezone all carry
+    the next command to run.
+- **7 MCP tools**: `job_list`, `job_info`, `job_create`, `job_update`,
+  `job_delete`, `job_run`, `job_runs` — with descriptions that spell out the
+  HTTP-vs-COMMAND split and that a queued command run must be collected via
+  `job_runs`.
+- **Deploy progress is no longer a black box.** `tarout deploy`/`up --wait` now
+  emits a forward-progress signal on every server-side phase change and at least
+  every 15s — a structured `{ "event": "deploy_progress", "phase", "status",
+  "elapsedSec" }` NDJSON line under `--json` (so an agent can tell *queued* from
+  *building* from *activating* instead of blind-polling), and a dim status line
+  interactively when the live log stream isn't already narrating. Reads the new
+  `phase` field the platform now returns on `deployment.one`.
+- **DB-TLS failures are now a categorized error with the exact fix.** The deploy
+  error classifier recognizes managed-Postgres TLS mismatches (`no pg_hba…no
+  encryption`, `SSL … required`, `sslmode`, self-signed cert) as a new
+  `database_tls` category — ranked ahead of the generic `network` pattern — and
+  returns the concrete node-postgres / Prisma-adapter ssl remedy instead of a
+  generic "unknown".
+
+### Changed
+
+- **`deploy`/`up --wait` client window raised 10 → 20 min, and a client-side
+  timeout no longer reads as a failure.** It now reports the deploy as *still
+  running* server-side with the last phase and a `tarout deploy:status` resume
+  command (`stillRunning: true` in the JSON envelope), so a slow-but-healthy
+  deploy stops surfacing as a false `DEPLOYMENT_TIMEOUT`.
+- **Self-update no longer forces an npm-registry round-trip on every automated
+  deploy.** In machine mode (`--json` or a non-TTY agent/CI run) `up`/`deploy`
+  fall back to the throttled self-update (still at most once per few hours)
+  instead of forcing an immediate check, removing up to ~2.5s from every deploy
+  in a tight agent edit→deploy loop. Interactive human deploys still force the
+  check (always-latest). Opt-outs unchanged.
+
 ## [1.5.0]
 
 ### Changed

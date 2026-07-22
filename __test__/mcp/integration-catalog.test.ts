@@ -89,6 +89,14 @@ const EXPECTED_TOOLS = [
 	"deploy",
 	"deployment_status",
 	"deployment_logs",
+	// Scheduled tasks (cron)
+	"job_list",
+	"job_info",
+	"job_create",
+	"job_update",
+	"job_delete",
+	"job_run",
+	"job_runs",
 ] as const;
 
 const NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;

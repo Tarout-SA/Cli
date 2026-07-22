@@ -77,7 +77,11 @@ import {
 	success,
 	table,
 } from "../lib/output.js";
-import { dbAddonKeyForPlanFamily, planFamily } from "../lib/plan-cart.js";
+import {
+	dbAddonKeyForPlanFamily,
+	planFamily,
+	purchasableDbAddonKeys,
+} from "../lib/plan-cart.js";
 import { streamDeploymentLogs } from "../lib/websocket.js";
 import { ExitCode, exit } from "../utils/exit-codes.js";
 import {
@@ -1488,10 +1492,6 @@ export async function promptEntitlementRemedy(
 		remedy.priceHalalas !== undefined
 			? ` (${formatPlanPrice(remedy.priceHalalas)})`
 			: "";
-	const targetedLabel =
-		remedy.kind === "plan_quantity"
-			? `Add one more app slot${price}`
-			: `Add just the ${remedy.targetName ?? remedy.targetKey}${price}`;
 	// Name the upgrade target (free → Starter, shared → Pro Small, …) so the
 	// choice reads as a concrete tier change rather than a vague "upgrade".
 	const upgradePlanKey = upgradeTargetPlan({ currentPlanKey, requestedPlan });
@@ -1500,6 +1500,15 @@ export async function promptEntitlementRemedy(
 	);
 	const upgradeLabel = `Upgrade to ${upgradePlanDef?.name ?? upgradePlanKey}`;
 
+	// A database-slot gate is satisfied by ANY tier — offer the whole menu so the
+	// user picks the tier they want (cheapest first) instead of one default.
+	const dbTiers =
+		remedy.kind === "addon" &&
+			(remedy.failedKey?.startsWith("db.") ||
+				remedy.targetKey?.startsWith("db."))
+			? databaseTierChoices(catalog, currentPlanKey)
+			: [];
+
 	log("");
 	log(colors.warn("That resource isn't included in your current plan."));
 	log("");
@@ -1507,6 +1516,58 @@ export async function promptEntitlementRemedy(
 	const UPGRADE = "__upgrade__";
 	const TARGETED = "__targeted__";
 	const CANCEL = "__cancel__";
+
+	if (dbTiers.length > 0) {
+		// One choice per database tier (+ upgrade + cancel). "upgrade the plan" is
+		// listed first as the highlighted default, then tiers cheapest-first.
+		const tierChoices = dbTiers.map((tier) => ({
+			name: dbTierBuyOption(tier).label,
+			value: tier.addonKey,
+		}));
+		const choice = await select<string>(
+			"How would you like to add a database?",
+			[
+				{ name: upgradeLabel, value: UPGRADE },
+				...tierChoices,
+				{ name: "Cancel", value: CANCEL },
+			],
+			{
+				field: "entitlement_remedy",
+				flag: "--plan <key> (upgrade) | tarout billing addon:buy <db.tier> (addon)",
+				context: {
+					failedEntitlementKey: failedKey,
+					remedyKind: remedy.kind,
+					upgradePlanKey,
+					databaseTiers: dbTiers.map((t) => ({
+						addonKey: t.addonKey,
+						command: t.command,
+					})),
+				},
+			},
+		);
+		if (choice === CANCEL) return false;
+		if (choice === UPGRADE) {
+			return promptUpgradeFromEntitlementError(
+				client,
+				err,
+				requestedPlan,
+				currentPlanKey,
+			);
+		}
+		const picked = dbTiers.find((t) => t.addonKey === choice);
+		return runInlineTargetedRemedy(client, {
+			...remedy,
+			targetKey: picked?.addonKey ?? choice,
+			targetName: picked?.name,
+			priceHalalas: picked?.priceHalalas,
+			command: picked?.command ?? remedy.command,
+		});
+	}
+
+	const targetedLabel =
+		remedy.kind === "plan_quantity"
+			? `Add one more app slot${price}`
+			: `Add just the ${remedy.targetName ?? remedy.targetKey}${price}`;
 	// "Upgrade the plan" is listed first so it is the highlighted default.
 	const choice = await select<string>(
 		"How would you like to add it?",
@@ -1741,6 +1802,56 @@ export interface RemedyOption {
 /** Max per-app reuse options listed before falling back to `tarout apps list`. */
 const MAX_REUSE_OPTIONS = 5;
 
+/** A managed-database tier the user can pick, with its catalog price. */
+interface DbTierChoice {
+	addonKey: string;
+	name: string;
+	priceHalalas?: number;
+	command: string;
+}
+
+/**
+ * The full set of managed-database tiers the project can buy — cheapest first,
+ * with catalog names + prices — so a "no database slot" gate lets the user pick
+ * ANY tier (Starter / Standard / Pro), not just the plan default. Returns []
+ * when the plan family isn't known to be paid (the caller falls back to the
+ * single generic db-addon option).
+ */
+export function databaseTierChoices(
+	catalog: Catalog | null,
+	currentPlanKey: string | undefined,
+): DbTierChoice[] {
+	const addons = catalog?.addons ?? [];
+	return purchasableDbAddonKeys(currentPlanKey)
+		.map((addonKey) => {
+			const def = addons.find((a) => (a.addonKey ?? a.key) === addonKey);
+			return {
+				addonKey,
+				name: def?.name ?? addonKey,
+				priceHalalas: def?.priceHalalas,
+				command: `tarout billing addon:buy ${addonKey} --wait`,
+			};
+		})
+		.sort(
+			(a, b) =>
+				(a.priceHalalas ?? Number.MAX_SAFE_INTEGER) -
+				(b.priceHalalas ?? Number.MAX_SAFE_INTEGER),
+		);
+}
+
+/** A DB tier as a buy `RemedyOption`, price shown in the label when known. */
+function dbTierBuyOption(tier: DbTierChoice): RemedyOption {
+	const price =
+		tier.priceHalalas !== undefined
+			? ` (${formatPlanPrice(tier.priceHalalas)})`
+			: "";
+	return {
+		action: "buy_addon",
+		label: `Add a ${tier.name}${price}`,
+		command: tier.command,
+	};
+}
+
 /**
  * The list of concrete actions that clear an entitlement gate. A targeted
  * remedy (addon / app-slot) is paired with the full plan upgrade so the caller
@@ -1766,21 +1877,34 @@ export function buildRemedyOptions(
 		const planDef = (catalog?.plans ?? []).find(
 			(p) => (p.planKey ?? p.key) === upgradePlan,
 		);
-		options.push(
-			{
+
+		// A database-slot gate is satisfied by ANY tier — present the full menu
+		// (Starter / Standard / Pro, cheapest first, priced) so the user chooses
+		// the tier they want instead of being pushed the plan default. Other
+		// addon gates (storage, domain, …) keep the single targeted option.
+		const dbTiers =
+			remedy.kind === "addon" &&
+			(remedy.failedKey?.startsWith("db.") ||
+				remedy.targetKey?.startsWith("db."))
+				? databaseTierChoices(catalog, currentPlanKey)
+				: [];
+		if (dbTiers.length > 0) {
+			for (const tier of dbTiers) options.push(dbTierBuyOption(tier));
+		} else {
+			options.push({
 				action: remedy.kind === "addon" ? "buy_addon" : "add_app_slot",
 				label:
 					remedy.kind === "addon"
 						? `Buy just the ${remedy.targetName ?? remedy.targetKey}`
 						: "Add one more app slot",
 				command: remedy.command,
-			},
-			{
-				action: "upgrade_plan",
-				label: `Upgrade to ${planDef?.name ?? upgradePlan}`,
-				command: `tarout billing upgrade ${upgradePlan} --wait`,
-			},
-		);
+			});
+		}
+		options.push({
+			action: "upgrade_plan",
+			label: `Upgrade to ${planDef?.name ?? upgradePlan}`,
+			command: `tarout billing upgrade ${upgradePlan} --wait`,
+		});
 	} else {
 		options.push({
 			action: "upgrade_plan",
@@ -1887,14 +2011,27 @@ export async function emitNeedsUpgrade(
 
 	const hint = buildNeedsUpgradeHint(remedy, options, retryCommand);
 
+	// For a database gate the primary/back-compat suggestion is the CHEAPEST
+	// tier (the first buy option), never the plan default — so an agent that
+	// reads only `nextCommand` still proposes the cheap tier. `options` remains
+	// the authoritative full menu.
+	const isDbGate =
+		remedy.kind === "addon" &&
+		(remedy.failedKey?.startsWith("db.") ||
+			remedy.targetKey?.startsWith("db."));
+	const cheapestBuy = isDbGate
+		? options.find((o) => o.action === "buy_addon")
+		: undefined;
+	const cheapestKey = cheapestBuy?.command.match(/addon:buy\s+(\S+)/)?.[1];
+
 	outputError("NEEDS_UPGRADE", message, {
 		failedEntitlementKey: failedKey,
 		remedyKind: remedy.kind,
 		// `suggestedPlan`/`nextCommand` retained for back-compat (the recommended
 		// targeted action); `options` is the authoritative choice list.
-		suggestedPlan: remedy.targetKey,
-		suggestedTarget: remedy.targetKey,
-		nextCommand: remedy.command,
+		suggestedPlan: cheapestKey ?? remedy.targetKey,
+		suggestedTarget: cheapestKey ?? remedy.targetKey,
+		nextCommand: cheapestBuy?.command ?? remedy.command,
 		options,
 		hint,
 		permissionHint: AGENT_BILLING_PERMISSION_HINT,
@@ -2882,7 +3019,7 @@ export async function ensureDatabasePlan(
 	log("");
 	log(
 		colors.dim(
-			`Your plan has no open database slot — adding the ${addonKey} add-on. Complete payment in the browser to continue.`,
+			`Your plan has no open database slot — adding the cheapest tier (${addonKey}). Want a bigger tier? Cancel and run \`tarout billing addon:buy db.standard\` or \`db.pro\`. Complete payment in the browser to continue.`,
 		),
 	);
 	const result = await performBillingChange(client, {
@@ -2942,33 +3079,49 @@ async function emitDatabaseAddonNeedsConsent(
 		fetchCatalogSafely(client) as Promise<Catalog | null>,
 		getCurrentPlanKeySafely(client),
 	]);
-	const buyCommand = `tarout billing addon:buy ${addonKey} --wait`;
 	const upgradePlan = upgradeTargetPlan({ currentPlanKey });
 	const upgradePlanDef = (catalog?.plans ?? []).find(
 		(p) => (p.planKey ?? p.key) === upgradePlan,
 	);
+
+	// Present EVERY database tier the project can buy (cheapest first, priced) so
+	// the user chooses — never push a single expensive default. Falls back to the
+	// resolved default addon when the tier menu can't be built.
+	const dbTiers = databaseTierChoices(catalog, currentPlanKey);
+	const buyOptions: RemedyOption[] =
+		dbTiers.length > 0
+			? dbTiers.map(dbTierBuyOption)
+			: [
+					{
+						action: "buy_addon",
+						label: `Buy the ${addonKey} database add-on`,
+						command: `tarout billing addon:buy ${addonKey} --wait`,
+					},
+				];
 	const options: RemedyOption[] = [
-		{
-			action: "buy_addon",
-			label: `Buy the ${addonKey} database add-on`,
-			command: buyCommand,
-		},
+		...buyOptions,
 		{
 			action: "upgrade_plan",
 			label: `Upgrade to ${upgradePlanDef?.name ?? upgradePlan}`,
 			command: `tarout billing upgrade ${upgradePlan} --wait`,
 		},
 	];
+	// The cheapest tier is the primary suggestion (back-compat single fields).
+	const cheapest = buyOptions[0];
+	const cheapestKey = dbTiers[0]?.addonKey ?? addonKey;
+	const optionLines = options
+		.map((o, i) => `(${i + 1}) ${o.label}: \`${o.command}\``)
+		.join("; ");
 	outputError(
 		"NEEDS_UPGRADE",
-		`Your plan has no open database slot — adding a managed database requires the ${addonKey} add-on.`,
+		"Your plan has no open database slot — pick a database tier to add, or upgrade your plan.",
 		{
 			remedyKind: "addon",
-			suggestedPlan: addonKey,
-			suggestedTarget: addonKey,
-			nextCommand: buyCommand,
+			suggestedPlan: cheapestKey,
+			suggestedTarget: cheapestKey,
+			nextCommand: cheapest?.command,
 			options,
-			hint: `Two ways to resolve this — ask the user which they prefer, do not choose for them: (1) ${options[0]?.label}: \`${options[0]?.command}\`; (2) ${options[1]?.label}: \`${options[1]?.command}\`. The chosen command opens the payment page and waits until it's confirmed, then retry your deploy.`,
+			hint: `Present ALL of these options to the user and let them choose — do not choose for them: ${optionLines}. The chosen command opens the payment page and waits until it's confirmed, then retry your deploy.`,
 			permissionHint: AGENT_BILLING_PERMISSION_HINT,
 		},
 	);
@@ -4909,6 +5062,32 @@ function sleep(ms: number): Promise<void> {
  * Stream deployment logs and wait for completion.
  * Used by `deploy --wait` to show real-time logs.
  */
+/**
+ * Human-friendly label for the server-side deployment `phase` (queued →
+ * provider_triggered/provider_preparing → cloud_build → succeeded/failed). Falls
+ * back to the coarse status when the server is older and doesn't send a phase.
+ */
+function deploymentPhaseLabel(
+	phase: string | undefined,
+	status: string,
+): string {
+	switch (phase) {
+		case "queued":
+			return "Queued — waiting for a build slot";
+		case "provider_triggered":
+		case "provider_preparing":
+			return "Preparing build";
+		case "cloud_build":
+			return "Building image";
+		case "succeeded":
+			return "Activating container";
+		case "failed":
+			return "Failed";
+		default:
+			return status === "running" ? "Deploying" : status;
+	}
+}
+
 export async function streamDeploymentWithLogs(
 	client: any,
 	deploymentId: string,
@@ -4930,6 +5109,13 @@ export async function streamDeploymentWithLogs(
 	const startTime = Date.now();
 	let wsConnected = false;
 	let lastStatus = deployment.status;
+	// Forward-progress signal so an agent (or a human on a WS-blocked network)
+	// can tell "waiting in queue" from "actively building" from "hung" — the
+	// coarse 5-value status can't. `phase` stays "queued" while the job waits for
+	// a worker and only advances once real work starts.
+	let lastPhase: string | undefined = deployment.phase;
+	let lastHeartbeatAt = Date.now();
+	const HEARTBEAT_MS = 15000;
 
 	// In environments where the WebSocket log stream can't connect (hosted MCP,
 	// sandboxes/CI that block raw WS), `logLines` stays empty even though the
@@ -4991,8 +5177,10 @@ export async function streamDeploymentWithLogs(
 		cleanup = stream.cleanup;
 	}
 
-	// Poll for deployment status
-	const maxWaitMs = 600000; // 10 minutes
+	// Poll for deployment status. The client wait window is aligned closer to the
+	// server's build budget so a slow-but-healthy deploy doesn't surface as a
+	// false timeout (the server keeps running it regardless of this cap).
+	const maxWaitMs = 1_200_000; // 20 minutes
 	const pollIntervalMs = 3000;
 
 	try {
@@ -5004,6 +5192,41 @@ export async function streamDeploymentWithLogs(
 				deploymentId,
 			});
 			lastStatus = updatedDeployment.status;
+
+			// Emit a forward-progress signal on phase change or every HEARTBEAT_MS,
+			// so a long build never looks hung. In JSON mode this is a structured
+			// NDJSON event an agent can react to; interactively it's a dim line,
+			// shown only when the live WS log stream isn't already narrating.
+			if (
+				lastStatus !== "done" &&
+				lastStatus !== "error" &&
+				lastStatus !== "cancelled"
+			) {
+				const phase = updatedDeployment.phase as string | undefined;
+				const phaseChanged = phase !== undefined && phase !== lastPhase;
+				const heartbeatDue = Date.now() - lastHeartbeatAt >= HEARTBEAT_MS;
+				if (phaseChanged || heartbeatDue) {
+					lastPhase = phase ?? lastPhase;
+					lastHeartbeatAt = Date.now();
+					const elapsedSec = Math.round((Date.now() - startTime) / 1000);
+					if (isJsonMode()) {
+						outputJsonLine({
+							type: "event",
+							event: "deploy_progress",
+							deploymentId,
+							phase: phase ?? null,
+							status: lastStatus,
+							elapsedSec,
+						});
+					} else if (!wsConnected) {
+						log(
+							colors.dim(
+								`… ${deploymentPhaseLabel(phase, lastStatus)} — ${elapsedSec}s`,
+							),
+						);
+					}
+				}
+			}
 
 			if (lastStatus === "done") {
 				// Give WebSocket a moment to flush remaining logs
@@ -5117,31 +5340,38 @@ export async function streamDeploymentWithLogs(
 			}
 		}
 
-		// Timeout
+		// Client wait window elapsed. The deploy is NOT failed — the server keeps
+		// running it — so the payload says so explicitly (last phase + a resume
+		// command) instead of a bare "timed out", which reads as failure.
 		cleanup?.();
 		await backfillLogsIfEmpty();
 		const duration = Math.round((Date.now() - startTime) / 1000);
+		const resumeCommand = `tarout deploy:status ${applicationId.slice(0, 8)}`;
 
 		if (isJsonMode()) {
-			outputError("DEPLOYMENT_TIMEOUT", "Deployment timed out", {
+			outputError("DEPLOYMENT_TIMEOUT", "Deployment still running", {
 				deploymentId,
 				duration,
+				stillRunning: true,
+				phase: lastPhase ?? null,
+				lastStatus,
+				resumeCommand,
 				logs: logLines,
 				errors: errors.length > 0 ? errors : undefined,
 			});
 		} else {
 			log("");
 			log(colors.dim("─".repeat(50)));
-			log(colors.warn("⚠ Deployment timed out"));
+			log(colors.warn("⚠ Still deploying after 20 minutes"));
 			log("");
 			log(
-				`The deployment is still running. Check status with: ${colors.dim(`tarout deploy:status ${applicationId.slice(0, 8)}`)}`,
+				`The deployment is still running server-side${lastPhase ? ` (phase: ${lastPhase})` : ""}. Resume with: ${colors.dim(resumeCommand)}`,
 			);
 			log("");
 		}
 
 		throw new DeploymentTimeoutError(
-			"Deployment timed out after 10 minutes",
+			"Deployment still running after 20 minutes",
 			deploymentId,
 		);
 	} finally {

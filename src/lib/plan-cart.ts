@@ -32,26 +32,41 @@ export function isPaidFamily(planKey?: string | null): boolean {
 }
 
 /**
- * The standalone *managed* database addon a plan family can purchase on top of
- * its subscription — mirrors the server's `getResourceAddonPolicyForPlan`
- * (`src/lib/subscription-resource-addons.ts`): SHARED buys `db.standard`,
- * DEDICATED buys `db.pro`; FREE/unknown can't buy a managed db addon.
+ * The DEFAULT managed-database addon a plan family buys on top of its
+ * subscription when the user doesn't pick a tier — the CHEAPEST valid tier, so
+ * "just add a database" never over-charges. The server accepts ANY db tier as a
+ * standalone buy on a paid plan (`assertResourceAddonsMatchPlan` validates
+ * `db.*` against the full purchasable set), so SHARED defaults to `db.starter`
+ * (the cheapest), DEDICATED to its bundled `db.pro` tier; FREE/unknown can't buy
+ * a managed db addon.
  *
- * Distinct from {@link resourceAddonKeysForPlan} (the `db.starter` ESTIMATOR key
- * used to bundle databases into a plan-onboarding checkout) — this is the key
- * that passes the server's `assertResourceAddonsMatchPlan` for a standalone buy.
+ * The user can always choose another tier — see {@link purchasableDbAddonKeys}
+ * for the full menu surfaced by the "no database slot" gate.
  */
 export function dbAddonKeyForPlanFamily(
 	planKey?: string | null,
 ): string | null {
 	switch (planFamily(planKey)) {
 		case "SHARED":
-			return "db.standard";
+			return "db.starter";
 		case "DEDICATED":
 			return "db.pro";
 		default:
 			return null;
 	}
+}
+
+/**
+ * Every managed-database addon tier a paid plan can buy standalone, cheapest
+ * first — mirrors the server's `getPurchasableDbAddonKeysForPlan`
+ * (`assertResourceAddonsMatchPlan` accepts any of these for `db.*` on a paid
+ * plan). This is the full menu the "no database slot" gate presents so the user
+ * chooses the tier they want. Empty for FREE / unknown.
+ */
+export function purchasableDbAddonKeys(planKey?: string | null): string[] {
+	return isPaidFamily(planKey)
+		? ["db.starter", "db.standard", "db.pro"]
+		: [];
 }
 
 export interface PlanResourceAddonKeys {

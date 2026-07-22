@@ -25,6 +25,7 @@ export type DeploymentErrorCategory =
 	| "timeout"
 	| "permission"
 	| "network"
+	| "database_tls"
 	| "unknown";
 
 /**
@@ -531,6 +532,36 @@ const ERROR_PATTERNS: ErrorPattern[] = [
 			"Check file permissions in the project",
 			"Ensure Dockerfile uses correct user",
 			"Avoid writing to restricted directories",
+		],
+	},
+	{
+		// Managed-Postgres TLS mismatch. Must come BEFORE the broad `network`
+		// pattern (a TLS refusal can also surface an ECONNREFUSED) so the precise
+		// remedy wins. The managed pooler negotiates TLS; node-postgres / drizzle
+		// / knex / the Prisma driver-adapter default to a plaintext connection and
+		// get rejected, while Prisma-native / libpq (sslmode=prefer) succeed —
+		// which is why migrations pass but the runtime adapter crashes.
+		patterns: [
+			/no pg_hba\.conf entry/i,
+			/no encryption/i,
+			/SSL\s*(?:connection\s*)?(?:is\s*)?required/i,
+			/server does not support SSL/i,
+			/pg_hba/i,
+			/sslmode/i,
+			/self[-\s]signed certificate/i,
+		],
+		category: "database_tls",
+		type: "runtime_error",
+		possibleCauses: [
+			"The managed PostgreSQL endpoint negotiates TLS, but the app's Postgres client connected without it",
+			"node-postgres / drizzle / knex / the Prisma driver-adapter default to a plaintext (no-TLS) connection",
+			"DATABASE_URL carries no sslmode and the client library does not read PGSSLMODE from the environment",
+		],
+		suggestedFixes: [
+			"node-postgres / pg Pool: construct it with `ssl: { rejectUnauthorized: false }` (or set PGSSLMODE=require)",
+			"Prisma driver-adapter (@prisma/adapter-pg): enable ssl on the Pool you pass to PrismaPg",
+			"Prisma native engine / psql: append `?sslmode=require` to the connection string",
+			"Redeploy once the client enables TLS — the managed database already offers it",
 		],
 	},
 	{

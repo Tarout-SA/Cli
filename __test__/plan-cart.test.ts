@@ -4,6 +4,7 @@ import {
 	dbAddonKeyForPlanFamily,
 	isPaidFamily,
 	planFamily,
+	purchasableDbAddonKeys,
 	resourceAddonKeysForPlan,
 } from "../src/lib/plan-cart";
 
@@ -50,10 +51,10 @@ describe("resourceAddonKeysForPlan", () => {
 });
 
 describe("dbAddonKeyForPlanFamily", () => {
-	it("maps a plan family to the standalone managed db addon (purchaseAddons-valid)", () => {
-		// Distinct from resourceAddonKeysForPlan's db.starter estimator key — these
-		// are the keys assertResourceAddonsMatchPlan accepts for a standalone buy.
-		expect(dbAddonKeyForPlanFamily("shared")).toBe("db.standard");
+	it("defaults a plan family to the CHEAPEST standalone managed db addon", () => {
+		// The server accepts any db tier standalone on a paid plan, so the default
+		// is the cheapest tier — "just add a database" must never over-charge.
+		expect(dbAddonKeyForPlanFamily("shared")).toBe("db.starter");
 		expect(dbAddonKeyForPlanFamily("dedicated_small")).toBe("db.pro");
 		expect(dbAddonKeyForPlanFamily("dedicated_large")).toBe("db.pro");
 	});
@@ -62,6 +63,23 @@ describe("dbAddonKeyForPlanFamily", () => {
 		expect(dbAddonKeyForPlanFamily("free")).toBeNull();
 		expect(dbAddonKeyForPlanFamily(undefined)).toBeNull();
 		expect(dbAddonKeyForPlanFamily("nope")).toBeNull();
+	});
+});
+
+describe("purchasableDbAddonKeys", () => {
+	it("lists every db tier (cheapest first) for paid families, none for free", () => {
+		expect(purchasableDbAddonKeys("shared")).toEqual([
+			"db.starter",
+			"db.standard",
+			"db.pro",
+		]);
+		expect(purchasableDbAddonKeys("dedicated_small")).toEqual([
+			"db.starter",
+			"db.standard",
+			"db.pro",
+		]);
+		expect(purchasableDbAddonKeys("free")).toEqual([]);
+		expect(purchasableDbAddonKeys(undefined)).toEqual([]);
 	});
 });
 

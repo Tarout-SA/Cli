@@ -92,7 +92,7 @@ afterEach(() => {
 });
 
 describe("ensureDatabasePlan", () => {
-	it("interactive Starter project with no open DB slot → auto-buys db.standard, resolves STANDARD", async () => {
+	it("interactive Starter project with no open DB slot → auto-buys the CHEAPEST tier (db.starter), resolves STARTER", async () => {
 		let purchased: unknown;
 		const client = fakeClient({
 			planKey: "shared",
@@ -108,10 +108,11 @@ describe("ensureDatabasePlan", () => {
 			},
 		});
 		const r = await ensureDatabasePlan(client, undefined);
-		expect(r).toEqual({ ok: true, plan: "STANDARD" });
-		// db.standard (not db.starter) — the key assertResourceAddonsMatchPlan accepts on Shared.
+		expect(r).toEqual({ ok: true, plan: "STARTER" });
+		// db.starter (29) — the cheapest tier; the server accepts any db tier on
+		// Shared, so "just add a database" defaults to the cheapest.
 		expect(purchased).toEqual({
-			items: [{ addonKey: "db.standard", quantity: 1 }],
+			items: [{ addonKey: "db.starter", quantity: 1 }],
 		});
 	});
 
@@ -140,8 +141,10 @@ describe("ensureDatabasePlan", () => {
 			throw new Error("expected a needsConsent handoff, got: " + JSON.stringify(r));
 		}
 		expect(r.needsConsent).toBe(true);
-		expect(r.addonKey).toBe("db.standard");
-		expect(r.tier).toBe("STANDARD");
+		// Cheapest tier is the default hand-off; the NEEDS_UPGRADE envelope the
+		// caller emits lists all tiers so the user can pick a bigger one.
+		expect(r.addonKey).toBe("db.starter");
+		expect(r.tier).toBe("STARTER");
 	});
 
 	it("Dedicated project with a bundled db.standard slot → STANDARD, NO purchase", async () => {

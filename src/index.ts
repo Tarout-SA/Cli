@@ -28,6 +28,7 @@ import {
 import { registerFirewallCommands } from "./commands/firewall.js";
 import { registerInboxCommands } from "./commands/inbox.js";
 import { registerInitCommand } from "./commands/init.js";
+import { registerJobsCommands } from "./commands/jobs.js";
 import { registerKeysCommands } from "./commands/keys.js";
 import { registerLinkCommands } from "./commands/link.js";
 import { registerMonitorCommands } from "./commands/monitor.js";
@@ -138,10 +139,17 @@ program
 		// stale CLI. Fail-open; opt out with --no-update-check /
 		// TAROUT_NO_UPDATE_CHECK.
 		const sub = actionCommand?.name();
+		// up/deploy normally force an immediate update check so a human never
+		// deploys on a stale CLI. In machine mode (JSON output or a non-TTY agent/
+		// CI run) that forced npm-registry round-trip is paid on every deploy in a
+		// tight edit→deploy loop, so there we fall back to the throttled check
+		// (still runs on every command, at most once per few hours). The regular
+		// opt-outs (--no-update-check / TAROUT_NO_UPDATE_CHECK) are unchanged.
+		const machineMode = opts.json === true || !stdinIsTTY;
 		await maybeSelfUpdate({
 			currentVersion: packageJson.version,
 			disabled: opts.updateCheck === false,
-			force: sub === "up" || sub === "deploy",
+			force: (sub === "up" || sub === "deploy") && !machineMode,
 		});
 
 		// In agent mode, nudge the agent to run `tarout agent init` first when the
@@ -190,6 +198,7 @@ registerKeysCommands(program);
 registerBillingCommands(program);
 registerServersCommands(program);
 registerMonitorCommands(program);
+registerJobsCommands(program);
 registerTicketsCommands(program);
 registerWalletCommands(program);
 registerAiCommands(program);

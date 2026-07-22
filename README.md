@@ -55,8 +55,8 @@ tarout call deployment.all --input '{"applicationId":"app_123"}'
 `tarout-mcp` is a local MCP server that gives coding agents (Claude Code,
 Cursor, Claude Desktop) the CLI's capabilities as first-class tools:
 deploy from the current directory, sync `.env`, run SQL against Postgres,
-switch org/project/env, upgrade billing, and more — with a `call` escape
-hatch covering the entire platform API.
+schedule cron tasks (`job_*`), switch org/project/env, upgrade billing, and
+more — with a `call` escape hatch covering the entire platform API.
 
 ### Setup
 
@@ -255,6 +255,45 @@ redirect the root to it. Hostnames under a Tarout-registered domain use
 `tarout domains app link-registered` instead (`domains link` is retired and
 always rejected by the platform).
 
+### Scheduled Tasks (cron)
+
+Two kinds of task: **http** fires a signed request at your app's own URL,
+**command** runs a shell command inside the app's running container (so the app
+must already be deployed).
+
+| Command | Description |
+|---------|-------------|
+| `tarout jobs list` | List scheduled tasks (defaults to the linked app) |
+| `tarout jobs info <id>` | Show a task, including its signing secret |
+| `tarout jobs create` | Create a scheduled task |
+| `tarout jobs update <id>` | Update a scheduled task |
+| `tarout jobs delete <id>` | Delete a task and its run history |
+| `tarout jobs enable <id>` / `disable <id>` | Pause or resume a task |
+| `tarout jobs run <id>` | Run a task immediately |
+| `tarout jobs runs <id>` | Show recent runs (exit code, duration, output) |
+
+```bash
+# Ping /cron/hourly on the linked app every hour
+tarout jobs create --name hourly --schedule "0 * * * *" --path /cron/hourly
+
+# Run a command inside the container every night at 02:00 Riyadh time
+tarout jobs create --name cleanup --type command \
+  --command "bun run cleanup" --schedule "0 2 * * *" --timezone Asia/Riyadh
+
+# Fire it now and wait for the result (command runs are queued in the background)
+tarout jobs run <id> --wait
+
+# Inspect the history
+tarout jobs runs <id> --limit 5
+```
+
+Command tasks may run for up to 15 minutes, so `jobs run` only queues them:
+without `--wait` it reports `queued` and you read the outcome from
+`tarout jobs runs <id>`. HTTP tasks run inline (60s cap) and print their result
+immediately. Each HTTP fire carries `x-tarout-cron-timestamp` and
+`x-tarout-cron-signature` headers — verify them with the task's signing secret
+(`tarout jobs info <id>`).
+
 ### Organizations & Environments
 
 | Command | Description |
@@ -294,6 +333,7 @@ with `--help` for its subcommands and flags):
 | `tarout wallet` | Manage AI Gateway wallet balance |
 | `tarout ai` | Manage AI Gateway models and API keys |
 | `tarout monitor` | Manage uptime monitors for applications |
+| `tarout jobs` | Manage scheduled tasks (cron) for applications |
 | `tarout projects` | Manage projects within the active organization |
 | `tarout orgs` / `envs` | Switch active organization / environment |
 | `tarout providers` | Manage Git providers (GitHub, GitLab, Bitbucket) |

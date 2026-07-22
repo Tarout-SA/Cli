@@ -262,21 +262,58 @@ describe("buildRemedyOptions", () => {
 		expect(opts[0]?.action).toBe("upgrade_plan");
 	});
 
-	it("addon gate on a SHARED plan → upgrade option climbs to dedicated", () => {
+	it("database gate on a SHARED plan → ALL tiers (cheapest first) + plan upgrade", () => {
 		const remedy: EntitlementRemedy = {
 			kind: "addon",
+			failedKey: "db.standard.slots",
 			targetKey: "db.standard",
 			targetName: "Standard database",
 			command: "tarout billing addon:buy db.standard --wait",
 			hint: "",
 		};
-		// currentPlanKey "shared" → the upgrade alternative is dedicated_small,
-		// not "shared" (which the requested-plan heuristic would have produced).
 		const opts = buildRemedyOptions(remedy, "shared", catalog, "shared");
-		expect(opts[0]?.command).toBe("tarout billing addon:buy db.standard --wait");
-		expect(opts[1]?.action).toBe("upgrade_plan");
-		expect(opts[1]?.command).toBe("tarout billing upgrade dedicated_small --wait");
-		expect(opts[1]?.label).toBe("Upgrade to Pro Small");
+		// The user picks a tier — every purchasable database tier is offered,
+		// cheapest first, so the expensive one is never the only choice.
+		const buyCommands = opts
+			.filter((o) => o.action === "buy_addon")
+			.map((o) => o.command);
+		expect(buyCommands).toEqual([
+			"tarout billing addon:buy db.starter --wait",
+			"tarout billing addon:buy db.standard --wait",
+			"tarout billing addon:buy db.pro --wait",
+		]);
+		// currentPlanKey "shared" → the plan-upgrade alternative is dedicated_small
+		// (Pro Small), listed last.
+		const upgrade = opts.find((o) => o.action === "upgrade_plan");
+		expect(upgrade?.command).toBe("tarout billing upgrade dedicated_small --wait");
+		expect(upgrade?.label).toBe("Upgrade to Pro Small");
+	});
+
+	it("database gate → tier labels show catalog names + prices, cheapest first", () => {
+		const pricedCatalog: Catalog = {
+			plans: [{ key: "dedicated_small", name: "Pro Small", priceHalalas: 39900 }],
+			addons: [
+				{ addonKey: "db.starter", name: "Starter database", priceHalalas: 2900 },
+				{ addonKey: "db.standard", name: "Standard database", priceHalalas: 4900 },
+				{ addonKey: "db.pro", name: "Pro database", priceHalalas: 9900 },
+			],
+		};
+		const remedy: EntitlementRemedy = {
+			kind: "addon",
+			failedKey: "db.standard.slots",
+			targetKey: "db.standard",
+			command: "tarout billing addon:buy db.standard --wait",
+			hint: "",
+		};
+		const opts = buildRemedyOptions(remedy, "shared", pricedCatalog, "shared");
+		const buyLabels = opts
+			.filter((o) => o.action === "buy_addon")
+			.map((o) => o.label);
+		expect(buyLabels).toEqual([
+			"Add a Starter database (29.00 SAR/mo)",
+			"Add a Standard database (49.00 SAR/mo)",
+			"Add a Pro database (99.00 SAR/mo)",
+		]);
 	});
 
 	it("app-slot gate on a SHARED plan → upgrade option targets dedicated", () => {
