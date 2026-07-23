@@ -1,6 +1,6 @@
 {
 	"name": "@tarout/cli",
-	"version": "1.5.0",
+	"version": "1.6.0",
 	"description": "Tarout CLI — the Saudi cloud platform for coding agents",
 	"type": "module",
 	"bin": {

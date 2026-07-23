@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0]
+
 ### Added
 
 - **Scheduled tasks (cron) in the CLI and for agents.** The platform's
@@ -43,6 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `database_tls` category — ranked ahead of the generic `network` pattern — and
   returns the concrete node-postgres / Prisma-adapter ssl remedy instead of a
   generic "unknown".
+- **`tarout deploy` inspection now flags backend vs static.** The pre-deploy
+  project inspection detects whether the project ships a backend server (Express/
+  Fastify/Nest/Hono/etc., a non-JS runtime, a Dockerfile, or a serverless
+  function directory) versus a pure static front-end, and surfaces it in the
+  inspection summary (`Backend: server detected` / `Static site`).
 
 ### Changed
 
