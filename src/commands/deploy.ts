@@ -187,6 +187,16 @@ export interface ProjectInspection {
 	};
 	storage: boolean;
 	storageReasons: string[];
+	/** Whether the project ships a backend server (not just a static front-end). */
+	server: boolean;
+	serverReasons: string[];
+	/**
+	 * True only when the project is a pure static front-end with no server, DB, or
+	 * storage — i.e. eligible for the no-account instant static deploy. Advisory:
+	 * the authoritative gate runs server-side (see the platform's
+	 * static-eligibility classifier).
+	 */
+	isStatic: boolean;
 }
 
 interface DeploymentTarget {
@@ -591,6 +601,7 @@ export function inspectCurrentProject(cwd = process.cwd()): ProjectInspection {
 	}));
 	const database = detectDatabase(dependencies, snippets, cwd);
 	const storage = detectStorage(dependencies, snippets);
+	const server = detectServer(dependencies, snippets, cwd);
 
 	return {
 		database: database.kind,
@@ -598,7 +609,99 @@ export function inspectCurrentProject(cwd = process.cwd()): ProjectInspection {
 		git: detectGitSource(cwd),
 		storage: storage.detected,
 		storageReasons: storage.reasons,
+		server: server.detected,
+		serverReasons: server.reasons,
+		isStatic:
+			database.kind === "none" && !storage.detected && !server.detected,
 	};
+}
+
+/**
+ * Detect whether the project ships a backend server (vs a pure static
+ * front-end). Advisory only — the platform re-derives this with a hardened,
+ * fail-closed classifier server-side; the CLI uses it to tell the user upfront
+ * when a deploy needs an account (backend/DB/storage) vs qualifies for the
+ * instant no-account static deploy.
+ */
+function detectServer(
+	dependencies: Set<string>,
+	files: Array<{ file: string; content: string }>,
+	cwd: string,
+): { detected: boolean; reasons: string[] } {
+	const reasons: string[] = [];
+
+	for (const dependency of [
+		"express",
+		"fastify",
+		"koa",
+		"@nestjs/core",
+		"hono",
+		"@hapi/hapi",
+		"restify",
+		"elysia",
+		"nitropack",
+		"@trpc/server",
+		"apollo-server",
+		"@apollo/server",
+		"socket.io",
+		"@remix-run/node",
+		"firebase-admin",
+	]) {
+		if (dependencies.has(dependency)) {
+			reasons.push(`dependency ${dependency}`);
+			break;
+		}
+	}
+
+	// Non-JS ecosystems and containers are always server-shaped.
+	for (const marker of [
+		"requirements.txt",
+		"pyproject.toml",
+		"go.mod",
+		"cargo.toml",
+		"gemfile",
+		"composer.json",
+		"pom.xml",
+		"dockerfile",
+	]) {
+		if (existsSync(join(cwd, marker)) || existsSync(join(cwd, capitalize(marker)))) {
+			reasons.push(`${marker} present`);
+			break;
+		}
+	}
+
+	// Serverless / server function directories.
+	for (const dir of [
+		"api",
+		"functions",
+		join("netlify", "functions"),
+		join("server", "api"),
+		join("src", "pages", "api"),
+		join("app", "api"),
+	]) {
+		if (existsSync(join(cwd, dir))) {
+			reasons.push(`${dir}/ backend directory`);
+			break;
+		}
+	}
+
+	for (const { file, content } of files) {
+		if (!content) continue;
+		const label = basename(file);
+		if (
+			/createServer\(|app\.listen\(|new\s+Elysia\(|defineEventHandler\(|getServerSideProps|\.listen\(\s*(process\.env\.PORT|\d)/i.test(
+				content,
+			)
+		) {
+			reasons.push(`${label} server code`);
+		}
+	}
+
+	return { detected: reasons.length > 0, reasons: uniqueReasons(reasons) };
+}
+
+function capitalize(value: string): string {
+	return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 function printProjectInspection(inspection: ProjectInspection): void {
@@ -613,6 +716,16 @@ function printProjectInspection(inspection: ProjectInspection): void {
 	if (inspection.storage) {
 		lines.push(
 			`File storage: ${colors.cyan("detected")} (${inspection.storageReasons.slice(0, 3).join("; ")})`,
+		);
+	}
+	if (inspection.server) {
+		lines.push(
+			`Backend: ${colors.cyan("server detected")} (${inspection.serverReasons.slice(0, 3).join("; ")})`,
+		);
+	}
+	if (inspection.isStatic) {
+		lines.push(
+			`${colors.cyan("Static site")} — no backend or database detected`,
 		);
 	}
 	if (inspection.git.hasGit) {
