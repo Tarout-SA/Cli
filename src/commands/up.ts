@@ -15,6 +15,7 @@ import type { Command } from "commander";
 import { ensureAgentSetup } from "../lib/agent-setup.js";
 import { getApiClient } from "../lib/api.js";
 import { getProjectConfig, setProjectConfig } from "../lib/config.js";
+import { unsafeDeployDirectory } from "../lib/deploy-safety.js";
 import {
 	findSimilar,
 	handleError,
@@ -239,6 +240,12 @@ export function registerUpCommand(program: Command): void {
 		.action(async (cwdArg: string | undefined, options: UpOptions) => {
 			try {
 				const cwd = cwdArg ? resolve(cwdArg) : process.cwd();
+				// `up` archives this whole tree and writes the agent allowlist into
+				// it, so refuse home/root/credential dirs BEFORE chdir'ing or touching
+				// anything: `tarout up ~` runs unprompted under that allowlist and
+				// would upload ~/.ssh, ~/.aws & co to the platform.
+				const unsafeCwd = unsafeDeployDirectory(cwd);
+				if (unsafeCwd) throw new InvalidArgumentError(unsafeCwd);
 				if (cwdArg) process.chdir(cwd);
 
 				// Onboarding step 0: in agent mode, grant the agent permission to run

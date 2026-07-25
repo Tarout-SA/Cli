@@ -15,8 +15,6 @@
  * can surface entitlement remedies + timeout outcomes without collapsing them
  * into a plain error envelope.
  */
-import { homedir } from "node:os";
-import { parse, resolve, sep } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
@@ -27,47 +25,16 @@ import {
 	uploadCurrentDirectorySource,
 } from "../../commands/deploy.js";
 import { getProjectConfig } from "../../lib/config.js";
+// `deploy` archives the WHOLE target directory (createSourceArchive) and the
+// archive excludes only cover build artifacts + .env, so a steered agent could
+// point deploy at e.g. ~/.ssh or the home dir and ship keys/tokens to the
+// platform. The check now lives in lib/deploy-safety so `tarout up` /
+// `tarout deploy` enforce the SAME rule — it living only here is why those
+// paths were unguarded.
+import { unsafeDeployDirectory } from "../../lib/deploy-safety.js";
 import { resolveAppRef } from "../../lib/env-core.js";
 import { resolveEntitlementRemedy } from "../../lib/entitlement-remedy.js";
 import { errorResult, okResult, withAuth } from "../runtime.js";
-
-/**
- * Directory names that hold credentials/secrets and are never a deployable app.
- * `deploy` archives the WHOLE target directory (createSourceArchive) and the
- * archive excludes only cover build artifacts + .env, so a steered agent could
- * point deploy at e.g. ~/.ssh or the home dir and ship keys/tokens to the
- * platform. Refuse those locations up front.
- */
-const SENSITIVE_DIR_NAMES = new Set([
-	".ssh",
-	".aws",
-	".gnupg",
-	".gcloud",
-	".kube",
-	".docker",
-	".azure",
-	".config",
-]);
-
-/**
- * Returns an error message if `dir` is not a safe directory to archive+upload
- * (filesystem root, the user's home dir, or anything living under a known
- * secret/credential directory), or undefined when the path is acceptable.
- * Normal project directories pass unchanged.
- */
-function unsafeDeployDirectory(dir: string): string | undefined {
-	const abs = resolve(dir);
-	const home = resolve(homedir());
-	const { root } = parse(abs);
-	if (abs === root || abs === home) {
-		return `Refusing to deploy '${abs}': archiving a filesystem root or home directory would upload credentials and unrelated files. Point deploy at a specific project directory.`;
-	}
-	const hit = abs.split(sep).find((s) => SENSITIVE_DIR_NAMES.has(s));
-	if (hit) {
-		return `Refusing to deploy '${abs}': it is inside a sensitive directory ('${hit}'). Point deploy at a project directory outside credential/config folders.`;
-	}
-	return undefined;
-}
 
 export function registerDeployTools(server: McpServer): void {
 	server.registerTool(

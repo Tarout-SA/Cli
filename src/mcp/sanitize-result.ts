@@ -72,8 +72,9 @@ function redactDotenvSecrets(value: string): string {
 
 // Well-known credential value shapes that identify a secret by its OWN format,
 // regardless of any surrounding key name (Stripe/Moyasar, OpenAI, GitHub,
-// GitLab, Slack, AWS, Google, SendGrid). The prefixes are distinctive enough
-// that matching them does not touch ordinary prose or identifiers.
+// GitLab, Slack, AWS, Google, SendGrid, and Tarout's own keys). The prefixes
+// are distinctive enough that matching them does not touch ordinary prose or
+// identifiers.
 const TOKEN_VALUE_PATTERNS: RegExp[] = [
 	// Stripe / Moyasar publishable, secret & restricted keys, and webhook secrets
 	/\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{16,}/g,
@@ -93,6 +94,19 @@ const TOKEN_VALUE_PATTERNS: RegExp[] = [
 	/\bAIza[A-Za-z0-9_-]{35}\b/g,
 	// SendGrid API keys
 	/\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g,
+	// Tarout Email API key: `te_` + base64url(24 random bytes) = 35 chars — too
+	// short for the high-entropy catch below, and matched no vendor shape.
+	/\bte_[A-Za-z0-9_-]{30,}/g,
+	// Tarout platform API keys (better-auth): the issued prefix followed by 64
+	// characters drawn from a-z/A-Z ONLY. With no digit they slip past the
+	// high-entropy catch below, so match the two prefixes the platform issues
+	// (`agent` for agent/onboarding keys, `cli` for `tarout login`). The exact
+	// 64-char body keeps this off ordinary long identifiers.
+	/\b(?:agent|cli)[A-Za-z]{64}\b/g,
+	// Tarout-issued opaque tokens. The alphanumeric-only body stops at the first
+	// underscore, so readable `tarout_*` identifiers (env keys, cookie names,
+	// shell helpers) are untouched.
+	/\btarout_[A-Za-z0-9]{24,}\b/g,
 ];
 
 function redactTokenValues(value: string): string {

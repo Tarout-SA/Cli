@@ -9,6 +9,7 @@
 
 import { resolve } from "node:path";
 import type { Command } from "commander";
+import { connectAgentFromHandoff } from "../lib/agent-handoff.js";
 import {
 	AGENT_TYPES,
 	type AgentType,
@@ -20,6 +21,7 @@ import {
 	colors,
 	isJsonMode,
 	log,
+	outputData,
 	outputJsonLine,
 	success,
 	warn,
@@ -45,6 +47,40 @@ export function registerAgentCommands(program: Command): void {
 	const agent = program
 		.command("agent")
 		.description("Configure coding agents to use the Tarout CLI");
+
+	agent
+		.command("connect")
+		.description(
+			"Connect the signed-in dashboard account and write a dynamic AI.md identity",
+		)
+		.requiredOption("--handoff <payload>", "Single-use dashboard handoff")
+		.option("--path <directory>", "Project directory", process.cwd())
+		.action(async (options: { handoff: string; path: string }) => {
+			try {
+				const cwd = resolve(options.path);
+				const result = await connectAgentFromHandoff(options.handoff, cwd);
+
+				if (isJsonMode()) {
+					outputData(result);
+					return;
+				}
+
+				success(
+					result.reusedExistingCredential
+						? "Tarout CLI was already linked to this account"
+						: "Tarout CLI connected to this account",
+				);
+				box("Agent identity", [
+					`Account: ${colors.cyan(result.identity.userEmail)}`,
+					`Organization: ${colors.bold(result.identity.organizationName)}`,
+					`Project: ${colors.bold(result.identity.projectName || "None")}`,
+					`${colors.bold(result.identityFile.action)} ${result.identityFile.path}`,
+				]);
+				log("");
+			} catch (err) {
+				handleError(err);
+			}
+		});
 
 	agent
 		.command("init")

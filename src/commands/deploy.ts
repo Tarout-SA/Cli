@@ -44,6 +44,7 @@ import {
 	setProfile,
 	setProjectConfig,
 } from "../lib/config.js";
+import { unsafeDeployDirectory } from "../lib/deploy-safety.js";
 import {
 	type Catalog,
 	type EntitlementRemedy,
@@ -4308,6 +4309,12 @@ export async function uploadCurrentDirectorySource(
 export async function createSourceArchive(
 	sourceDirectory = process.cwd(),
 ): Promise<string> {
+	// Last chokepoint before a whole directory is zipped and uploaded, so every
+	// caller (`tarout up`, `tarout deploy`, the MCP `deploy` tool) is covered by
+	// the same rule: never archive $HOME, a filesystem root, or a credential dir.
+	const unsafe = unsafeDeployDirectory(sourceDirectory);
+	if (unsafe) throw new InvalidArgumentError(unsafe);
+
 	const tempDir = mkdtempSync(join(tmpdir(), "tarout-source-"));
 	const archivePath = join(tempDir, "source.zip");
 

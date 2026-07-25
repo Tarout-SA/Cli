@@ -161,15 +161,24 @@ export function markdownTargetFor(agent: AgentType): string {
 	return agent === "claude" ? "CLAUDE.md" : "AGENTS.md";
 }
 
-function hasMarkers(content: string): boolean {
-	return content.includes(BLOCK_BEGIN) && content.includes(BLOCK_END);
+function hasMarkers(
+	content: string,
+	beginMarker: string,
+	endMarker: string,
+): boolean {
+	return content.includes(beginMarker) && content.includes(endMarker);
 }
 
-function replaceBlock(content: string, block: string): string {
-	const begin = content.indexOf(BLOCK_BEGIN);
-	const end = content.indexOf(BLOCK_END);
+function replaceBlock(
+	content: string,
+	block: string,
+	beginMarker: string,
+	endMarker: string,
+): string {
+	const begin = content.indexOf(beginMarker);
+	const end = content.indexOf(endMarker);
 	if (begin === -1 || end === -1 || end < begin) return content;
-	return `${content.slice(0, begin)}${block}${content.slice(end + BLOCK_END.length)}`;
+	return `${content.slice(0, begin)}${block}${content.slice(end + endMarker.length)}`;
 }
 
 /**
@@ -179,6 +188,13 @@ function replaceBlock(content: string, block: string): string {
 export function upsertMarkdownBlock(
 	filePath: string,
 	block: string,
+	markers: {
+		begin: string;
+		end: string;
+	} = {
+		begin: BLOCK_BEGIN,
+		end: BLOCK_END,
+	},
 ): FileAction {
 	if (!existsSync(filePath)) {
 		writeFileSync(filePath, `${block}\n`, "utf-8");
@@ -187,8 +203,13 @@ export function upsertMarkdownBlock(
 
 	const existing = readFileSync(filePath, "utf-8");
 
-	if (hasMarkers(existing)) {
-		const replaced = replaceBlock(existing, block);
+	if (hasMarkers(existing, markers.begin, markers.end)) {
+		const replaced = replaceBlock(
+			existing,
+			block,
+			markers.begin,
+			markers.end,
+		);
 		if (replaced === existing) return "unchanged";
 		writeFileSync(filePath, replaced, "utf-8");
 		return "updated";
