@@ -214,3 +214,74 @@ describe("dashboard agent handoff", () => {
 		expect(setCurrentProfile).not.toHaveBeenCalled();
 	});
 });
+
+/**
+ * Compact handoff (`t1.…`). The dashboard command was ~475 chars because the v1
+ * form JSON-encodes the payload then base64s the whole document — the key names
+ * and base64 inflation dominate, not the values. The positional form carries the
+ * SAME fields in ~58% fewer characters. The v1 blob must keep decoding so a
+ * command copied from an older dashboard still works.
+ */
+describe("compact handoff", () => {
+	const CODE = "oY8eODyt-8YM4dPkTssd4L_rcPqg0iwSgr01NJ6hJqQ";
+	const VERIFIER = "R-HJXb-9Mroe9Vmg7DlRkVKz2Ljjui4VJDD3PUr_5gk";
+	const EXP = 1785046456258;
+	const compact = (extra = "") =>
+		`t1.${CODE}.${VERIFIER}.E3kstlwkvTjoWlxtsFxzSxf1JIlGKXlC.DWN9zqTa6T8mZjn9MxFtl._qEA1WLhgHOw3mEzhEvpW.${EXP.toString(36)}${extra}`;
+
+	it("decodes every field the v1 payload carried", () => {
+		const payload = decodeAgentHandoff(compact(), EXP - 1000);
+		expect(payload).toEqual({
+			version: 1,
+			code: CODE,
+			codeVerifier: VERIFIER,
+			apiUrl: "https://tarout.sa",
+			expiresAt: EXP,
+			expected: {
+				userId: "E3kstlwkvTjoWlxtsFxzSxf1JIlGKXlC",
+				organizationId: "DWN9zqTa6T8mZjn9MxFtl",
+				projectId: "_qEA1WLhgHOw3mEzhEvpW",
+			},
+		});
+	});
+
+	it("is materially shorter than the v1 blob", () => {
+		const v1 = Buffer.from(
+			JSON.stringify({
+				version: 1,
+				code: CODE,
+				codeVerifier: VERIFIER,
+				apiUrl: "https://tarout.sa",
+				expiresAt: EXP,
+				expected: {
+					userId: "E3kstlwkvTjoWlxtsFxzSxf1JIlGKXlC",
+					organizationId: "DWN9zqTa6T8mZjn9MxFtl",
+					projectId: "_qEA1WLhgHOw3mEzhEvpW",
+				},
+			}),
+			"utf8",
+		).toString("base64url");
+		expect(compact().length).toBeLessThan(v1.length * 0.5);
+	});
+
+	it("carries a non-default apiUrl in the optional 8th segment", () => {
+		const staging = Buffer.from("https://staging.tarout.sa", "utf8").toString(
+			"base64url",
+		);
+		expect(
+			decodeAgentHandoff(compact(`.${staging}`), EXP - 1000).apiUrl,
+		).toBe("https://staging.tarout.sa");
+	});
+
+	it("rejects an untrusted apiUrl", () => {
+		const evil = Buffer.from("https://evil.example", "utf8").toString(
+			"base64url",
+		);
+		expect(() => decodeAgentHandoff(compact(`.${evil}`), EXP - 1000)).toThrow();
+	});
+
+	it("rejects a malformed segment count and reports expiry", () => {
+		expect(() => decodeAgentHandoff("t1.a.b", EXP - 1000)).toThrow();
+		expect(() => decodeAgentHandoff(compact(), EXP + 1000)).toThrow(/expired/i);
+	});
+});

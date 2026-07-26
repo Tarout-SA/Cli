@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0]
+
+### Added
+
+- **Compact dashboard handoff (`t1.…`).** The one-command agent setup copied from
+  the dashboard was ~475 characters, because the payload was JSON-encoded and then
+  base64-encoded whole — the key names and base64 inflation dominated, not the
+  values. The new positional format carries the **same** fields (code, PKCE
+  verifier, expected identity, expiry, and a non-default API origin) in **~58%
+  fewer characters**. `decodeAgentHandoff` still accepts the old v1 blob, so a
+  command copied from an older dashboard keeps working.
+
 ## [1.6.0]
 
 ### Added

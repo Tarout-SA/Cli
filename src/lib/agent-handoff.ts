@@ -112,10 +112,74 @@ function isTrustedHandoffUrl(value: string): boolean {
 	return trustedHost && !url.username && !url.password;
 }
 
+/**
+ * Compact handoff: `t1.<code>.<verifier>.<userId>.<orgId>.<projectId>.<expB36>`
+ * with an optional 8th segment carrying a non-default apiUrl (base64url).
+ *
+ * Same information as the v1 JSON form, ~60% shorter on the wire: the JSON keys
+ * and the base64 inflation of the whole document are the bulk of the old
+ * payload, not the values. Kept positional (not JSON) so there is nothing to
+ * inflate. `decodeAgentHandoff` still accepts the v1 blob, so a command copied
+ * from an older dashboard keeps working.
+ */
+const COMPACT_PREFIX = "t1.";
+
+function decodeCompactHandoff(
+	encoded: string,
+	now: number,
+): AgentHandoffPayload {
+	const parts = encoded.slice(COMPACT_PREFIX.length).split(".");
+	if (parts.length !== 6 && parts.length !== 7) {
+		throw new InvalidArgumentError("The Tarout agent command is invalid.");
+	}
+	const [code, codeVerifier, userId, organizationId, projectId, exp, apiUrlB64] =
+		parts as [string, string, string, string, string, string, string?];
+
+	const expiresAt = Number.parseInt(exp, 36);
+	let apiUrl = "https://tarout.sa";
+	if (apiUrlB64) {
+		try {
+			apiUrl = Buffer.from(apiUrlB64, "base64url").toString("utf8");
+		} catch {
+			throw new InvalidArgumentError("The Tarout agent command is invalid.");
+		}
+	}
+
+	if (
+		!AUTHORIZATION_PATTERN.test(code) ||
+		!VERIFIER_PATTERN.test(codeVerifier) ||
+		!isIdentifier(userId) ||
+		!isIdentifier(organizationId) ||
+		!isIdentifier(projectId) ||
+		!Number.isFinite(expiresAt) ||
+		!isTrustedHandoffUrl(apiUrl)
+	) {
+		throw new InvalidArgumentError("The Tarout agent command is invalid.");
+	}
+	if (expiresAt <= now) {
+		throw new InvalidArgumentError(
+			"This one-time Tarout command has expired. Refresh the Agent dashboard and copy the new command.",
+		);
+	}
+
+	return {
+		version: 1,
+		code,
+		codeVerifier,
+		apiUrl: normalizeApiUrl(apiUrl),
+		expiresAt,
+		expected: { userId, organizationId, projectId },
+	};
+}
+
 export function decodeAgentHandoff(
 	encoded: string,
 	now = Date.now(),
 ): AgentHandoffPayload {
+	if (encoded.startsWith(COMPACT_PREFIX)) {
+		return decodeCompactHandoff(encoded, now);
+	}
+
 	if (!HANDOFF_PATTERN.test(encoded)) {
 		throw new InvalidArgumentError("The Tarout agent command is invalid.");
 	}
