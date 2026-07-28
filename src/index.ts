@@ -33,7 +33,7 @@ import { registerKeysCommands } from "./commands/keys.js";
 import { registerLinkCommands } from "./commands/link.js";
 import { registerMonitorCommands } from "./commands/monitor.js";
 import { registerNotificationsCommands } from "./commands/notifications.js";
-import { registerEnvsCommands, registerOrgsCommands } from "./commands/orgs.js";
+import { registerOrgsCommands } from "./commands/orgs.js";
 import { registerProjectsCommands } from "./commands/projects.js";
 import { registerProvidersCommands } from "./commands/providers.js";
 import { registerQueuesCommands } from "./commands/queues.js";
@@ -44,8 +44,10 @@ import { registerTicketsCommands } from "./commands/tickets.js";
 import { registerUpCommand } from "./commands/up.js";
 import { registerWalletCommands } from "./commands/wallet.js";
 import { emitAgentSetupHint } from "./lib/agent-setup.js";
+import { announceProjectCredential } from "./lib/auth-notice.js";
 import { handleError } from "./lib/errors.js";
 import { outputError, setGlobalOptions } from "./lib/output.js";
+import { setGlobalAuthOnly } from "./lib/project-auth.js";
 import { maybeSelfUpdate } from "./lib/update-check.js";
 import { ExitCode } from "./utils/exit-codes.js";
 
@@ -112,8 +114,17 @@ program
 		"--no-update-check",
 		"Skip the automatic CLI self-update on up/deploy",
 	)
+	.option(
+		"--global-auth",
+		"Ignore this project's .tarout/auth.json and use the machine-wide login",
+	)
 	.hook("preAction", async (thisCommand, actionCommand) => {
 		const opts = thisCommand.opts();
+
+		// Must run before anything reads a credential: this is the documented
+		// opt-out from project-scoped auth, so the whole invocation has to agree
+		// on which layer it is using.
+		setGlobalAuthOnly(opts.globalAuth === true);
 		// Auto-detect non-interactive sessions: when stdin is not a TTY (agent
 		// background runs, pipes, CI), inquirer can't prompt — falling through
 		// would hang then force-close with exit 1. Treating it as
@@ -130,6 +141,12 @@ program
 			verbose: opts.verbose || false,
 			noColor: opts.color === false,
 		});
+
+		// Output settings are live now, so the "which account is this?" notice can
+		// respect --json/--quiet. Announced once per invocation, and only when the
+		// project credential names a DIFFERENT account than the machine-wide one —
+		// the case where a command would otherwise act on an unexpected org.
+		announceProjectCredential();
 
 		// Self-update on every command: if a newer @tarout/cli is published,
 		// install it and re-exec this invocation on the new version, so the CLI
@@ -189,7 +206,9 @@ registerDbCommands(program);
 registerDomainsCommands(program);
 registerOrgsCommands(program);
 registerProjectsCommands(program);
-registerEnvsCommands(program);
+// No `tarout envs` namespace: the platform has no environment model/router, so
+// the whole namespace could only ever fail at runtime. Do not re-add it without
+// an `environment` router in the platform appRouter.
 registerLinkCommands(program);
 registerDevCommand(program);
 registerBuildCommand(program);

@@ -17,6 +17,10 @@ import {
 	setCurrentProfile,
 	setProfile,
 } from "./config.js";
+import {
+	setProjectCredential,
+	unsafeCredentialDirectory,
+} from "./project-auth.js";
 import { InvalidArgumentError } from "./errors.js";
 import { normalizeApiUrl } from "./api-url.js";
 import { writeAgentIdentityFile } from "./agent-identity.js";
@@ -39,9 +43,16 @@ export interface AgentHandoffPayload {
 	};
 }
 
+/** Where `agent connect` should persist the credential it obtains. */
+export type AgentConnectScope = "project" | "global";
+
 export interface AgentConnectResult {
 	reusedExistingCredential: boolean;
 	profileName: string;
+	/** Which credential layer the key was written to. */
+	scope: AgentConnectScope;
+	/** Absolute path of the project credential, when scope is `project`. */
+	credentialPath?: string;
 	identityFile: {
 		path: "AI.md";
 		action: FileAction;
@@ -59,6 +70,7 @@ interface AgentConnectDependencies {
 	getConfig: () => Config;
 	setCurrentProfile: (name: string) => void;
 	setProfile: (name: string, profile: Profile) => void;
+	setProjectCredential: (profile: Profile, baseDir: string) => string;
 	resolveProfile: typeof resolveProfileFromCredential;
 	exchangeCode: (
 		apiUrl: string,
@@ -73,6 +85,8 @@ const defaultDependencies: AgentConnectDependencies = {
 	getConfig,
 	setCurrentProfile,
 	setProfile,
+	setProjectCredential: (profile, baseDir) =>
+		setProjectCredential({ ...profile, source: "agent-connect" }, baseDir),
 	resolveProfile: resolveProfileFromCredential,
 	exchangeCode: exchangeCliAuthorizationCode,
 	writeIdentity: writeAgentIdentityFile,
@@ -249,8 +263,6 @@ function profileFromExchange(
 		projectId: auth.projectId,
 		projectName: auth.projectName,
 		projectSlug: auth.projectSlug,
-		environmentId: auth.environmentId || "",
-		environmentName: auth.environmentName || "production",
 	};
 }
 
@@ -259,10 +271,14 @@ function safeResult(
 	profileName: string,
 	reusedExistingCredential: boolean,
 	identityFile: ReturnType<typeof writeAgentIdentityFile>,
+	scope: AgentConnectScope,
+	credentialPath?: string,
 ): AgentConnectResult {
 	return {
 		reusedExistingCredential,
 		profileName,
+		scope,
+		credentialPath,
 		identityFile,
 		identity: {
 			userEmail: profile.userEmail,
@@ -284,15 +300,54 @@ function availableProfileName(config: Config): string {
 	throw new Error("No available Tarout CLI profile name was found.");
 }
 
+/**
+ * Exchange a dashboard handoff for a credential and store it.
+ *
+ * Defaults to **project scope**: the key lands in `<cwd>/.tarout/auth.json` and
+ * the machine-wide profile is left untouched. That is the whole point of a
+ * per-project handoff — running the dashboard's one-command setup for project B
+ * must not re-point project A at a different account, which is exactly what a
+ * single global profile did. `scope: "global"` restores the old machine-wide
+ * behaviour, and a `cwd` that is not a project ($HOME, a filesystem root) falls
+ * back to global rather than planting a credential that would apply everywhere.
+ *
+ * @param {string} encoded - The single-use dashboard handoff payload.
+ * @param {string} cwd - The project directory to bind the credential to.
+ * @param {object} [options] - `scope` selects the credential layer.
+ * @param {Partial<AgentConnectDependencies>} [dependencyOverrides] - Test seams.
+ */
 export async function connectAgentFromHandoff(
 	encoded: string,
 	cwd: string,
+	options: { scope?: AgentConnectScope } = {},
 	dependencyOverrides: Partial<AgentConnectDependencies> = {},
 ): Promise<AgentConnectResult> {
 	const dependencies = { ...defaultDependencies, ...dependencyOverrides };
 	const payload = decodeAgentHandoff(encoded, dependencies.now());
 	const config = dependencies.getConfig();
 	let staleMatchingProfileName: string | undefined;
+
+	// A credential in $HOME or / would apply to every directory on the machine —
+	// the opposite of project binding — so those degrade to the global store.
+	const requestedScope = options.scope ?? "project";
+	const scope: AgentConnectScope =
+		requestedScope === "project" && !unsafeCredentialDirectory(cwd)
+			? "project"
+			: "global";
+
+	/**
+	 * Persist to the layer this run is bound to. Project scope deliberately
+	 * never writes the global store: connecting here must not change which
+	 * account other directories use.
+	 */
+	const persist = (profile: Profile, profileName: string): string | undefined => {
+		if (scope === "project") {
+			return dependencies.setProjectCredential(profile, cwd);
+		}
+		dependencies.setProfile(profileName, profile);
+		dependencies.setCurrentProfile(profileName);
+		return undefined;
+	};
 
 	// Reuse any matching saved profile, not only the currently selected one.
 	for (const [profileName, candidate] of Object.entries(config.profiles)) {
@@ -307,12 +362,20 @@ export async function connectAgentFromHandoff(
 			if (!profileMatches(verified, payload.expected)) continue;
 			if (normalizeApiUrl(verified.apiUrl) !== payload.apiUrl) continue;
 
-			dependencies.setProfile(profileName, verified);
-			dependencies.setCurrentProfile(profileName);
+			const credentialPath = persist(verified, profileName);
 			const identityFile = dependencies.writeIdentity(cwd, verified, {
 				profileName,
+				scope,
+				credentialPath,
 			});
-			return safeResult(verified, profileName, true, identityFile);
+			return safeResult(
+				verified,
+				profileName,
+				true,
+				identityFile,
+				scope,
+				credentialPath,
+			);
 		} catch {
 			// The saved key is stale or revoked. Consume the one-time handoff
 			// below and replace it with a fresh server-minted credential.
@@ -347,10 +410,18 @@ export async function connectAgentFromHandoff(
 
 	const profileName =
 		staleMatchingProfileName ?? availableProfileName(config);
-	dependencies.setProfile(profileName, profile);
-	dependencies.setCurrentProfile(profileName);
+	const credentialPath = persist(profile, profileName);
 	const identityFile = dependencies.writeIdentity(cwd, profile, {
 		profileName,
+		scope,
+		credentialPath,
 	});
-	return safeResult(profile, profileName, false, identityFile);
+	return safeResult(
+		profile,
+		profileName,
+		false,
+		identityFile,
+		scope,
+		credentialPath,
+	);
 }

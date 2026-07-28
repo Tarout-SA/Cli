@@ -11,6 +11,7 @@
  */
 
 import Conf from "conf";
+import { getProjectCredential, setProjectCredential } from "./project-auth.js";
 
 /**
  * User profile containing authentication and context information.
@@ -30,12 +31,6 @@ export interface Profile {
 	projectId?: string;
 	projectName?: string;
 	projectSlug?: string;
-	/**
-	 * Legacy runtime-configuration hint retained for commands that still read
-	 * environment-specific settings. It does not scope CLI authentication.
-	 */
-	environmentId: string;
-	environmentName: string;
 	userId: string;
 	userEmail: string;
 	userName?: string;
@@ -77,10 +72,60 @@ export function getConfig(): Config {
 }
 
 /**
+ * Where the credential backing the current invocation came from.
+ * - `project` — a `.tarout/auth.json` at or above the working directory
+ * - `global`  — the machine-wide conf profile
+ * - `env`     — a bare `TAROUT_TOKEN` with no stored profile
+ * - `none`    — not authenticated
+ */
+export type AuthScope = "project" | "global" | "env" | "none";
+
+/**
+ * Reports which credential layer is in effect, for `whoami` and for the notice
+ * that announces a project credential belonging to a different account.
+ * @returns {{ scope: AuthScope; path?: string; userEmail?: string }}
+ */
+export function getAuthScope(): {
+	scope: AuthScope;
+	path?: string;
+	userEmail?: string;
+} {
+	const project = getProjectCredential();
+	if (project) {
+		return {
+			scope: "project",
+			path: project.path,
+			userEmail: project.credential.userEmail,
+		};
+	}
+	const cfg = getConfig();
+	const global = cfg.profiles[cfg.currentProfile];
+	if (global?.token) {
+		return { scope: "global", userEmail: global.userEmail };
+	}
+	return { scope: process.env.TAROUT_TOKEN ? "env" : "none" };
+}
+
+/** The machine-wide profile only, ignoring any project-scoped credential. */
+export function getGlobalProfile(): Profile | null {
+	const cfg = getConfig();
+	return cfg.profiles[cfg.currentProfile] || null;
+}
+
+/**
  * Gets the currently active profile.
+ *
+ * Precedence is project-before-machine: a `.tarout/auth.json` at or above the
+ * working directory wins over the machine-wide profile, so connecting a second
+ * account in another directory cannot re-point this one. `--global-auth`
+ * suppresses the project layer for a single invocation.
+ *
  * @returns {Profile | null} The current profile or null if not logged in
  */
 export function getCurrentProfile(): Profile | null {
+	const project = getProjectCredential();
+	if (project) return project.credential;
+
 	const cfg = getConfig();
 	return cfg.profiles[cfg.currentProfile] || null;
 }
@@ -219,9 +264,25 @@ export function getApiUrl(): string {
 
 /**
  * Updates the current profile with partial data.
+ *
+ * Writes to whichever layer is actually in effect. `tarout projects switch` and
+ * `tarout orgs switch` cache their result here, so when a project-scoped
+ * credential is winning, the update has to land in that file — writing it to the
+ * machine-wide profile instead would leave the switch invisible, because the
+ * project credential keeps taking precedence on the next command.
+ *
  * @param {Partial<Profile>} updates - The fields to update
  */
 export function updateProfile(updates: Partial<Profile>): void {
+	const project = getProjectCredential();
+	if (project) {
+		setProjectCredential(
+			{ ...project.credential, ...updates },
+			project.projectDir,
+		);
+		return;
+	}
+
 	const cfg = getConfig();
 	const currentProfileName = cfg.currentProfile;
 	const currentProfile = cfg.profiles[currentProfileName];
@@ -260,6 +321,7 @@ import {
 	chmodSync,
 	existsSync,
 	mkdirSync,
+	readdirSync,
 	readFileSync,
 	rmSync,
 	writeFileSync,
@@ -383,20 +445,41 @@ export function setProjectConfig(
 
 /**
  * Removes the project configuration (unlinks the project).
+ *
+ * Deletes only the link record. `.tarout/` is shared with the project-scoped
+ * credential (`auth.json`), so the old recursive wipe would have signed the
+ * directory out as a side effect of unlinking an app — two unrelated
+ * operations. The directory itself is cleaned up only once nothing but the
+ * `.gitignore` is left in it.
+ *
  * @param {string} [basePath] - The base directory path (defaults to cwd)
  * @returns {boolean} True if the config was removed, false if it didn't exist
  */
 export function removeProjectConfig(basePath?: string): boolean {
 	const configDir = getProjectConfigDir(basePath);
+	const configPath = getProjectConfigPath(basePath);
 
-	if (!existsSync(configDir)) {
+	if (!existsSync(configPath)) {
 		return false;
 	}
 
 	try {
-		rmSync(configDir, { recursive: true, force: true });
-		return true;
+		rmSync(configPath, { force: true });
 	} catch {
 		return false;
 	}
+
+	try {
+		const remaining = readdirSync(configDir).filter(
+			(entry) => entry !== ".gitignore",
+		);
+		if (remaining.length === 0) {
+			rmSync(configDir, { recursive: true, force: true });
+		}
+	} catch {
+		// Leaving an empty .tarout behind is harmless; the unlink already
+		// succeeded and must not be reported as a failure.
+	}
+
+	return true;
 }

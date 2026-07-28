@@ -18,7 +18,7 @@ import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
 export function registerProvidersCommands(program: Command) {
 	const providers = program
 		.command("providers")
-		.description("Manage Git providers (GitHub, GitLab, Bitbucket)");
+		.description("Manage Git providers (GitHub, GitLab)");
 
 	// ── List all providers ──────────────────────────────────────────────────────
 	providers
@@ -673,67 +673,11 @@ export function registerProvidersCommands(program: Command) {
 			}
 		});
 
-	bitbucket
-		.command("create")
-		.description("Create a Bitbucket provider")
-		.option("-n, --name <name>", "Display name for this provider")
-		.option("-u, --username <username>", "Bitbucket username")
-		.option("--api-token <token>", "Bitbucket API token")
-		.option("--email <email>", "Bitbucket account email")
-		.option("--workspace <workspace>", "Bitbucket workspace name")
-		.option("--auth-id <id>", "Git auth id (defaults to the current user's id)")
-		.action(
-			async (options: {
-				name?: string;
-				username?: string;
-				apiToken?: string;
-				email?: string;
-				workspace?: string;
-				authId?: string;
-			}) => {
-				try {
-					if (!isLoggedIn()) throw new AuthError();
-					const name =
-						options.name ||
-						(await input("Display name for this provider:", undefined, {
-							field: "provider_name",
-							flag: "--name",
-						}));
-					const bitbucketUsername =
-						options.username ||
-						(await input("Bitbucket username:", undefined, {
-							field: "bitbucket_username",
-							flag: "--username",
-						}));
-					const apiToken =
-						options.apiToken ||
-						(await input("Bitbucket API token:", undefined, {
-							field: "bitbucket_api_token",
-							flag: "--api-token",
-							sensitive: true,
-						}));
-					const client = getApiClient();
-					// authId is a required field on apiCreateBitbucket; the dashboard sources
-					// it from the current user's id (api.user.get). Resolve the same way.
-					const authId = options.authId || (await resolveAuthId(client));
-					const _spinner = startSpinner("Creating Bitbucket provider...");
-					const result = await client.bitbucket.create.mutate({
-						name,
-						authId,
-						bitbucketUsername,
-						apiToken,
-						bitbucketEmail: options.email,
-						bitbucketWorkspaceName: options.workspace,
-					} as any);
-					succeedSpinner("Bitbucket provider created.");
-					if (isJsonMode()) outputData(result);
-					else quietOutput((result as any).bitbucketId || "created");
-				} catch (err) {
-					failSpinner();
-					handleError(err);
-				}
-			},
-		);
+	// Bitbucket is retired as a Git provider — GitHub and GitLab only. `create`
+	// and `update` are removed; the platform also drops bitbucket.create /
+	// bitbucket.update from the agent surface, so `tarout call` cannot reach
+	// them either. The read commands below stay so an org with a live
+	// connection can still inspect the credential its deploys depend on.
 
 	bitbucket
 		.command("info <bitbucket-id>")
@@ -842,50 +786,6 @@ export function registerProvidersCommands(program: Command) {
 				handleError(err);
 			}
 		});
-
-	bitbucket
-		.command("update <bitbucket-id>")
-		.description("Update a Bitbucket provider")
-		.option("-n, --name <name>", "New display name")
-		.option("-u, --username <username>", "New Bitbucket username")
-		.option("--api-token <token>", "New Bitbucket API token")
-		.option("--workspace <workspace>", "New workspace name")
-		.action(
-			async (
-				bitbucketId: string,
-				options: {
-					name?: string;
-					username?: string;
-					apiToken?: string;
-					workspace?: string;
-				},
-			) => {
-				try {
-					if (!isLoggedIn()) throw new AuthError();
-					const client = getApiClient();
-					const _spinner = startSpinner("Updating Bitbucket provider...");
-					// apiUpdateBitbucket requires bitbucketId, gitProviderId and name.
-					// Fetch current values so unspecified fields keep their existing data.
-					const data = (await client.bitbucket.one.query({
-						bitbucketId,
-					})) as any;
-					await client.bitbucket.update.mutate({
-						bitbucketId,
-						gitProviderId: data.gitProviderId,
-						name: options.name || data.git_provider?.name || data.name,
-						bitbucketUsername: options.username,
-						apiToken: options.apiToken,
-						bitbucketWorkspaceName: options.workspace,
-					} as any);
-					succeedSpinner("Bitbucket provider updated.");
-					if (isJsonMode()) outputData({ updated: true, bitbucketId });
-					else quietOutput(bitbucketId);
-				} catch (err) {
-					failSpinner();
-					handleError(err);
-				}
-			},
-		);
 
 	void select; // suppress unused import warning
 }

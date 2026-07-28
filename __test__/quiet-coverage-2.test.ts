@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 /**
  * Quiet-mode (`-q`) coverage sweep for the CLI's secondary command surface
  * (projects / providers / keys / tickets / notifications / inbox / firewall /
- * destinations / orgs+envs). Each get/create/delete/switch-style subcommand
+ * destinations / orgs). Each get/create/delete/switch-style subcommand
  * whose primary human output is silenced in quiet mode must still emit the
  * essential machine identifier via `quietOutput` — a single bare line on
  * stdout, no borders/labels — so agents and shell scripts can capture it.
@@ -79,25 +79,10 @@ const client = {
 	mysql: {
 		allByOrganization: { query: async () => [] },
 	},
-	environment: {
-		all: {
-			query: async () => [
-				{ environmentId: "env_prod", displayName: "prod", slug: "production" },
-			],
-		},
-		one: {
-			query: async () => ({
-				environmentId: "env_prod",
-				displayName: "prod",
-				slug: "production",
-			}),
-		},
-		byProject: {
-			query: async () => [
-				{ environmentId: "env_scoped", displayName: "staging", slug: "staging" },
-			],
-		},
-	},
+	// No `environment` stub on purpose: the platform appRouter has no
+	// `environment` router, so any CLI code reaching for one is dead by
+	// construction. Stubbing it here is what let the old `tarout envs` tests
+	// pass against a namespace that could never work against a real server.
 };
 
 vi.mock("../src/lib/api.js", () => ({
@@ -119,7 +104,7 @@ import { registerFirewallCommands } from "../src/commands/firewall";
 import { registerInboxCommands } from "../src/commands/inbox";
 import { registerKeysCommands } from "../src/commands/keys";
 import { registerNotificationsCommands } from "../src/commands/notifications";
-import { registerEnvsCommands, registerOrgsCommands } from "../src/commands/orgs";
+import { registerOrgsCommands } from "../src/commands/orgs";
 import { registerProjectsCommands } from "../src/commands/projects";
 import { registerProvidersCommands } from "../src/commands/providers";
 import { registerTicketsCommands } from "../src/commands/tickets";
@@ -191,13 +176,6 @@ describe("quiet-mode identifier coverage (secondary commands)", () => {
 		}
 	});
 
-	it("envs list emits one full environment id per line", async () => {
-		await run(registerEnvsCommands, ["envs", "list"]);
-		expect(logSpy).toHaveBeenCalledWith("env_prod");
-		const printed = logSpy.mock.calls.map((c) => String(c[0]));
-		expect(printed).toEqual(["env_prod"]);
-	});
-
 	it("db list emits one full database id per line (no table/header)", async () => {
 		await run(registerDbCommands, ["db", "list"]);
 		expect(logSpy).toHaveBeenCalledWith("pg_main");
@@ -205,13 +183,6 @@ describe("quiet-mode identifier coverage (secondary commands)", () => {
 		const printed = logSpy.mock.calls.map((c) => String(c[0]));
 		expect(printed).not.toContain("NAME");
 		expect(printed).toEqual(["pg_main"]);
-	});
-
-	it("envs by-project emits one full environment id per line", async () => {
-		await run(registerEnvsCommands, ["envs", "by-project", "proj_alpha"]);
-		expect(logSpy).toHaveBeenCalledWith("env_scoped");
-		const printed = logSpy.mock.calls.map((c) => String(c[0]));
-		expect(printed).toEqual(["env_scoped"]);
 	});
 
 	it("keys default emits the key id", async () => {
@@ -265,10 +236,6 @@ describe("quiet-mode identifier coverage (secondary commands)", () => {
 		expect(logSpy).toHaveBeenCalledWith("org_active");
 	});
 
-	it("envs info emits the environment id", async () => {
-		await run(registerEnvsCommands, ["envs", "info", "env_prod"]);
-		expect(logSpy).toHaveBeenCalledWith("env_prod");
-	});
 });
 
 describe("quiet emission never fires in JSON mode", () => {

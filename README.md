@@ -106,7 +106,7 @@ install the CLI + register the server in one shot.
 |---------|-------------|
 | `tarout login` | Authenticate via browser |
 | `tarout logout` | Sign out and clear credentials |
-| `tarout whoami` | Show current user, organization, and environment |
+| `tarout whoami` | Show current user, organization, and project |
 
 ```bash
 # Login with a custom API URL (e.g. staging)
@@ -174,9 +174,14 @@ tarout logs my-app --since 1h
 
 # Last 100 lines
 tarout logs my-app --limit 100
+
+# Follow continuously (Ctrl+C to stop)
+tarout logs my-app --follow
 ```
 
-> Continuous following (`--follow`) is not supported yet — `tarout logs` fetches a snapshot.
+> `--follow` polls every 3s and prints only new lines — the platform exposes runtime
+> (container) logs as a snapshot query, not a stream. Under `--json` it emits JSON Lines,
+> one object per line, so agents can consume it incrementally.
 
 ### Environment Variables
 
@@ -294,22 +299,22 @@ immediately. Each HTTP fire carries `x-tarout-cron-timestamp` and
 `x-tarout-cron-signature` headers — verify them with the task's signing secret
 (`tarout jobs info <id>`).
 
-### Organizations & Environments
+### Organizations
 
 | Command | Description |
 |---------|-------------|
 | `tarout orgs list` | List organizations |
-| `tarout orgs switch <org>` | Switch active organization |
-| `tarout envs list` | List environments |
-| `tarout envs switch <env>` | Switch environment (production/staging) |
+| `tarout orgs switch <org>` | Switch active organization (local CLI default) |
+| `tarout orgs activate <org>` | Set the active organization server-side |
 
 ```bash
 # Switch organization
 tarout orgs switch "Acme Corp"
-
-# Switch to staging environment
-tarout envs switch staging
 ```
+
+> Tarout has no separate "environment" (production/staging) concept — apps are
+> scoped to an organization and a project. Use `tarout projects` to separate
+> workloads.
 
 ## All commands
 
@@ -335,8 +340,8 @@ with `--help` for its subcommands and flags):
 | `tarout monitor` | Manage uptime monitors for applications |
 | `tarout jobs` | Manage scheduled tasks (cron) for applications |
 | `tarout projects` | Manage projects within the active organization |
-| `tarout orgs` / `envs` | Switch active organization / environment |
-| `tarout providers` | Manage Git providers (GitHub, GitLab, Bitbucket) |
+| `tarout orgs` | Manage and switch the active organization |
+| `tarout providers` | Manage Git providers (GitHub, GitLab) |
 | `tarout keys` | Manage SSH keys for server access |
 | `tarout firewall` | Manage firewall templates for cloud servers |
 | `tarout tickets` | Manage support tickets |

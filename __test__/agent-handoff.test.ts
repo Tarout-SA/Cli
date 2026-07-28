@@ -1,5 +1,5 @@
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -92,14 +92,19 @@ describe("dashboard agent handoff", () => {
 			profiles: { work: PROFILE },
 		};
 
-		const result = await connectAgentFromHandoff(encode(), directory, {
-			now: () => NOW,
-			getConfig: () => config,
-			setProfile,
-			setCurrentProfile,
-			resolveProfile: vi.fn().mockResolvedValue(PROFILE),
-			exchangeCode,
-		});
+		const result = await connectAgentFromHandoff(
+			encode(),
+			directory,
+			{ scope: "global" },
+			{
+				now: () => NOW,
+				getConfig: () => config,
+				setProfile,
+				setCurrentProfile,
+				resolveProfile: vi.fn().mockResolvedValue(PROFILE),
+				exchangeCode,
+			},
+		);
 
 		expect(result.reusedExistingCredential).toBe(true);
 		expect(result.profileName).toBe("work");
@@ -121,14 +126,19 @@ describe("dashboard agent handoff", () => {
 			},
 		};
 
-		await connectAgentFromHandoff(encode(), directory, {
-			now: () => NOW,
-			getConfig: () => config,
-			setProfile: vi.fn(),
-			setCurrentProfile: vi.fn(),
-			resolveProfile: vi.fn().mockResolvedValue(PROFILE),
-			exchangeCode,
-		});
+		await connectAgentFromHandoff(
+			encode(),
+			directory,
+			{ scope: "global" },
+			{
+				now: () => NOW,
+				getConfig: () => config,
+				setProfile: vi.fn(),
+				setCurrentProfile: vi.fn(),
+				resolveProfile: vi.fn().mockResolvedValue(PROFILE),
+				exchangeCode,
+			},
+		);
 
 		expect(exchangeCode).toHaveBeenCalledOnce();
 	});
@@ -138,14 +148,19 @@ describe("dashboard agent handoff", () => {
 		const setCurrentProfile = vi.fn();
 		const exchangeCode = vi.fn().mockResolvedValue(AUTH);
 
-		const result = await connectAgentFromHandoff(encode(), directory, {
-			now: () => NOW,
-			getConfig: () => ({ currentProfile: "default", profiles: {} }),
-			setProfile,
-			setCurrentProfile,
-			resolveProfile: vi.fn().mockRejectedValue(new Error("offline")),
-			exchangeCode,
-		});
+		const result = await connectAgentFromHandoff(
+			encode(),
+			directory,
+			{ scope: "global" },
+			{
+				now: () => NOW,
+				getConfig: () => ({ currentProfile: "default", profiles: {} }),
+				setProfile,
+				setCurrentProfile,
+				resolveProfile: vi.fn().mockRejectedValue(new Error("offline")),
+				exchangeCode,
+			},
+		);
 
 		expect(exchangeCode).toHaveBeenCalledOnce();
 		expect(setProfile).toHaveBeenCalledWith(
@@ -171,17 +186,22 @@ describe("dashboard agent handoff", () => {
 			projectId: "project-other",
 		};
 
-		const result = await connectAgentFromHandoff(encode(), directory, {
-			now: () => NOW,
-			getConfig: () => ({
-				currentProfile: "default",
-				profiles: { default: unrelated },
-			}),
-			setProfile,
-			setCurrentProfile,
-			resolveProfile: vi.fn().mockRejectedValue(new Error("offline")),
-			exchangeCode: vi.fn().mockResolvedValue(AUTH),
-		});
+		const result = await connectAgentFromHandoff(
+			encode(),
+			directory,
+			{ scope: "global" },
+			{
+				now: () => NOW,
+				getConfig: () => ({
+					currentProfile: "default",
+					profiles: { default: unrelated },
+				}),
+				setProfile,
+				setCurrentProfile,
+				resolveProfile: vi.fn().mockRejectedValue(new Error("offline")),
+				exchangeCode: vi.fn().mockResolvedValue(AUTH),
+			},
+		);
 
 		expect(setProfile).toHaveBeenCalledWith(
 			"dashboard",
@@ -194,24 +214,124 @@ describe("dashboard agent handoff", () => {
 	it("never persists a credential returned for a different account", async () => {
 		const setProfile = vi.fn();
 		const setCurrentProfile = vi.fn();
+		const setProjectCredential = vi.fn();
 		const exchangeCode = vi.fn().mockResolvedValue({
 			...AUTH,
 			organizationId: "org-other",
 		});
 
 		await expect(
-			connectAgentFromHandoff(encode(), directory, {
-				now: () => NOW,
-				getConfig: () => ({ currentProfile: "default", profiles: {} }),
-				setProfile,
-				setCurrentProfile,
-				resolveProfile: vi.fn(),
-				exchangeCode,
-			}),
+			connectAgentFromHandoff(
+				encode(),
+				directory,
+				{},
+				{
+					now: () => NOW,
+					getConfig: () => ({ currentProfile: "default", profiles: {} }),
+					setProfile,
+					setCurrentProfile,
+					setProjectCredential,
+					resolveProfile: vi.fn(),
+					exchangeCode,
+				},
+			),
 		).rejects.toThrow(/different account/i);
 
 		expect(setProfile).not.toHaveBeenCalled();
 		expect(setCurrentProfile).not.toHaveBeenCalled();
+		expect(setProjectCredential).not.toHaveBeenCalled();
+	});
+});
+
+/**
+ * Project binding is the DEFAULT for the dashboard's one-command setup. The
+ * handoff is issued for one project, so storing it machine-wide meant running
+ * setup for project B silently re-pointed project A at another account — the
+ * exact failure this scope exists to prevent.
+ */
+describe("agent handoff credential scope", () => {
+	it("writes the key to the project by default and leaves the global store untouched", async () => {
+		const setProfile = vi.fn();
+		const setCurrentProfile = vi.fn();
+		const setProjectCredential = vi
+			.fn()
+			.mockReturnValue(join(directory, ".tarout", "auth.json"));
+
+		const result = await connectAgentFromHandoff(
+			encode(),
+			directory,
+			{},
+			{
+				now: () => NOW,
+				getConfig: () => ({ currentProfile: "default", profiles: {} }),
+				setProfile,
+				setCurrentProfile,
+				setProjectCredential,
+				resolveProfile: vi.fn().mockRejectedValue(new Error("offline")),
+				exchangeCode: vi.fn().mockResolvedValue(AUTH),
+			},
+		);
+
+		expect(result.scope).toBe("project");
+		expect(result.credentialPath).toContain(".tarout");
+		expect(setProjectCredential).toHaveBeenCalledWith(
+			expect.objectContaining({ token: AUTH.token }),
+			directory,
+		);
+		expect(setProfile).not.toHaveBeenCalled();
+		expect(setCurrentProfile).not.toHaveBeenCalled();
+		expect(JSON.stringify(result)).not.toContain(AUTH.token);
+	});
+
+	it("binds a reused machine-wide credential to the project too", async () => {
+		const setProfile = vi.fn();
+		const setProjectCredential = vi.fn().mockReturnValue("/tmp/x/.tarout/auth.json");
+
+		const result = await connectAgentFromHandoff(
+			encode(),
+			directory,
+			{},
+			{
+				now: () => NOW,
+				getConfig: () => ({ currentProfile: "work", profiles: { work: PROFILE } }),
+				setProfile,
+				setCurrentProfile: vi.fn(),
+				setProjectCredential,
+				resolveProfile: vi.fn().mockResolvedValue(PROFILE),
+				exchangeCode: vi.fn(),
+			},
+		);
+
+		expect(result.reusedExistingCredential).toBe(true);
+		expect(result.scope).toBe("project");
+		expect(setProjectCredential).toHaveBeenCalledWith(PROFILE, directory);
+		expect(setProfile).not.toHaveBeenCalled();
+	});
+
+	it("falls back to the global store rather than planting a credential in $HOME", async () => {
+		const setProfile = vi.fn();
+		const setCurrentProfile = vi.fn();
+		const setProjectCredential = vi.fn();
+
+		const result = await connectAgentFromHandoff(
+			encode(),
+			homedir(),
+			{ scope: "project" },
+			{
+				now: () => NOW,
+				getConfig: () => ({ currentProfile: "default", profiles: {} }),
+				setProfile,
+				setCurrentProfile,
+				setProjectCredential,
+				resolveProfile: vi.fn().mockRejectedValue(new Error("offline")),
+				exchangeCode: vi.fn().mockResolvedValue(AUTH),
+				writeIdentity: vi.fn().mockReturnValue({ path: "AI.md", action: "created" }),
+			},
+		);
+
+		expect(result.scope).toBe("global");
+		expect(setProjectCredential).not.toHaveBeenCalled();
+		expect(setProfile).toHaveBeenCalled();
 	});
 });
 

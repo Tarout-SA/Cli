@@ -7,6 +7,7 @@ import {
 	CliError,
 	findSimilar,
 	handleError,
+	InvalidArgumentError,
 	NotFoundError,
 } from "../lib/errors.js";
 import {
@@ -50,6 +51,45 @@ function normalizeStoragePlan(
 		return normalized as ResourcePlan;
 	}
 	return undefined;
+}
+
+/**
+ * Resolve the `--public` / `--private` pair into the `publicAccess` boolean the
+ * platform expects. This file expresses booleans as explicit opposing flags
+ * (see `--enable`/`--disable` on `external-access`), not commander's
+ * `--x/--no-x`, so both flags are plain booleans and may both be absent —
+ * which must mean "leave it alone" on `update`, hence `undefined`.
+ */
+function resolvePublicAccess(options: {
+	public?: boolean;
+	private?: boolean;
+}): boolean | undefined {
+	if (options.public && options.private) {
+		throw new InvalidArgumentError(
+			"Cannot use --public and --private together. Pick one.",
+		);
+	}
+	if (options.public) return true;
+	if (options.private) return false;
+	return undefined;
+}
+
+/**
+ * A public bucket is served to the entire internet with no credentials at all
+ * (the storage gateway resolves public buckets and answers anonymous GETs), so
+ * every surface that flips the flag on has to say so out loud.
+ */
+function warnPublicAccess(publicUrl?: string | null) {
+	if (isJsonMode()) return;
+	log("");
+	log(
+		colors.warn(
+			"This bucket is PUBLIC: anyone with the object URL can read its files without credentials, no signed URL required.",
+		),
+	);
+	if (publicUrl) {
+		log(`Public base URL: ${colors.cyan(publicUrl)}`);
+	}
 }
 
 export function registerStorageCommands(program: Command) {
@@ -127,12 +167,21 @@ export function registerStorageCommands(program: Command) {
 			"Plan: free, starter, standard, or pro (defaults to this project's entitled tier)",
 		)
 		.option("-d, --description <text>", "Bucket description")
+		.option(
+			"--public",
+			"Serve this bucket's objects to anyone, unauthenticated (default: private)",
+		)
+		.option("--private", "Keep the bucket private (default)")
 		.action(async (name, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
 				const profile = getCurrentProfile();
 				if (!profile) throw new AuthError();
+
+				// Default to private: omitting both flags must not change the
+				// behaviour anyone already scripted against.
+				const publicAccess = resolvePublicAccess(options) ?? false;
 
 				let bucketName = name;
 
@@ -181,13 +230,15 @@ export function registerStorageCommands(program: Command) {
 
 				const _spinner = startSpinner("Creating storage bucket...");
 
-				// Managed shared storage is always private — the server rejects
-				// publicAccess:true (use signed URLs / a gateway endpoint instead).
+				// storage.create takes `publicAccess: z.boolean().default(false)` and
+				// persists it as-is — public buckets are a supported product feature
+				// (the gateway answers anonymous reads for them), so pass the user's
+				// choice through instead of hardcoding private.
 				const bucket = await client.storage.create.mutate({
 					name: bucketName,
 					plan,
 					description: options.description,
-					publicAccess: false,
+					publicAccess,
 				});
 
 				succeedSpinner("Storage bucket created!");
@@ -201,12 +252,21 @@ export function registerStorageCommands(program: Command) {
 
 				quietOutput(bucketId);
 
+				// Trust the server's echo of publicAccess over the local flag — the
+				// procedure is the one that decided.
+				const isPublic = Boolean((bucket as any).publicAccess);
+				const publicUrl = (bucket as any).publicUrl as string | null | undefined;
+
 				box("Storage Bucket Created", [
 					`ID: ${colors.cyan(bucketId)}`,
 					`Name: ${bucket.name}`,
 					`Plan: ${plan}`,
-					"Access: private",
+					`Access: ${isPublic ? colors.warn("public (unauthenticated reads)") : "private"}`,
+					...(isPublic && publicUrl ? [`Public URL: ${publicUrl}`] : []),
 				]);
+
+				// The box already carries the URL; don't repeat it in the warning.
+				if (isPublic) warnPublicAccess();
 
 				log(
 					`Browse files: ${colors.dim(`tarout storage files ${bucketId.slice(0, 8)}`)}`,
@@ -364,6 +424,25 @@ export function registerStorageCommands(program: Command) {
 					log(`  ${colors.cyan(bucket.endpoint)}`);
 				} else {
 					log(`  ${colors.dim("Not available")}`);
+				}
+				// findById returns `publicUrl` (non-null only for public, non-CUSTOM
+				// buckets). Never build this URL by hand — the server owns the shape.
+				const infoPublicUrl = (bucket as any).publicUrl as
+					| string
+					| null
+					| undefined;
+				if (bucket.publicAccess) {
+					log("");
+					log(colors.bold("Public URL"));
+					log(
+						`  ${infoPublicUrl ? colors.cyan(infoPublicUrl) : colors.dim("Not available")}`,
+					);
+					log("");
+					log(
+						colors.warn(
+							"  Anyone can read this bucket's objects without credentials.",
+						),
+					);
 				}
 				log("");
 				log(`  Created: ${formatDate(bucket.createdAt)}`);
@@ -652,6 +731,10 @@ export function registerStorageCommands(program: Command) {
 		.description("Update bucket settings")
 		.option("-n, --name <name>", "New name")
 		.option("--description <text>", "New description")
+		.option(
+			"--public",
+			"Make the bucket public (unauthenticated reads for anyone)",
+		)
 		.option("--private", "Make bucket private")
 		.action(async (bucketIdentifier, options) => {
 			try {
@@ -666,19 +749,28 @@ export function registerStorageCommands(program: Command) {
 				}
 				const bucketId = bucket.bucketId || bucket.id;
 				// update input is .strict() and only accepts
-				// { bucketId, name?, description?, publicAccess? }. It rejects
-				// publicAccess:true (managed storage is private), so only expose
-				// --private; there is no storageLimit field on this procedure.
-				const publicAccess = options.private ? false : undefined;
+				// { bucketId, name?, description?, publicAccess? }; there is no
+				// storageLimit field on this procedure. publicAccess:true IS accepted
+				// and persisted (public buckets are a real feature), so both --public
+				// and --private are wired. Leaving both off sends `undefined`, which
+				// keeps the bucket's current visibility.
+				const publicAccess = resolvePublicAccess(options);
 				const _updateSpinner = startSpinner("Updating bucket...");
-				await client.storage.update.mutate({
+				const updated = (await client.storage.update.mutate({
 					bucketId,
 					name: options.name,
 					description: options.description,
 					publicAccess,
-				} as any);
+				} as any)) as any;
 				succeedSpinner("Bucket updated.");
-				if (isJsonMode()) outputData({ updated: true, bucketId });
+				if (isJsonMode()) {
+					outputData({ updated: true, bucketId, ...updated });
+					return;
+				}
+				// Only shout when the bucket ends up public — `update` echoes the
+				// stored publicAccess/publicUrl, so this is accurate even when the
+				// flags were left off and it was already public.
+				if (updated?.publicAccess) warnPublicAccess(updated.publicUrl);
 			} catch (err) {
 				failSpinner();
 				handleError(err);

@@ -185,6 +185,13 @@ export interface ProjectInspection {
 		hasGit: boolean;
 		provider?: string;
 		remoteUrl?: string;
+		/**
+		 * `owner`/`repository` parsed from a github.com remote. Only set when the
+		 * remote is GitHub — it's what `saveGithubProvider` needs to bind the repo.
+		 */
+		githubRepo?: { owner: string; repository: string };
+		/** Checked-out branch from `.git/HEAD`; undefined on a detached HEAD. */
+		branch?: string;
 	};
 	storage: boolean;
 	storageReasons: string[];
@@ -465,8 +472,6 @@ async function authenticateViaBrowser(
 			projectId: authData.projectId,
 			projectName: authData.projectName,
 			projectSlug: authData.projectSlug,
-			environmentId: authData.environmentId || "",
-			environmentName: authData.environmentName || "production",
 		};
 		const profile = await resolveProfileFromCredential({
 			token: authData.token,
@@ -767,6 +772,10 @@ function collectInspectableFiles(root: string): string[] {
 		".next",
 		".nuxt",
 		".svelte-kit",
+		// Holds the project credential (`auth.json`) and link metadata. Framework
+		// detection reads the CONTENT of every .json it finds, so without this the
+		// API key would be slurped into CLI memory on every up/deploy.
+		".tarout",
 		"build",
 		"coverage",
 		"dist",
@@ -994,21 +1003,40 @@ function detectStorage(
 	return { detected: reasons.length > 0, reasons: uniqueReasons(reasons) };
 }
 
+/**
+ * Pull `owner`/`repository` out of a github.com remote. Handles the HTTPS, SSH
+ * (`git@github.com:owner/repo.git`) and `ssh://` spellings, with or without the
+ * trailing `.git`. Returns undefined for a non-GitHub or unparseable remote.
+ */
+export function parseGitHubRemote(
+	remoteUrl: string | undefined,
+): { owner: string; repository: string } | undefined {
+	if (!remoteUrl) return undefined;
+	const match = remoteUrl
+		.trim()
+		.match(/github\.com[:/]+([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i);
+	const owner = match?.[1];
+	const repository = match?.[2];
+	if (!owner || !repository) return undefined;
+	return { owner, repository };
+}
+
 function detectGitSource(cwd: string): ProjectInspection["git"] {
 	const gitPath = join(cwd, ".git");
 	if (!existsSync(gitPath)) return { hasGit: false };
 
-	let configPath = join(gitPath, "config");
+	let gitDir = gitPath;
 	try {
 		const stat = statSync(gitPath);
 		if (stat.isFile()) {
+			// Worktree / submodule: `.git` is a file pointing at the real gitdir.
 			const content = readTextFile(gitPath, 4096);
 			const match = content.match(/gitdir:\s*(.+)/i);
-			if (match?.[1]) configPath = join(cwd, match[1].trim(), "config");
+			if (match?.[1]) gitDir = join(cwd, match[1].trim());
 		}
 	} catch {}
 
-	const config = readTextFile(configPath, 64 * 1024);
+	const config = readTextFile(join(gitDir, "config"), 64 * 1024);
 	const remoteUrl = config.match(/url\s*=\s*(.+)/)?.[1]?.trim();
 	const provider = remoteUrl?.includes("github.com")
 		? "GitHub"
@@ -1020,7 +1048,18 @@ function detectGitSource(cwd: string): ProjectInspection["git"] {
 					? "Git"
 					: undefined;
 
-	return { hasGit: true, provider, remoteUrl };
+	// `ref: refs/heads/<branch>`; a detached HEAD holds a bare SHA, which we
+	// deliberately leave undefined rather than binding the app to a commit.
+	const head = readTextFile(join(gitDir, "HEAD"), 4096);
+	const branch = head.match(/ref:\s*refs\/heads\/(.+)/)?.[1]?.trim();
+
+	return {
+		hasGit: true,
+		provider,
+		remoteUrl,
+		githubRepo: parseGitHubRemote(remoteUrl),
+		branch: branch || undefined,
+	};
 }
 
 function uniqueReasons(reasons: string[]): string[] {
@@ -2705,7 +2744,17 @@ async function deployResolvedTarget(
 				);
 			}
 
-			if (shouldUploadSource) {
+			// Prefer binding the GitHub remote over uploading a zip: a Git-sourced
+			// app redeploys on every push, an uploaded one only ever redeploys when
+			// someone reruns the CLI. Only attempted when the CLI was going to
+			// upload anyway and the user didn't explicitly ask for `--source
+			// upload`, so an explicit choice always wins.
+			const connectedGit =
+				shouldUploadSource && sourcePreference !== "upload"
+					? await tryConnectGitHubSource(client, app, inspection)
+					: false;
+
+			if (shouldUploadSource && !connectedGit) {
 				await uploadCurrentDirectorySource(
 					client,
 					app.applicationId,
@@ -2845,7 +2894,7 @@ async function clearDeployEntitlementGate(
 				],
 				{
 					field: "app_slot_gate",
-					flag: "--app <id|name> to reuse an existing app, or tarout billing upgrade <plan> to add capacity",
+					flag: "pass the app id or name as the positional argument (tarout deploy <id|name>) to reuse an existing app, or tarout billing upgrade <plan> to add capacity",
 					context: { apps: apps.map((a) => ({ id: a.id, name: a.name })) },
 				},
 			);
@@ -3259,7 +3308,6 @@ async function createAndAttachDatabase(
 				appName,
 				dockerImage: "postgres:17",
 				organizationId: profile.organizationId,
-				environmentId: profile.environmentId,
 				plan: input.plan,
 				region: DEFAULT_REGION,
 			});
@@ -3270,7 +3318,6 @@ async function createAndAttachDatabase(
 				appName,
 				dockerImage: "mysql:9.1",
 				organizationId: profile.organizationId,
-				environmentId: profile.environmentId,
 				plan: input.plan,
 				region: DEFAULT_REGION,
 			});
@@ -3375,7 +3422,6 @@ interface DatabaseCandidate {
 	plan: ResourcePlan;
 	region?: string | null;
 	projectId?: string | null;
-	environmentId?: string | null;
 	applicationStatus?: string | null;
 	isReadOnly?: boolean | null;
 	createdAt?: string | Date | null;
@@ -3387,7 +3433,6 @@ interface StorageCandidate {
 	plan: ResourcePlan;
 	region?: string | null;
 	projectId?: string | null;
-	environmentId?: string | null;
 	applicationStatus?: string | null;
 	isUploadBlocked?: boolean | null;
 	createdAt?: string | Date | null;
@@ -3623,7 +3668,6 @@ async function listDatabaseCandidates(
 			plan: (r.plan as ResourcePlan) ?? "FREE",
 			region: r.region ?? null,
 			projectId: r.projectId ?? null,
-			environmentId: r.environmentId ?? null,
 			applicationStatus: r.applicationStatus ?? null,
 			isReadOnly: r.isReadOnly ?? null,
 			createdAt: r.createdAt ?? null,
@@ -3647,7 +3691,6 @@ async function listStorageCandidates(
 			plan: (r.plan as ResourcePlan) ?? "FREE",
 			region: r.region ?? null,
 			projectId: r.projectId ?? null,
-			environmentId: r.environmentId ?? null,
 			applicationStatus: r.applicationStatus ?? null,
 			isUploadBlocked: r.isUploadBlocked ?? null,
 			createdAt: r.createdAt ?? null,
@@ -4250,6 +4293,109 @@ function hasConfiguredSource(app: any): boolean {
 		default:
 			return false;
 	}
+}
+
+/**
+ * Bind this project's GitHub remote to `app` so pushes auto-deploy, instead of
+ * uploading a source zip.
+ *
+ * Returns true only when the app is now Git-sourced. Every miss — no remote, a
+ * non-GitHub remote, a detached HEAD, no GitHub App installed on the org, or a
+ * failed mutation — returns false so the caller falls back to the upload path.
+ * This is an opportunistic upgrade, never a reason to fail a deploy.
+ *
+ * Deliberately silent about *why* it declined in the common case: a user with no
+ * GitHub App gets one actionable hint, not a lecture on every deploy.
+ */
+export async function tryConnectGitHubSource(
+	client: any,
+	app: AppSummary,
+	inspection: ProjectInspection,
+): Promise<boolean> {
+	const repo = inspection.git.githubRepo;
+	const branch = inspection.git.branch;
+	if (!repo || !branch) return false;
+
+	let githubId: string | undefined;
+	try {
+		const response = await client.github.githubProviders.query();
+		const list = Array.isArray(response)
+			? response
+			: Array.isArray(response?.providers)
+				? response.providers
+				: [];
+		// Exactly one connection is the overwhelmingly common case. With several,
+		// picking arbitrarily could bind the wrong installation, so we decline and
+		// let the user choose explicitly via `tarout apps git github`.
+		if (list.length !== 1) {
+			if (list.length === 0) emitGitHubConnectHint(repo, branch);
+			return false;
+		}
+		githubId = list[0]?.githubId ?? list[0]?.id ?? undefined;
+	} catch {
+		return false;
+	}
+
+	if (!githubId) return false;
+
+	const _spinner = startSpinner(
+		`Connecting ${repo.owner}/${repo.repository} (${branch})...`,
+	);
+	try {
+		await client.application.saveGithubProvider.mutate({
+			applicationId: app.applicationId,
+			repository: repo.repository,
+			owner: repo.owner,
+			branch,
+			buildPath: "/",
+			githubId,
+			watchPaths: [],
+			enableSubmodules: false,
+		});
+	} catch {
+		// The repo may not be covered by the installation, or the branch may not
+		// exist on the remote yet. Fall back to an upload rather than failing.
+		failSpinner("Couldn't connect the GitHub repository — uploading instead.");
+		return false;
+	}
+
+	succeedSpinner(`Connected ${repo.owner}/${repo.repository} (${branch}).`);
+	if (isJsonMode()) {
+		outputJsonLine({
+			type: "event",
+			event: "github_connected",
+			repository: `${repo.owner}/${repo.repository}`,
+			branch,
+		});
+	} else {
+		log(
+			`Pushes to ${colors.cyan(branch)} will now redeploy automatically. Uncommitted work is not deployed.`,
+		);
+	}
+	return true;
+}
+
+/** One-time nudge when a GitHub remote exists but no GitHub App is installed. */
+function emitGitHubConnectHint(
+	repo: { owner: string; repository: string },
+	branch: string,
+): void {
+	if (isJsonMode()) {
+		outputJsonLine({
+			type: "event",
+			event: "github_connect_available",
+			repository: `${repo.owner}/${repo.repository}`,
+			branch,
+			next: "Install the Tarout GitHub App (tarout providers github connect) to get push-to-deploy.",
+		});
+		return;
+	}
+	log("");
+	log(
+		`${colors.dim("Tip:")} this folder tracks ${colors.cyan(`${repo.owner}/${repo.repository}`)}. Connect it to redeploy on every push:`,
+	);
+	log(`  ${colors.dim("tarout providers github connect")}`);
+	log("");
 }
 
 export async function uploadCurrentDirectorySource(
@@ -5051,17 +5197,15 @@ export function registerLogsCommand(program: Command) {
 			"Log level (ALL, ERROR, WARN, INFO, DEBUG)",
 			"ALL",
 		)
-		.option("-f, --follow", "Stream logs continuously")
+		.option(
+			"-f, --follow",
+			"Follow logs continuously (polls; Ctrl+C to stop)",
+		)
 		.option("-n, --limit <number>", "Number of logs to show", "100")
 		.option("--since <duration>", "Show logs since: 1h, 6h, 24h, 7d, all")
 		.action(async (appIdentifier, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-				if (options.follow) {
-					throw new InvalidArgumentError(
-						"Continuous log following is not supported yet. Remove --follow to fetch a snapshot.",
-					);
-				}
 
 				const timeRange = options.since || "all";
 				if (!["1h", "6h", "24h", "7d", "all"].includes(timeRange)) {
@@ -5110,19 +5254,22 @@ export function registerLogsCommand(program: Command) {
 					throw new NotFoundError("Application", appIdentifier);
 				}
 
-				const result = await client.application.getApplicationLogs.query({
+				const logQuery: RuntimeLogQuery = {
 					applicationId: app.applicationId,
 					lines: lineLimit,
-					level: level as
-						| "ALL"
-						| "ERROR"
-						| "WARN"
-						| "INFO"
-						| "DEBUG"
-						| "TRACE"
-						| "UNKNOWN",
-					timeRange: timeRange as "1h" | "6h" | "24h" | "7d" | "all",
-				});
+					level: level as RuntimeLogQuery["level"],
+					timeRange: timeRange as RuntimeLogQuery["timeRange"],
+				};
+
+				if (options.follow) {
+					// --follow never returns on its own; it exits via SIGINT.
+					succeedSpinner();
+					await followApplicationLogs(client, logQuery, app.name);
+					return;
+				}
+
+				const result =
+					await client.application.getApplicationLogs.query(logQuery);
 				succeedSpinner();
 
 				if (isJsonMode()) {
@@ -5176,6 +5323,155 @@ function formatDate(date: Date | string): string {
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Input accepted by `application.getApplicationLogs`. */
+interface RuntimeLogQuery {
+	applicationId: string;
+	lines: number;
+	level: "ALL" | "ERROR" | "WARN" | "INFO" | "DEBUG" | "TRACE" | "UNKNOWN";
+	timeRange: "1h" | "6h" | "24h" | "7d" | "all";
+}
+
+/** One entry as returned by `application.getApplicationLogs`. */
+interface RuntimeLogEntry {
+	timestamp?: string | null;
+	level?: string | null;
+	message?: string | null;
+	raw?: string | null;
+}
+
+/**
+ * Poll interval for `tarout logs --follow`.
+ *
+ * Runtime (container) logs have NO streaming source: unlike build logs — which
+ * ride the /listen-deployment WebSocket — the platform only exposes the
+ * `application.getApplicationLogs` query, which asks Coolify for a `docker logs`
+ * snapshot. The dashboard's own follow toggle polls that same query (every 2s),
+ * so the CLI polls too. 3s matches the deploy-wait poll interval used elsewhere
+ * in this file and keeps one long-lived tail from hammering Coolify.
+ * Hardcoded on purpose: no env var (hard project rule).
+ */
+const RUNTIME_LOG_POLL_INTERVAL_MS = 3000;
+
+/**
+ * Consecutive poll failures tolerated before giving up. A tail is long-lived,
+ * so a single transient network/gateway blip must not kill it — but a genuinely
+ * broken connection should still surface instead of spinning forever.
+ */
+const RUNTIME_LOG_MAX_CONSECUTIVE_ERRORS = 3;
+
+/**
+ * Stable identity per log line, so `--follow` can print only what is new.
+ *
+ * The procedure returns a rolling window of the last N container lines with no
+ * cursor and no ids, so consecutive polls overlap heavily. Identical lines can
+ * legitimately repeat inside a single window (same timestamp resolution, same
+ * message), so the key carries an occurrence index — the 2nd "listening on
+ * :3000" in a window is a different line from the 1st. Ordering is never
+ * assumed: keys are matched by value, not by position.
+ */
+function runtimeLogKeys(entries: RuntimeLogEntry[]): string[] {
+	const counts = new Map<string, number>();
+	return entries.map((entry) => {
+		const base = `${entry.timestamp ?? ""}|${entry.level ?? ""}|${
+			entry.message ?? entry.raw ?? ""
+		}`;
+		const seen = counts.get(base) ?? 0;
+		counts.set(base, seen + 1);
+		return `${base}#${seen}`;
+	});
+}
+
+function emitRuntimeLogEntry(entry: RuntimeLogEntry): void {
+	if (isJsonMode()) {
+		// JSON Lines: one object per line, written as it arrives. A follow
+		// stream never ends, so buffering into the usual single `outputData`
+		// envelope would hand an agent nothing at all.
+		outputJsonLine({ type: "log", ...entry });
+		return;
+	}
+	const timestamp = entry.timestamp
+		? `${colors.dim(new Date(entry.timestamp).toLocaleTimeString())} `
+		: "";
+	log(
+		`${timestamp}${entry.level || "UNKNOWN"} ${entry.message || entry.raw || ""}`,
+	);
+}
+
+/**
+ * `tarout logs --follow`: poll runtime logs and print only new lines.
+ * Runs until Ctrl+C (or an unrecoverable API failure).
+ */
+async function followApplicationLogs(
+	client: any,
+	logQuery: RuntimeLogQuery,
+	appName: string,
+): Promise<void> {
+	if (!isJsonMode()) {
+		log("");
+		log(
+			colors.dim(
+				`Following logs for ${colors.cyan(appName)} (polling every ${
+					RUNTIME_LOG_POLL_INTERVAL_MS / 1000
+				}s)`,
+			),
+		);
+		log(colors.dim("Press Ctrl+C to stop"));
+		log("");
+	}
+
+	// Ctrl+C ends the tail like `tail -f` does: exit 0, no stack trace. Same
+	// idiom as the deploy:logs WebSocket stream above.
+	process.on("SIGINT", () => {
+		if (!isJsonMode()) {
+			log("");
+			log(colors.dim("Log following stopped"));
+		}
+		process.exit(0);
+	});
+
+	// Keys seen in the previous poll's window; null until the first successful
+	// poll, which prints the whole snapshot (again, like `tail -f`).
+	let seenKeys: Set<string> | null = null;
+	let consecutiveErrors = 0;
+
+	for (;;) {
+		let entries: RuntimeLogEntry[];
+		try {
+			const result =
+				await client.application.getApplicationLogs.query(logQuery);
+			entries = result?.logs || [];
+			consecutiveErrors = 0;
+		} catch (err) {
+			consecutiveErrors++;
+			if (consecutiveErrors >= RUNTIME_LOG_MAX_CONSECUTIVE_ERRORS) throw err;
+			await sleep(RUNTIME_LOG_POLL_INTERVAL_MS);
+			continue;
+		}
+
+		if (entries.length > 0) {
+			const keys = runtimeLogKeys(entries);
+			for (let i = 0; i < entries.length; i++) {
+				const entry = entries[i];
+				const key = keys[i];
+				if (!entry || key === undefined) continue;
+				if (seenKeys === null || !seenKeys.has(key)) {
+					emitRuntimeLogEntry(entry);
+				}
+			}
+			// Replace rather than grow: the window is capped at `lines`, so
+			// anything absent from this poll has already scrolled out of the
+			// container's buffer and cannot reappear. Keeps memory flat on a
+			// tail that runs for hours.
+			seenKeys = new Set(keys);
+		}
+		// An empty result is deliberately NOT treated as "the log was cleared":
+		// getApplicationLogs swallows Coolify errors and returns `logs: []`, so
+		// resetting seenKeys here would reprint the entire window on recovery.
+
+		await sleep(RUNTIME_LOG_POLL_INTERVAL_MS);
+	}
 }
 
 /**

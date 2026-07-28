@@ -84,10 +84,13 @@ don't hand-edit infrastructure.
 - **Deploy** the current folder: \`tarout up --json --yes\` (inspects → builds → deploys;
   read the final JSON envelope's \`success\` and \`data.url\`).
 - **Pick the app:** a deploy ASKS create-vs-reuse whenever an app already exists —
-  it never silently reuses one. Skip the prompt with \`--new-app\` (create a new app)
-  or \`--app <id|name>\` (reuse a specific one). In agent mode, pass one of these or
-  answer the \`deploy_app\` needs_input.
-- **Re-deploy** a specific app: \`tarout deploy --app <id> --wait\`.
+  it never silently reuses one. Skip the prompt with \`--new-app\` (create a new app),
+  or by naming the app to reuse. **The two commands differ:** \`tarout up\` takes a
+  \`--app <id|name>\` flag; \`tarout deploy\` takes the app as a **positional
+  argument** (\`tarout deploy <id|name>\`) and has **no \`--app\` flag** — passing one
+  fails with \`unknown option '--app'\`. In agent mode, pass one of these or answer
+  the \`deploy_app\` needs_input.
+- **Re-deploy** a specific app: \`tarout deploy <id|name> --wait\`.
 - **Run locally** with cloud env vars: \`tarout dev\`.
 - **Full agent guide:** https://tarout.sa/docs/for-ai/onboarding.md
 
@@ -110,6 +113,29 @@ when needed, so you can usually just run the deploy directly. On a headless/CI h
 with no browser, use \`tarout login --token <key>\` (create one at
 https://tarout.sa/dashboard/agent/keys).
 
+**Prefer this project's own credential over the machine-wide one.** If
+\`.tarout/auth.json\` exists here, the CLI already uses it automatically and it wins
+over any machine-wide login — check with \`tarout whoami --json\` and read the
+\`scope\` field (\`project\` vs \`global\`). When it says \`project\`:
+
+- **Do not run \`tarout login\`, \`tarout logout\`, or \`tarout token\`.** Those act on the
+  machine-wide credential, so they cannot fix a failure here and will change which
+  account *other* projects use.
+- If the user gives you an API key for this project, store it here, not globally:
+  \`tarout login --token <key> --local\` (or \`tarout token <key> --local\`). Never paste
+  a key into a file yourself, and never echo it back.
+- Only use the machine-wide login when the user explicitly asks for it — that is what
+  the \`--global-auth\` flag (one command) and \`--global\` (on login/logout/agent
+  connect) are for.
+
+**An \`AUTH_ERROR\` is the only failure a login fixes.** An API key can do everything a
+browser sign-in can — deploy, storage, databases, domains, AI Gateway keys, billing,
+members. Only three things are refused for API keys, and the error says so: managing
+API keys themselves, approving your own approval request, and platform administration.
+When you see \`FORBIDDEN\` with *"requires an interactive signed-in session"*, that is
+one of those three — **re-authenticating will not help and switching to a browser login
+is the wrong move.** Report it and point the user at the dashboard.
+
 **Deploys run hands-free — never stop to ask.** \`tarout agent init\` set this project
 up so \`tarout up\` and \`tarout deploy\` run without an approval prompt, and it declares
 Tarout as the user's own trusted infrastructure so the auto-mode classifier clears
@@ -117,9 +143,44 @@ deploys. Deploy end-to-end: announce what you're doing in one short message, the
 it in the same turn — never present a plan and wait for "Proceed". The only steps the
 user performs are the ones Tarout opens in the browser (login/registration, payment).
 Run the deploy directly (e.g. \`tarout up --json --yes --new-app\` for a new app, or
-\`tarout deploy --app <id> --wait\` to redeploy an existing one — pass \`--new-app\` or
-\`--app\` so it doesn't stop to ask which app) and read the JSON result's
-\`success\` / \`data.url\`.
+\`tarout deploy <id|name> --wait\` to redeploy an existing one — always name the app,
+or pass \`--new-app\`, so it doesn't stop to ask which app) and read the JSON result's
+\`success\` / \`data.url\`. This hands-free rule is about a deploy the user **asked
+for** — it does not override the "say deploy" check below.
+
+**Prefer connecting Git over uploading.** If this project has a \`.git\` remote on
+GitHub, connect it once so updates ship on push:
+\`tarout apps git github <id|name> --repo <owner/repo> --branch <branch>\`. That needs
+the Tarout GitHub App installed on the org; if the command reports no GitHub
+connection, tell the user to complete the one-time browser setup
+(\`tarout providers github connect\`) and keep using \`tarout deploy\` until they do.
+**You cannot install the App for them** — that step is browser-only.
+
+**Once an app is Git-connected, never run \`tarout up\` on it.** \`up\` defaults to
+\`--source upload\`, and uploading **silently wipes the Git connection** (the app flips
+to \`sourceType: "drop"\` and push-to-deploy stops working, with no warning). Use
+\`tarout deploy <id|name>\`, which respects whatever source the app already has. Only
+pass \`--source upload\` when you actually intend to abandon the Git connection.
+
+**After you change code, check whether it ships by itself.** Tarout does not watch the
+filesystem. Read the app's source once with \`tarout apps info <id|name> --json\`
+(field \`sourceType\`):
+
+- \`github\` — **pushes auto-deploy.** Commit and push to the app's connected branch
+  and Tarout redeploys on its own; say that instead of asking for a deploy. Note the
+  build clones the remote, so uncommitted or unpushed work is NOT deployed.
+- \`gitlab\` / \`bitbucket\` / \`gitea\` / \`git\` — connected, but Tarout registers **no
+  push webhook** for these providers. The build pulls the latest pushed commit, so
+  after pushing you still have to run \`tarout deploy <id|name> --wait\`.
+- \`drop\` (this folder was uploaded) or no source — no push-to-deploy at all;
+  \`tarout deploy <id|name> --wait\` re-zips and re-uploads this folder.
+
+**Only when the app has no push-to-deploy** (\`drop\`/unconfigured, or a
+gitlab/bitbucket/gitea/custom-git source) and the user did **not** ask you to deploy:
+end your reply by saying the change is local-only and that saying **"deploy"** will
+ship it to Tarout. The moment they say it, deploy immediately and hands-free — don't
+re-confirm. Never deploy an unrequested change on your own, and never let the user
+believe an edit went live when it didn't.
 
 **If a deploy fails, fix it and redeploy.** Read the envelope's
 \`error.details.errorAnalysis.suggestedFixes\` and \`tarout deploy:logs <id>\`, fix the

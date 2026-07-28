@@ -15,15 +15,26 @@ const m = vi.hoisted(() => ({
 	setCurrentProfile: vi.fn(),
 	isLoggedIn: vi.fn(() => false),
 	getCurrentProfile: vi.fn(() => null),
+	getGlobalProfile: vi.fn(
+		() =>
+			({ token: "tk_123", apiUrl: "https://tarout.sa", userEmail: "owner@example.com" }) as any,
+	),
+	getAuthScope: vi.fn(() => ({ scope: "global" as const })),
 	getToken: vi.fn(() => "tk_123"),
 	getApiUrl: vi.fn(() => "https://tarout.sa"),
 	resolveProfileFromCredential: vi.fn(),
+	createCredentialClient: vi.fn(),
 	getConfig: vi.fn(() => ({ currentProfile: "default", profiles: {} })),
 	deleteProfile: vi.fn(),
 	listProfiles: vi.fn(() => [] as string[]),
 	clearConfig: vi.fn(),
 	revokeCurrentCliKey: vi.fn(),
 	getApiClient: vi.fn(),
+	// Project-scoped credentials are exercised in project-auth.test.ts; here the
+	// directory is deliberately unauthenticated so `logout` takes the global path.
+	getProjectCredential: vi.fn(() => null),
+	setProjectCredential: vi.fn(() => "/tmp/project/.tarout/auth.json"),
+	removeProjectCredential: vi.fn(() => "/tmp/project/.tarout/auth.json"),
 }));
 const {
 	setProfile,
@@ -38,6 +49,8 @@ vi.mock("../src/lib/config.js", () => ({
 	setCurrentProfile: m.setCurrentProfile,
 	isLoggedIn: m.isLoggedIn,
 	getCurrentProfile: m.getCurrentProfile,
+	getGlobalProfile: m.getGlobalProfile,
+	getAuthScope: m.getAuthScope,
 	getToken: m.getToken,
 	getApiUrl: m.getApiUrl,
 	getConfig: m.getConfig,
@@ -46,12 +59,19 @@ vi.mock("../src/lib/config.js", () => ({
 	clearConfig: m.clearConfig,
 }));
 
+vi.mock("../src/lib/project-auth.js", () => ({
+	getProjectCredential: m.getProjectCredential,
+	setProjectCredential: m.setProjectCredential,
+	removeProjectCredential: m.removeProjectCredential,
+}));
+
 vi.mock("../src/lib/api.js", () => ({
 	getApiClient: m.getApiClient,
 }));
 
 vi.mock("../src/lib/auth-profile.js", () => ({
 	resolveProfileFromCredential: m.resolveProfileFromCredential,
+	createCredentialClient: m.createCredentialClient,
 }));
 
 vi.mock("../src/utils/spinner.js", () => ({
@@ -244,7 +264,15 @@ describe("performLogout", () => {
 			userEmail: "owner@example.com",
 		} as never);
 		m.getConfig.mockReturnValue({ currentProfile: "default", profiles: {} });
-		m.getApiClient.mockReturnValue({
+		m.getGlobalProfile.mockReturnValue({
+			...RESOLVED,
+			userEmail: "owner@example.com",
+		} as never);
+		m.getProjectCredential.mockReturnValue(null);
+		// The revoke is issued through a client built explicitly from the GLOBAL
+		// credential, so that `logout --global` can never revoke whichever key a
+		// project-scoped credential happens to be supplying.
+		m.createCredentialClient.mockReturnValue({
 			user: { revokeCurrentCliKey: { mutate: m.revokeCurrentCliKey } },
 		});
 	});
@@ -265,7 +293,7 @@ describe("performLogout", () => {
 	});
 
 	it("still clears local credentials when the revoke call fails (offline / old server)", async () => {
-		m.getApiClient.mockImplementation(() => {
+		m.createCredentialClient.mockImplementation(() => {
 			throw new Error("network down");
 		});
 		m.listProfiles.mockReturnValue([]);
@@ -313,12 +341,93 @@ describe("performLogout", () => {
 
 	it("is a no-op when already logged out", async () => {
 		isLoggedIn.mockReturnValue(false);
+		m.getGlobalProfile.mockReturnValue(null);
 
 		await performLogout();
 
 		expect(m.revokeCurrentCliKey).not.toHaveBeenCalled();
 		expect(m.deleteProfile).not.toHaveBeenCalled();
 		expect(m.clearConfig).not.toHaveBeenCalled();
+	});
+
+	// An unqualified `logout` has to sign out the credential that is actually in
+	// effect. Falling through to the global path here would revoke the PROJECT's
+	// key (it is the one the API client holds) while deleting an unrelated global
+	// profile, leaving the directory authenticated with a dead key.
+	it("removes the project credential instead of the global one when a project is active", async () => {
+		m.getProjectCredential.mockReturnValue({
+			credential: { ...RESOLVED, userEmail: "agent@example.com" },
+			path: "/tmp/project/.tarout/auth.json",
+			projectDir: "/tmp/project",
+		} as never);
+
+		await performLogout();
+
+		expect(m.removeProjectCredential).toHaveBeenCalledWith("/tmp/project");
+		expect(m.deleteProfile).not.toHaveBeenCalled();
+		expect(m.clearConfig).not.toHaveBeenCalled();
+		// Never revoke server-side here: the same key may still be the machine-wide
+		// credential or bound to another checkout of the project.
+		expect(m.revokeCurrentCliKey).not.toHaveBeenCalled();
+
+		const success = jsonEvents().find((e) => e.success === true);
+		expect(success?.data?.scope).toBe("project");
+	});
+
+	it("--global signs out the machine-wide login even with a project credential present", async () => {
+		m.getProjectCredential.mockReturnValue({
+			credential: { ...RESOLVED, userEmail: "agent@example.com" },
+			path: "/tmp/project/.tarout/auth.json",
+			projectDir: "/tmp/project",
+		} as never);
+		m.revokeCurrentCliKey.mockResolvedValueOnce({ revoked: true });
+		m.listProfiles.mockReturnValue([]);
+
+		await performLogout({ scope: "global" });
+
+		expect(m.removeProjectCredential).not.toHaveBeenCalled();
+		expect(m.deleteProfile).toHaveBeenCalledWith("default");
+		expect(m.revokeCurrentCliKey).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("authenticateWithToken --local", () => {
+	it("writes the key to the project and leaves the machine-wide profile alone", async () => {
+		resolveProfileFromCredential.mockResolvedValueOnce(RESOLVED);
+
+		await authenticateWithToken("tk_123", "https://tarout.sa", {
+			scope: "project",
+			cwd: "/tmp/project",
+		});
+
+		expect(m.setProjectCredential).toHaveBeenCalledWith(
+			expect.objectContaining({ token: "tk_123" }),
+			"/tmp/project",
+		);
+		expect(setProfile).not.toHaveBeenCalled();
+		expect(setCurrentProfile).not.toHaveBeenCalled();
+
+		const success = jsonEvents().find((e) => e.success === true);
+		expect(success?.data?.scope).toBe("project");
+	});
+
+	// The machine-wide login is untouched by a project-scoped key, so claiming it
+	// was "replaced" would be false.
+	it("does not report a replaced session when scoped to the project", async () => {
+		isLoggedIn.mockReturnValue(true);
+		getCurrentProfile.mockReturnValue({
+			...RESOLVED,
+			userEmail: "someone-else@example.com",
+		} as never);
+		resolveProfileFromCredential.mockResolvedValueOnce(RESOLVED);
+
+		await authenticateWithToken("tk_123", "https://tarout.sa", {
+			scope: "project",
+			cwd: "/tmp/project",
+		});
+
+		const success = jsonEvents().find((e) => e.success === true);
+		expect(success?.data?.replacedProfile).toBeUndefined();
 	});
 });
 

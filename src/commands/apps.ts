@@ -613,6 +613,19 @@ export function registerAppsCommands(program: Command) {
 					}
 				}
 
+				// A blank githubId is silently accepted by the server
+				// (assertGitProviderOwnedByCaller early-returns on a falsy id), which
+				// would write sourceType:"github" with no installation to match — the
+				// app LOOKS connected but the push webhook can never fire. Fail loudly
+				// instead, matching `tarout up --source github`.
+				if (!githubId) {
+					failSpinner();
+					throw new NotFoundError("GitHub connection", "none", [
+						"Install the Tarout GitHub App: visit your Tarout dashboard → Settings → Git Providers.",
+						"Or run: tarout providers github connect",
+					]);
+				}
+
 				const _configSpinner = startSpinner("Connecting GitHub repository...");
 
 				await client.application.saveGithubProvider.mutate({
@@ -621,7 +634,7 @@ export function registerAppsCommands(program: Command) {
 					branch: branch || "main",
 					owner,
 					buildPath: options.buildPath || "/",
-					githubId: githubId || "",
+					githubId,
 					watchPaths: [],
 					enableSubmodules: false,
 				});
@@ -1030,168 +1043,11 @@ export function registerAppsCommands(program: Command) {
 			}
 		});
 
-	// Connect Bitbucket repository
-	git
-		.command("bitbucket")
-		.argument("<app>", "Application ID or name")
-		.description("Connect a Bitbucket repository as source")
-		.option("-r, --repo <owner/repo>", "Repository (e.g., myorg/myapp)")
-		.option("-b, --branch <branch>", "Branch to deploy", "main")
-		.option("--provider-id <id>", "Bitbucket connection ID")
-		.option("--build-path <path>", "Build path within repository", "/")
-		.action(async (appIdentifier, options) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-
-				const client = getApiClient();
-
-				const _spinner = startSpinner("Finding application...");
-				const apps: AppSummary[] =
-					await client.application.allByOrganization.query();
-				const app = findApp(apps, appIdentifier);
-
-				if (!app) {
-					failSpinner();
-					throw new NotFoundError("Application", appIdentifier);
-				}
-
-				let repo = options.repo;
-				if (!repo) {
-					repo = await input("Repository (owner/repo):", undefined, {
-						field: "bitbucket_repo",
-						flag: "--repo",
-					});
-				}
-
-				const parts = (repo || "").split("/");
-				const bitbucketOwner = parts.slice(0, -1).join("/") || parts[0] || "";
-				const bitbucketRepository = parts[parts.length - 1] || repo;
-
-				let bitbucketId = options.providerId;
-				if (!bitbucketId) {
-					try {
-						const providers = await client.bitbucket.bitbucketProviders.query();
-						const providerList = Array.isArray(providers) ? providers : [];
-						if (providerList.length === 1) {
-							bitbucketId = providerList[0].bitbucketId || providerList[0].id;
-						} else if (providerList.length > 1) {
-							bitbucketId = await select(
-								"Select Bitbucket connection:",
-								providerList.map((p: any) => ({
-									name: p.username || p.bitbucketId,
-									value: p.bitbucketId || p.id,
-								})),
-								{
-									field: "bitbucket_provider_id",
-									flag: "--provider-id",
-								},
-							);
-						}
-					} catch {
-						// ignore — bitbucketId optional
-					}
-				}
-
-				const _configSpinner = startSpinner(
-					"Connecting Bitbucket repository...",
-				);
-
-				await client.application.saveBitbucketProvider.mutate({
-					applicationId: app.applicationId,
-					bitbucketRepository,
-					bitbucketOwner,
-					bitbucketBranch: options.branch || "main",
-					bitbucketBuildPath: options.buildPath || "/",
-					bitbucketId: bitbucketId || "",
-					watchPaths: [],
-					enableSubmodules: false,
-				});
-
-				succeedSpinner("Bitbucket repository connected!");
-
-				if (isJsonMode()) {
-					outputData({ connected: true, repository: repo });
-				} else {
-					box("Bitbucket Connected", [
-						`Repository: ${colors.cyan(repo)}`,
-						`Branch: ${options.branch || "main"}`,
-					]);
-					log(`Deploy: ${colors.dim(`tarout deploy ${appIdentifier}`)}`);
-					log("");
-				}
-			} catch (err) {
-				handleError(err);
-			}
-		});
-
-	// Connect Gitea repository
-	git
-		.command("gitea")
-		.argument("<app>", "Application ID or name")
-		.description("Connect a Gitea repository as source")
-		.option("-r, --repo <owner/repo>", "Repository (e.g., myorg/myapp)")
-		.option("-b, --branch <branch>", "Branch to deploy", "main")
-		.option("--provider-id <id>", "Gitea connection ID")
-		.option("--build-path <path>", "Build path within repository", "/")
-		.action(async (appIdentifier, options) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-
-				const client = getApiClient();
-
-				const _spinner = startSpinner("Finding application...");
-				const apps: AppSummary[] =
-					await client.application.allByOrganization.query();
-				const app = findApp(apps, appIdentifier);
-
-				if (!app) {
-					failSpinner();
-					throw new NotFoundError("Application", appIdentifier);
-				}
-
-				let repo = options.repo;
-				if (!repo) {
-					repo = await input("Repository (owner/repo):", undefined, {
-						field: "gitea_repo",
-						flag: "--repo",
-					});
-				}
-
-				const parts = (repo || "").split("/");
-				const giteaOwner = parts.slice(0, -1).join("/") || parts[0] || "";
-				const giteaRepository = parts[parts.length - 1] || repo;
-
-				const giteaId = options.providerId || "";
-
-				const _configSpinner = startSpinner("Connecting Gitea repository...");
-
-				await client.application.saveGiteaProvider.mutate({
-					applicationId: app.applicationId,
-					giteaRepository,
-					giteaOwner,
-					giteaBranch: options.branch || "main",
-					giteaBuildPath: options.buildPath || "/",
-					giteaId,
-					watchPaths: [],
-					enableSubmodules: false,
-				});
-
-				succeedSpinner("Gitea repository connected!");
-
-				if (isJsonMode()) {
-					outputData({ connected: true, repository: repo });
-				} else {
-					box("Gitea Connected", [
-						`Repository: ${colors.cyan(repo)}`,
-						`Branch: ${options.branch || "main"}`,
-					]);
-					log(`Deploy: ${colors.dim(`tarout deploy ${appIdentifier}`)}`);
-					log("");
-				}
-			} catch (err) {
-				handleError(err);
-			}
-		});
+	// Bitbucket and Gitea are retired as Git providers — GitHub and GitLab only.
+	// The `apps git bitbucket` / `apps git gitea` connect commands are gone; the
+	// platform also drops the underlying procedures from the agent surface, so
+	// `tarout call gitea.create` is refused too. Apps already on those sources
+	// keep deploying, and their repo/branch stays editable in the dashboard.
 
 	// View application logs
 	apps
@@ -1927,8 +1783,11 @@ export function registerAppsCommands(program: Command) {
 	// ── Refresh token ────────────────────────────────────────────────────────────
 	apps
 		.command("refresh-token")
+		.alias("deploy-hook")
 		.argument("<app>", "Application ID or name")
-		.description("Refresh the application deployment token")
+		.description(
+			"Rotate the deploy token and print the deploy webhook URL (shown once)",
+		)
 		.action(async (appIdentifier) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
@@ -1942,11 +1801,48 @@ export function registerAppsCommands(program: Command) {
 					throw new NotFoundError("Application", appIdentifier);
 				}
 				const _refreshSpinner = startSpinner("Refreshing token...");
+				// application.refreshToken mints a NEW token every call and returns
+				// { webhookUrl, tokenLast4 }. The platform persists only the token
+				// itself (the UI/API expose just the last 4), so this response is the
+				// ONLY time the full webhook URL is ever available — re-running to
+				// "see it again" rotates the token and invalidates the previous URL.
+				// Therefore it must be printed in human mode too, not just --json.
 				const result = await client.application.refreshToken.mutate({
 					applicationId: app.applicationId,
 				});
+				const refreshed = result as {
+					tokenLast4?: string;
+					webhookUrl?: string;
+				};
 				succeedSpinner("Token refreshed.");
-				if (isJsonMode()) outputData(result);
+				if (isJsonMode()) {
+					outputData(result);
+					return;
+				}
+
+				// Quiet mode gets the bare URL so scripts can capture it directly.
+				if (refreshed.webhookUrl) quietOutput(refreshed.webhookUrl);
+
+				box("Deploy Webhook", [
+					`URL:   ${colors.cyan(refreshed.webhookUrl ?? "(not returned)")}`,
+					`Token: ${colors.dim(`…${refreshed.tokenLast4 ?? "????"}`)}`,
+				]);
+				log(
+					colors.warn(
+						"This URL is shown once and cannot be retrieved again — store it now.",
+					),
+				);
+				log(
+					colors.dim(
+						"Running this command again mints a new token and breaks the old URL.",
+					),
+				);
+				log("");
+				log("POST to it to trigger a deployment, e.g.:");
+				log(
+					`  ${colors.dim(`curl -X POST ${refreshed.webhookUrl ?? "<webhook-url>"}`)}`,
+				);
+				log("");
 			} catch (err) {
 				failSpinner();
 				handleError(err);

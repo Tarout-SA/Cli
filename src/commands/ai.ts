@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import { getApiClient } from "../lib/api.js";
 import { isLoggedIn } from "../lib/config.js";
-import { AuthError, handleError } from "../lib/errors.js";
+import { AuthError, CliError, handleError } from "../lib/errors.js";
 import {
 	box,
 	colors,
@@ -12,8 +12,26 @@ import {
 	shouldSkipConfirmation,
 	table,
 } from "../lib/output.js";
-import { confirm, input, select } from "../utils/prompts.js";
+import { ExitCode } from "../utils/exit-codes.js";
+import { confirm, input } from "../utils/prompts.js";
 import { startSpinner, succeedSpinner } from "../utils/spinner.js";
+
+/**
+ * AI Gateway key management over the CLI.
+ *
+ * These four commands used to be permanent stubs: `aiGateway.generateKey` /
+ * `updateKey` / `revokeKey` / `deleteKey` refused every `x-api-key` session, and
+ * the CLI has no other transport, so they could never succeed. That refusal is
+ * gone — API-key sessions now have the same authority as an interactive session
+ * over the organization's own resources (cloud/src/server/lib/session-custody.ts),
+ * and a gateway key is a resource, not an auth credential.
+ *
+ * `aiGateway.generateKey` remains in the platform's EXCLUDED_PROCEDURES, which
+ * keeps a one-time secret off the generic `tarout call` / MCP / REST surfaces.
+ * That is response hygiene, not an authorization rule, and it does not affect
+ * these curated commands — they speak native tRPC.
+ */
+const KEY_MANAGEMENT_DASHBOARD_URL = "https://tarout.sa/dashboard/ai-models";
 
 export function registerAiCommands(program: Command) {
 	const ai = program
@@ -138,7 +156,9 @@ export function registerAiCommands(program: Command) {
 					log("");
 					log("No AI Gateway keys found.");
 					log("");
-					log(`Create one with: ${colors.dim("tarout ai keys create")}`);
+					// Not `tarout ai keys create` — that command cannot work over an
+					// API-key session (see the guard note at the top of this file).
+					log(`Create one at: ${colors.dim(KEY_MANAGEMENT_DASHBOARD_URL)}`);
 					return;
 				}
 
@@ -165,91 +185,89 @@ export function registerAiCommands(program: Command) {
 	// Create key
 	keys
 		.command("create")
-		.description("Create a new AI Gateway API key")
+		.description("Create an AI Gateway API key")
 		.option("-n, --name <name>", "Key name")
 		.option("-m, --model <modelId>", "Model ID")
-		.option("-p, --provider <provider>", "Model provider (global)", "global")
-		.action(async (options) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
+		.option("-p, --provider <provider>", "Model provider (global|saudi)", "global")
+		.option(
+			"--monthly-cap <sar>",
+			"Monthly spend ceiling in SAR (0 or omitted = no cap)",
+		)
+		.action(
+			async (options: {
+				name?: string;
+				model?: string;
+				provider?: string;
+				monthlyCap?: string;
+			}) => {
+				try {
+					if (!isLoggedIn()) throw new AuthError();
 
-				let keyName = options.name;
-				let modelId = options.model;
-				const modelProvider = options.provider || "global";
+					const keyName =
+						options.name ?? (await input("Key name (e.g., production):"));
+					const modelId =
+						options.model ?? (await input("Model ID (e.g., gpt-4o):"));
 
-				if (!keyName) {
-					keyName = await input("Key name:", undefined, {
-						field: "name",
-						flag: "--name",
-					});
-				}
+					const provider = (options.provider ?? "global").toLowerCase();
+					if (provider !== "global" && provider !== "saudi") {
+						throw new CliError(
+							`Invalid provider "${options.provider}". Use "global" or "saudi".`,
+							ExitCode.INVALID_ARGUMENTS,
+						);
+					}
 
-				if (!modelId) {
-					const client = getApiClient();
-					try {
-						const models = await client.aiGateway.getAvailableModels.query();
-						const modelList = Array.isArray(models)
-							? models
-							: (models as any)?.models || [];
-						if (modelList.length > 0) {
-							modelId = await select(
-								"Select model:",
-								modelList.map((m: any) => ({
-									name: m.name || m.displayName || m.id || m.modelId,
-									value: m.id || m.modelId,
-								})),
-								{
-									field: "model_id",
-									flag: "--model",
-									context: { keyName },
-								},
+					// The API takes halalas (1 SAR = 100 halalas); the flag takes SAR
+					// because that is what the dashboard and invoices show.
+					let monthlySpendCapHalalas: number | undefined;
+					if (options.monthlyCap !== undefined) {
+						const sar = Number(options.monthlyCap);
+						if (!Number.isFinite(sar) || sar < 0) {
+							throw new CliError(
+								`Invalid --monthly-cap "${options.monthlyCap}". Pass a non-negative number of SAR.`,
+								ExitCode.INVALID_ARGUMENTS,
 							);
 						}
-					} catch {
-						// ignore
+						monthlySpendCapHalalas = Math.round(sar * 100);
 					}
-					if (!modelId) {
-						modelId = await input("Model ID (e.g., gpt-4o):", undefined, {
-							field: "model_id",
-							flag: "--model",
-							context: { keyName },
-						});
+
+					const client = getApiClient();
+					const _spinner = startSpinner("Creating AI Gateway key...");
+
+					const result = await client.aiGateway.generateKey.mutate({
+						keyName,
+						modelId,
+						modelProvider: provider,
+						...(monthlySpendCapHalalas === undefined
+							? {}
+							: { monthlySpendCapHalalas }),
+					});
+
+					succeedSpinner("AI Gateway key created.");
+
+					if (isJsonMode()) {
+						outputData(result);
+						return;
 					}
+
+					const secret = (result as any).apiKey ?? (result as any).key ?? "";
+					quietOutput(String((result as any).keyId ?? ""));
+
+					log("");
+					box("AI Gateway key created", [
+						`Name: ${colors.bold(keyName)}`,
+						`Model: ${colors.bold(modelId)}`,
+						`Provider: ${colors.bold(provider)}`,
+						...(secret ? [`Key: ${colors.cyan(secret)}`] : []),
+					]);
+					if (secret) {
+						log(colors.warn("Save this key — it will not be shown again."));
+					}
+					log("");
+				} catch (err) {
+					handleError(err);
 				}
-
-				const client = getApiClient();
-				const _spinner = startSpinner("Creating AI key...");
-
-				const result = await client.aiGateway.generateKey.mutate({
-					keyName,
-					modelId,
-					modelProvider: modelProvider as "global",
-				});
-
-				succeedSpinner("AI key created!");
-
-				const keyId = (result as any).keyId || (result as any).id;
-
-				if (isJsonMode()) {
-					outputData(result);
-					return;
-				}
-
-				quietOutput(keyId || keyName);
-
-				box("AI Gateway Key Created", [
-					`ID: ${colors.cyan(keyId || "")}`,
-					`Name: ${keyName}`,
-					`Model: ${modelId}`,
-					`Key: ${colors.cyan((result as any).key || (result as any).apiKey || "")}`,
-				]);
-
-				log(colors.warn("Save this key — it will not be shown again."));
-				log("");
-			} catch (err) {
-				handleError(err);
-			}
-		});
+			},
+		);
 
 	// Get key details
 	keys
@@ -355,97 +373,139 @@ export function registerAiCommands(program: Command) {
 			}
 		});
 
-	// Revoke key
+	// Revoke: disables the key server-side. Destructive, so it confirms unless
+	// --yes / --json (shouldSkipConfirmation) says otherwise.
 	keys
 		.command("revoke")
 		.argument("<key-id>", "Key ID to revoke")
-		.description("Revoke (disable) an AI Gateway key")
-		.action(async (keyId) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-
-				const client = getApiClient();
-				const _spinner = startSpinner("Revoking key...");
-
-				await client.aiGateway.revokeKey.mutate({ keyId });
-
-				succeedSpinner("Key revoked!");
-
-				if (isJsonMode()) {
-					outputData({ revoked: true, keyId });
-				} else {
-					log("");
-					log(
-						colors.warn(
-							"Key has been revoked and will no longer accept requests.",
-						),
-					);
-					log(
-						`Re-enable: ${colors.dim(`tarout ai keys update ${keyId} --enable`)}`,
-					);
-					log("");
-				}
-			} catch (err) {
-				handleError(err);
-			}
-		});
-
-	// Update key
-	keys
-		.command("update")
-		.argument("<key-id>", "Key ID to update")
-		.description("Update an AI Gateway key")
-		.option("-n, --name <name>", "New key name")
-		.option("--enable", "Enable the key")
-		.option("--disable", "Disable the key")
-		.action(async (keyId, options) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-
-				const updates: Record<string, unknown> = { keyId };
-				if (options.name) updates.keyName = options.name;
-				if (options.enable) updates.isEnabled = true;
-				if (options.disable) updates.isEnabled = false;
-
-				const client = getApiClient();
-				const _spinner = startSpinner("Updating key...");
-
-				const result = await client.aiGateway.updateKey.mutate(updates as any);
-
-				succeedSpinner("Key updated!");
-
-				if (isJsonMode()) {
-					outputData(result);
-				} else {
-					log("");
-					log(colors.success("Key updated successfully."));
-					log("");
-				}
-			} catch (err) {
-				handleError(err);
-			}
-		});
-
-	// Delete key
-	keys
-		.command("delete")
-		.argument("<key-id>", "Key ID to delete")
-		.description("Permanently delete an AI Gateway key")
-		.action(async (keyId) => {
+		.description("Revoke an AI Gateway key")
+		.action(async (keyId: string) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
 				if (!shouldSkipConfirmation()) {
-					const confirmed = await confirm(
-						`Permanently delete key "${keyId}"?`,
+					const ok = await confirm(
+						`Revoke AI Gateway key ${keyId}? Applications using it will start failing.`,
 						false,
-						{
-							field: "confirm_delete_ai_key",
-							flag: "--yes",
-							context: { keyId },
-						},
 					);
-					if (!confirmed) {
+					if (!ok) {
+						log("Cancelled.");
+						return;
+					}
+				}
+
+				const client = getApiClient();
+				const _spinner = startSpinner("Revoking key...");
+				await client.aiGateway.revokeKey.mutate({ keyId });
+				succeedSpinner("Key revoked.");
+
+				if (isJsonMode()) {
+					outputData({ revoked: true, keyId });
+					return;
+				}
+				quietOutput(keyId);
+			} catch (err) {
+				handleError(err);
+			}
+		});
+
+	keys
+		.command("update")
+		.argument("<key-id>", "Key ID to update")
+		.description("Rename, enable, or disable an AI Gateway key")
+		.option("-n, --name <name>", "New key name")
+		.option("--enable", "Enable the key")
+		.option("--disable", "Disable the key")
+		.option(
+			"--monthly-cap <sar>",
+			"Monthly spend ceiling in SAR (0 clears the cap)",
+		)
+		.action(
+			async (
+				keyId: string,
+				options: {
+					name?: string;
+					enable?: boolean;
+					disable?: boolean;
+					monthlyCap?: string;
+				},
+			) => {
+				try {
+					if (!isLoggedIn()) throw new AuthError();
+
+					if (options.enable && options.disable) {
+						throw new CliError(
+							"Pass either --enable or --disable, not both.",
+							ExitCode.INVALID_ARGUMENTS,
+						);
+					}
+
+					let monthlySpendCapHalalas: number | null | undefined;
+					if (options.monthlyCap !== undefined) {
+						const sar = Number(options.monthlyCap);
+						if (!Number.isFinite(sar) || sar < 0) {
+							throw new CliError(
+								`Invalid --monthly-cap "${options.monthlyCap}". Pass a non-negative number of SAR.`,
+								ExitCode.INVALID_ARGUMENTS,
+							);
+						}
+						monthlySpendCapHalalas = sar === 0 ? null : Math.round(sar * 100);
+					}
+
+					const isEnabled = options.enable
+						? true
+						: options.disable
+							? false
+							: undefined;
+
+					if (
+						options.name === undefined &&
+						isEnabled === undefined &&
+						monthlySpendCapHalalas === undefined
+					) {
+						throw new CliError(
+							"Nothing to update. Pass --name, --enable/--disable, or --monthly-cap.",
+							ExitCode.INVALID_ARGUMENTS,
+						);
+					}
+
+					const client = getApiClient();
+					const _spinner = startSpinner("Updating key...");
+					const result = await client.aiGateway.updateKey.mutate({
+						keyId,
+						...(options.name === undefined ? {} : { keyName: options.name }),
+						...(isEnabled === undefined ? {} : { isEnabled }),
+						...(monthlySpendCapHalalas === undefined
+							? {}
+							: { monthlySpendCapHalalas }),
+					});
+					succeedSpinner("Key updated.");
+
+					if (isJsonMode()) {
+						outputData(result);
+						return;
+					}
+					quietOutput(keyId);
+				} catch (err) {
+					handleError(err);
+				}
+			},
+		);
+
+	keys
+		.command("delete")
+		.argument("<key-id>", "Key ID to delete")
+		.description("Permanently delete an AI Gateway key")
+		.action(async (keyId: string) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+
+				if (!shouldSkipConfirmation()) {
+					const ok = await confirm(
+						`Permanently delete AI Gateway key ${keyId}? This cannot be undone.`,
+						false,
+					);
+					if (!ok) {
 						log("Cancelled.");
 						return;
 					}
@@ -453,16 +513,14 @@ export function registerAiCommands(program: Command) {
 
 				const client = getApiClient();
 				const _spinner = startSpinner("Deleting key...");
-
 				await client.aiGateway.deleteKey.mutate({ keyId });
-
-				succeedSpinner("Key deleted!");
+				succeedSpinner("Key deleted.");
 
 				if (isJsonMode()) {
 					outputData({ deleted: true, keyId });
-				} else {
-					quietOutput(keyId);
+					return;
 				}
+				quietOutput(keyId);
 			} catch (err) {
 				handleError(err);
 			}

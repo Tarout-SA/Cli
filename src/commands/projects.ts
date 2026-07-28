@@ -132,8 +132,6 @@ export function registerProjectsCommands(program: Command) {
 					projectName: target.name,
 					projectSlug: target.slug,
 					// Switching project clears env on the server too — drop our cached env.
-					environmentId: "",
-					environmentName: "",
 				});
 
 				succeedSpinner(

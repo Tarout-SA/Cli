@@ -14,7 +14,17 @@ import {
 	shouldAutoConfirmPaidCheckout,
 } from "../lib/browser.js";
 import { getApiUrl, getCurrentProfile, isLoggedIn } from "../lib/config.js";
-import { AuthError, CliError, handleError } from "../lib/errors.js";
+// NOTE: this module already imports Commander's `InvalidArgumentError` (used by
+// the argParsers below, where Commander catches it and exits 2 itself). The CLI
+// error class of the same name is aliased so it can be thrown from inside
+// `.action()` bodies, where only `handleError` is watching and only a `CliError`
+// maps onto the INVALID_ARGUMENTS exit code / JSON envelope.
+import {
+	AuthError,
+	CliError,
+	handleError,
+	InvalidArgumentError as CliInvalidArgumentError,
+} from "../lib/errors.js";
 import {
 	box,
 	colors,
@@ -132,6 +142,152 @@ async function previewAddonAmountDue(
 	} catch {
 		return undefined;
 	}
+}
+
+// ── Billing analytics window helpers ────────────────────────────────────────
+// `billing.getUsageBreakdown`, `billing.getDetailedResourceUsage` and
+// `billing.getDailyCostTrend` all take the SAME optional input and nothing
+// else: `{ startDate?: string; endDate?: string }`. Zod strips every other key
+// silently, so a made-up flag (the old `{ days }`) never reaches the server and
+// the response comes back on the default window with no warning. Any window the
+// CLI offers therefore has to be resolved here into that one pair.
+
+/**
+ * Validate a `--from`/`--to` value and normalise it to an ISO string.
+ * A bare `YYYY-MM-DD` is anchored in UTC so the window does not drift with the
+ * operator's timezone; `--to` is pushed to the end of that day, otherwise it
+ * would cut off at 00:00 and silently drop a full day of usage.
+ */
+function parseDateFlag(raw: string, flag: string, endOfDay: boolean): string {
+	const value = String(raw).trim();
+	const parsed = /^\d{4}-\d{2}-\d{2}$/.test(value)
+		? new Date(`${value}T${endOfDay ? "23:59:59.999" : "00:00:00.000"}Z`)
+		: new Date(value);
+	if (!value || Number.isNaN(parsed.getTime())) {
+		throw new InvalidArgumentError(
+			`Invalid ${flag} value "${raw}". Expected a date like 2026-07-01.`,
+		);
+	}
+	return parsed.toISOString();
+}
+
+/** Commander argParser for `--from`. */
+function parseFromDate(raw: string): string {
+	return parseDateFlag(raw, "--from", false);
+}
+
+/** Commander argParser for `--to`. */
+function parseToDate(raw: string): string {
+	return parseDateFlag(raw, "--to", true);
+}
+
+/** Commander argParser for `--days`. */
+function parseDaysOption(raw: string): number {
+	const n = Number.parseInt(String(raw).trim(), 10);
+	if (!Number.isFinite(n) || n <= 0) {
+		throw new InvalidArgumentError(
+			`Invalid --days value "${raw}". Expected a positive integer.`,
+		);
+	}
+	return n;
+}
+
+/**
+ * Build the optional `{ startDate, endDate }` argument. Returns `undefined`
+ * when neither bound is set so the procedure keeps its own default window
+ * instead of being handed an empty object.
+ */
+function dateRangeArg(
+	from?: string,
+	to?: string,
+): { startDate?: string; endDate?: string } | undefined {
+	if (!from && !to) return undefined;
+	return {
+		...(from ? { startDate: from } : {}),
+		...(to ? { endDate: to } : {}),
+	};
+}
+
+/**
+ * Resolve `tarout billing trend`'s window. `--days N` is CLI-side sugar — the
+ * procedure only understands startDate/endDate — so N becomes a real
+ * `[now - N days, now]` pair. Combining it with `--from`/`--to` is rejected
+ * instead of letting one silently win.
+ */
+function resolveTrendRange(options: {
+	days?: number;
+	from?: string;
+	to?: string;
+}): { startDate?: string; endDate?: string } | undefined {
+	if (options.days !== undefined && (options.from || options.to)) {
+		throw new CliInvalidArgumentError(
+			"Use either --days or --from/--to, not both.",
+		);
+	}
+	if (options.days !== undefined) {
+		const now = new Date();
+		const start = new Date(now.getTime() - options.days * 24 * 60 * 60 * 1000);
+		return { startDate: start.toISOString(), endDate: now.toISOString() };
+	}
+	return dateRangeArg(options.from, options.to);
+}
+
+/** Print the window the server actually used, under an analytics heading. */
+function logBillingPeriod(period: unknown): void {
+	const p = period as { start?: string; end?: string } | undefined;
+	if (!p?.start || !p?.end) return;
+	log(colors.dim(`  ${formatDate(p.start)} → ${formatDate(p.end)}`));
+}
+
+/** The `resourceType` enum `billing.getResourceEstimate` actually accepts. */
+const ESTIMATE_RESOURCE_TYPES = [
+	"application",
+	"dedicated_server",
+	"postgres",
+	"mysql",
+	"storage",
+	"cloud_server",
+] as const;
+
+/** Friendly spellings mapped onto that enum (there is no "domain" estimate). */
+const ESTIMATE_TYPE_ALIASES: Record<string, string> = {
+	app: "application",
+	apps: "application",
+	server: "dedicated_server",
+	"dedicated-server": "dedicated_server",
+	database: "postgres",
+	db: "postgres",
+	pg: "postgres",
+	vm: "cloud_server",
+	"cloud-server": "cloud_server",
+};
+
+/** Commander argParser for `estimate --type`. */
+function parseEstimateType(raw: string): string {
+	const value = String(raw).trim().toLowerCase();
+	const mapped = ESTIMATE_TYPE_ALIASES[value] ?? value;
+	if (!(ESTIMATE_RESOURCE_TYPES as readonly string[]).includes(mapped)) {
+		throw new InvalidArgumentError(
+			`Invalid --type "${raw}". Expected one of: ${ESTIMATE_RESOURCE_TYPES.join(", ")}.`,
+		);
+	}
+	return mapped;
+}
+
+/** `estimate --plan` maps onto the schema's `appPlan` enum, not a plan key. */
+function parseAppPlan(raw: string): "FREE" | "SHARED" | "DEDICATED" | "CUSTOM" {
+	const value = String(raw).trim().toUpperCase();
+	if (
+		value === "FREE" ||
+		value === "SHARED" ||
+		value === "DEDICATED" ||
+		value === "CUSTOM"
+	) {
+		return value;
+	}
+	throw new CliInvalidArgumentError(
+		`Invalid --plan "${raw}". Expected free, shared, dedicated or custom.`,
+	);
 }
 
 export function registerBillingCommands(program: Command) {
@@ -1135,24 +1291,47 @@ export function registerBillingCommands(program: Command) {
 	billing
 		.command("usage")
 		.description("Show resource usage breakdown")
-		.action(async () => {
+		.option("--from <date>", "Window start (e.g. 2026-07-01)", parseFromDate)
+		.option("--to <date>", "Window end (e.g. 2026-07-31)", parseToDate)
+		.action(async (options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching usage...");
-				const data = await client.billing.getUsageBreakdown.query();
+				// `getUsageBreakdown` accepts an optional `{ startDate, endDate }`.
+				// Omitting the argument entirely (not `{}`) keeps the server default —
+				// the current calendar month.
+				const range = dateRangeArg(options.from, options.to);
+				const data = await client.billing.getUsageBreakdown.query(range);
 				succeedSpinner();
 				if (isJsonMode()) {
 					outputData(data);
 					return;
 				}
+				// Real shape: { period, breakdown: [{ resourceType, label,
+				// totalCostHalalas, totalCostSAR, usageCount }], totalHalalas,
+				// totalSAR }. The old renderer read apps/databases/storage/domains,
+				// which the procedure has never returned — every row printed "-".
 				const d = data as any;
+				const rows: any[] = Array.isArray(d?.breakdown) ? d.breakdown : [];
 				log("");
 				log(colors.bold("Usage Breakdown"));
-				log(`  Apps:      ${d.apps ?? "-"}`);
-				log(`  Databases: ${d.databases ?? "-"}`);
-				log(`  Storage:   ${d.storage ?? "-"}`);
-				log(`  Domains:   ${d.domains ?? "-"}`);
+				logBillingPeriod(d?.period);
+				if (!rows.length) {
+					log("\nNo usage recorded for this period.\n");
+					return;
+				}
+				table(
+					["RESOURCE", "RECORDS", "COST (SAR)"],
+					rows.map((r: any) => [
+						r.label?.en || r.resourceType || "-",
+						String(r.usageCount ?? "-"),
+						((r.totalCostHalalas ?? 0) / 100).toFixed(2),
+					]),
+				);
+				log(
+					`  Total: ${colors.bold(`${((d?.totalHalalas ?? 0) / 100).toFixed(2)} SAR`)}`,
+				);
 				log("");
 			} catch (err) {
 				handleError(err);
@@ -1163,31 +1342,41 @@ export function registerBillingCommands(program: Command) {
 	billing
 		.command("resources")
 		.description("Show detailed resource usage and costs")
-		.action(async () => {
+		.option("--from <date>", "Window start (e.g. 2026-07-01)", parseFromDate)
+		.option("--to <date>", "Window end (e.g. 2026-07-31)", parseToDate)
+		.action(async (options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching resource usage...");
-				const data = await client.billing.getDetailedResourceUsage.query();
+				const range = dateRangeArg(options.from, options.to);
+				const data =
+					await client.billing.getDetailedResourceUsage.query(range);
 				succeedSpinner();
 				if (isJsonMode()) {
 					outputData(data);
 					return;
 				}
-				const list = Array.isArray(data)
-					? data
-					: (data as any)?.resources || [];
+				// Real shape: { period, resources: [{ resourceId, resourceType,
+				// resourceName, totalCostHalalas, totalCostSAR, usageCount }] }.
+				// The old renderer read type/name/cost — none of which exist.
+				const list: any[] = Array.isArray((data as any)?.resources)
+					? (data as any).resources
+					: [];
+				log("");
+				log(colors.bold("Resource Usage"));
+				logBillingPeriod((data as any)?.period);
 				if (!list.length) {
-					log("\nNo active resources.\n");
+					log("\nNo resource usage recorded for this period.\n");
 					return;
 				}
-				log("");
 				table(
-					["TYPE", "NAME", "COST (SAR)"],
+					["TYPE", "NAME", "RECORDS", "COST (SAR)"],
 					list.map((r: any) => [
-						r.type || "-",
-						r.name || "-",
-						r.cost !== undefined ? (r.cost / 100).toFixed(2) : "-",
+						r.resourceType || "-",
+						r.resourceName || r.resourceId || "-",
+						String(r.usageCount ?? "-"),
+						((r.totalCostHalalas ?? 0) / 100).toFixed(2),
 					]),
 				);
 				log("");
@@ -1200,34 +1389,50 @@ export function registerBillingCommands(program: Command) {
 	billing
 		.command("trend")
 		.description("Show daily cost trend")
-		.option("--days <n>", "Number of days", "30")
+		.option("--days <n>", "Number of days back from now", parseDaysOption)
+		.option("--from <date>", "Window start (e.g. 2026-07-01)", parseFromDate)
+		.option("--to <date>", "Window end (e.g. 2026-07-31)", parseToDate)
 		.action(async (options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
+				// `getDailyCostTrend` only accepts `{ startDate, endDate }` — a `days`
+				// key is stripped by zod, so the old `{ days } as any` call always got
+				// the server's own 30-day default back while pretending to honour
+				// `--days`. Resolve the window client-side instead.
+				const range = resolveTrendRange(options);
 				const _spinner = startSpinner("Fetching cost trend...");
-				const data = await client.billing.getDailyCostTrend.query({
-					days: Number.parseInt(options.days || "30"),
-				} as any);
+				const data = await client.billing.getDailyCostTrend.query(range);
 				succeedSpinner();
 				if (isJsonMode()) {
 					outputData(data);
 					return;
 				}
-				const list = Array.isArray(data) ? data : (data as any)?.trend || [];
+				// Real shape: { period, data: [{ date, breakdown,
+				// totalCostHalalas, totalCostSAR }] } — not a bare array, and not
+				// `trend`/`cost`, which is why this table used to render blank.
+				const list: any[] = Array.isArray((data as any)?.data)
+					? (data as any).data
+					: [];
+				log("");
+				log(colors.bold("Daily Cost Trend"));
+				logBillingPeriod((data as any)?.period);
 				if (!list.length) {
 					log("\nNo cost data found.\n");
 					return;
 				}
-				log("");
-				log(colors.bold("Daily Cost Trend"));
 				table(
 					["DATE", "COST (SAR)"],
 					list.map((d: any) => [
 						d.date || "-",
-						d.cost !== undefined ? (d.cost / 100).toFixed(2) : "-",
+						((d.totalCostHalalas ?? 0) / 100).toFixed(2),
 					]),
 				);
+				const total = list.reduce(
+					(sum: number, d: any) => sum + (d.totalCostHalalas ?? 0),
+					0,
+				);
+				log(`  Total: ${colors.bold(`${(total / 100).toFixed(2)} SAR`)}`);
 				log("");
 			} catch (err) {
 				handleError(err);
@@ -1238,31 +1443,63 @@ export function registerBillingCommands(program: Command) {
 	billing
 		.command("estimate")
 		.description("Estimate cost for a resource type")
-		.option("--type <type>", "Resource type (app, database, storage, domain)")
-		.option("--plan <plan>", "Plan key")
+		.option(
+			"--type <type>",
+			`Resource type (${ESTIMATE_RESOURCE_TYPES.join(", ")})`,
+			parseEstimateType,
+		)
+		.option("--plan <plan>", "App plan: free, shared, dedicated or custom")
 		.action(async (options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
+				if (!options.type) {
+					throw new CliInvalidArgumentError(
+						`--type is required. Expected one of: ${ESTIMATE_RESOURCE_TYPES.join(", ")}.`,
+					);
+				}
 				const client = getApiClient();
 				const _spinner = startSpinner("Calculating estimate...");
+				// The schema is `{ resourceType: <public enum>, appPlan?, storageGb?,
+				// … }` — there is no `planKey`, so the old cast sent a key zod threw
+				// away. `--plan` only means anything for an application estimate.
 				const data = await client.billing.getResourceEstimate.query({
 					resourceType: options.type,
-					planKey: options.plan,
-				} as any);
+					...(options.plan && options.type === "application"
+						? { appPlan: parseAppPlan(options.plan) }
+						: {}),
+				});
 				succeedSpinner();
 				if (isJsonMode()) {
 					outputData(data);
 					return;
 				}
+				// Real shape: { resourceType, hourlyHalalas, hourlySAR, dailyHalalas,
+				// dailySAR, monthlyHalalas, monthlySAR, breakdown: [{ item, halalas,
+				// sar }] } — the old `monthly`/`hourly` reads printed "-".
 				const d = data as any;
 				log("");
 				log(colors.bold("Resource Estimate"));
+				log(`  Type:    ${d.resourceType ?? options.type}`);
 				log(
-					`  Monthly: ${d.monthly !== undefined ? `${(d.monthly / 100).toFixed(2)} SAR` : "-"}`,
+					`  Monthly: ${typeof d.monthlyHalalas === "number" ? `${(d.monthlyHalalas / 100).toFixed(2)} SAR` : "-"}`,
 				);
 				log(
-					`  Hourly:  ${d.hourly !== undefined ? `${(d.hourly / 100).toFixed(4)} SAR` : "-"}`,
+					`  Daily:   ${typeof d.dailyHalalas === "number" ? `${(d.dailyHalalas / 100).toFixed(2)} SAR` : "-"}`,
 				);
+				log(
+					`  Hourly:  ${typeof d.hourlyHalalas === "number" ? `${(d.hourlyHalalas / 100).toFixed(4)} SAR` : "-"}`,
+				);
+				const breakdown: any[] = Array.isArray(d.breakdown) ? d.breakdown : [];
+				if (breakdown.length) {
+					log("");
+					table(
+						["ITEM", "COST (SAR)"],
+						breakdown.map((b: any) => [
+							b.item || "-",
+							((b.halalas ?? 0) / 100).toFixed(2),
+						]),
+					);
+				}
 				log("");
 			} catch (err) {
 				handleError(err);

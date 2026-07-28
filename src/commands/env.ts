@@ -38,7 +38,6 @@ const envSubcommands = new Set([
 	"reveal",
 	"get",
 	"get-string",
-	"list-all-envs",
 	"bulk-set",
 	"bulk-delete",
 	"copy",
@@ -149,7 +148,10 @@ export function registerEnvCommands(program: Command) {
 	env
 		.command("set")
 		.argument("<app>", "Application ID or name")
-		.argument("<key=value>", "Variable to set (KEY=value format)")
+		.argument(
+			"<key[=value]>",
+			"Variable to set (KEY=value), or just KEY to read the value from stdin",
+		)
 		.description("Set an environment variable")
 		.option("-s, --secret", "Mark as secret (default)", true)
 		.option("--no-secret", "Mark as non-secret")
@@ -157,16 +159,27 @@ export function registerEnvCommands(program: Command) {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
-				// Parse KEY=value
+				// Parse KEY=value, or take the value from stdin when only KEY is
+				// given. Argv can't carry multi-line secrets (PEM keys, .npmrc) and
+				// leaks values into shell history, so
+				// `tarout env <app> set KEY < key.pem` is the safe form.
 				const eqIndex = keyValue.indexOf("=");
+				let key: string;
+				let value: string;
 				if (eqIndex === -1) {
-					throw new InvalidArgumentError(
-						"Invalid format. Use KEY=value (e.g., API_KEY=secret123)",
-					);
+					// Only when stdin is piped/redirected — on an interactive TTY
+					// there is nothing to read and we would hang forever.
+					if (process.stdin.isTTY) {
+						throw new InvalidArgumentError(
+							"Invalid format. Use KEY=value (e.g., API_KEY=secret123), or pipe the value: tarout env <app> set API_KEY < secret.txt",
+						);
+					}
+					key = keyValue;
+					value = await readStdin();
+				} else {
+					key = keyValue.slice(0, eqIndex);
+					value = keyValue.slice(eqIndex + 1);
 				}
-
-				const key = keyValue.slice(0, eqIndex);
-				const value = keyValue.slice(eqIndex + 1);
 
 				if (!key) {
 					throw new InvalidArgumentError("Key cannot be empty");
@@ -605,65 +618,12 @@ export function registerEnvCommands(program: Command) {
 			}
 		});
 
-	// List env vars across all environments
-	env
-		.command("list-all-envs")
-		.argument("<app>", "App ID or name")
-		.description("List environment variables across all environments")
-		.action(async (appIdentifier) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-				const client = getApiClient();
-				const _spinner = startSpinner("Fetching...");
-				const apps = await client.application.allByOrganization.query();
-				const app = findApp(
-					Array.isArray(apps) ? apps : (apps as any)?.applications || [],
-					appIdentifier,
-				);
-				if (!app) {
-					failSpinner();
-					throw new NotFoundError("Application", appIdentifier);
-				}
-				const result = await client.envVariable.listAcrossEnvs.query({
-					applicationId: (app as any).applicationId,
-				} as any);
-				succeedSpinner();
-				if (isJsonMode()) {
-					outputData(result);
-					return;
-				}
-				// Server returns an object keyed by var name; each value is an array
-				// of per-environment records (not a flat array).
-				const byKey =
-					result && typeof result === "object" ? (result as any) : {};
-				const rows: Array<{ key: string; env: string; value: any }> = [];
-				for (const [key, records] of Object.entries(byKey)) {
-					for (const r of Array.isArray(records) ? records : []) {
-						rows.push({
-							key,
-							env:
-								(r as any).environmentName ||
-								(r as any).environmentSlug ||
-								(r as any).environmentId ||
-								"-",
-							value: (r as any).value,
-						});
-					}
-				}
-				if (!rows.length) {
-					log("\nNo environment variables found.\n");
-					return;
-				}
-				log("");
-				table(
-					["KEY", "ENV", "VALUE"],
-					rows.map((v) => [colors.cyan(v.key), v.env, maskValue(v.value)]),
-				);
-				log("");
-			} catch (err) {
-				handleError(err);
-			}
-		});
+	// NOTE: there is no `list-all-envs` command. It called
+	// `envVariable.listAcrossEnvs`, a procedure that does not exist on the
+	// platform (see cloud/src/server/api/routers/env-variable.ts), so it always
+	// failed. It was also premised on the phantom per-app "environments" model.
+	// Environment variables belong to an application, full stop — use
+	// `tarout env <app> list`.
 
 	// Bulk upsert env variables from JSON file
 	env
@@ -766,27 +726,68 @@ export function registerEnvCommands(program: Command) {
 			}
 		});
 
-	// Copy env variables between environments
+	// Copy env variables from one app to another.
+	// The server contract (apiCopyEnvVariables) is strictly app-to-app:
+	// { sourceApplicationId, targetApplicationId, keys?, overwrite? }. It has no
+	// notion of "environments" — the old `<app> <from-env> <to-env>` form sent
+	// sourceEnvironmentId/targetEnvironmentId (silently stripped by zod) with the
+	// SAME applicationId on both sides, so it copied an app onto itself and
+	// reported success. Keep source and target as two distinct apps here.
 	env
 		.command("copy")
-		.argument("<app>", "App ID or name")
-		.argument("<from-env>", "Source environment ID")
-		.argument("<to-env>", "Target environment ID")
-		.description("Copy environment variables from one environment to another")
-		.action(async (appIdentifier, fromEnvId, toEnvId) => {
+		.argument("<source-app>", "App ID or name to copy variables FROM")
+		.argument("<target-app>", "App ID or name to copy variables INTO")
+		.description("Copy environment variables from one app to another")
+		.option(
+			"-k, --keys <keys...>",
+			"Only copy these keys (default: every variable)",
+		)
+		.option(
+			"--overwrite",
+			"Overwrite keys that already exist on the target (default: skip them)",
+		)
+		.action(async (sourceIdentifier, targetIdentifier, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
-				const apps = await client.application.allByOrganization.query();
-				const app = findApp(
-					Array.isArray(apps) ? apps : (apps as any)?.applications || [],
-					appIdentifier,
-				);
-				if (!app) throw new NotFoundError("Application", appIdentifier);
+				// One fetch resolves both refs — same name-or-id + did-you-mean idiom
+				// the rest of this file uses.
+				const apps: AppSummary[] =
+					await client.application.allByOrganization.query();
+				const resolveApp = (identifier: string) => {
+					const found = findApp(apps, identifier);
+					if (!found) {
+						const suggestions = findSimilar(
+							identifier,
+							apps.map((a) => a.name),
+						);
+						throw new NotFoundError("Application", identifier, suggestions);
+					}
+					return found;
+				};
+				const source = resolveApp(sourceIdentifier);
+				const target = resolveApp(targetIdentifier);
+
+				if (source.applicationId === target.applicationId) {
+					throw new InvalidArgumentError(
+						"Source and target must be different applications",
+					);
+				}
+
+				// Accept both `--keys A B` and `--keys A,B`.
+				const keys: string[] | undefined = Array.isArray(options.keys)
+					? (options.keys as string[])
+							.flatMap((k) => k.split(","))
+							.map((k) => k.trim())
+							.filter(Boolean)
+					: undefined;
+
 				if (!shouldSkipConfirmation()) {
 					const { confirm: confirmFn } = await import("../utils/prompts.js");
 					const ok = await confirmFn(
-						`Copy env vars from ${fromEnvId} to ${toEnvId}?`,
+						keys?.length
+							? `Copy ${keys.length} variable(s) from ${source.name} to ${target.name}?`
+							: `Copy all environment variables from ${source.name} to ${target.name}?`,
 						false,
 					);
 					if (!ok) {
@@ -794,18 +795,38 @@ export function registerEnvCommands(program: Command) {
 						return;
 					}
 				}
+
 				const _spinner = startSpinner("Copying variables...");
-				// Server contract (apiCopyEnvVariables) is app-to-app with optional
-				// env scoping. The CLI copies within one app between two envs, so
-				// source and target application are the same.
-				await client.envVariable.copy.mutate({
-					sourceApplicationId: (app as any).applicationId,
-					targetApplicationId: (app as any).applicationId,
-					sourceEnvironmentId: fromEnvId,
-					targetEnvironmentId: toEnvId,
+				const result = await client.envVariable.copy.mutate({
+					sourceApplicationId: source.applicationId,
+					targetApplicationId: target.applicationId,
+					// Omit `keys` entirely (rather than sending []) so the server
+					// copies everything — the schema treats it as optional.
+					...(keys?.length ? { keys } : {}),
+					overwrite: !!options.overwrite,
 				} as any);
-				succeedSpinner("Variables copied!");
-				if (isJsonMode()) outputData({ copied: true });
+
+				const copied = (result as any)?.copied ?? 0;
+				const skipped = (result as any)?.skipped ?? 0;
+				succeedSpinner(`Copied ${copied} variable(s) to ${target.name}`);
+
+				if (isJsonMode()) {
+					outputData(result);
+					return;
+				}
+				quietOutput(String(copied));
+				if (skipped > 0) {
+					log(
+						colors.dim(
+							`Skipped ${skipped} existing variable(s) — re-run with --overwrite to replace them`,
+						),
+					);
+				}
+				// copy persists values but does not push them into the running
+				// container — they take effect on the target's next deploy.
+				log(
+					colors.dim(`Applies on next deploy: tarout deploy ${targetIdentifier}`),
+				);
 			} catch (err) {
 				handleError(err);
 			}
@@ -823,6 +844,20 @@ function findApp(apps: AppSummary[], identifier: string) {
 			app.name.toLowerCase() === lowerIdentifier ||
 			app.appName?.toLowerCase() === lowerIdentifier,
 	);
+}
+
+/**
+ * Reads the whole of stdin as UTF-8, used for `tarout env <app> set KEY`.
+ * Exactly one trailing newline is stripped: `echo secret |` and heredocs append
+ * one that is never part of the intended value, while interior newlines (a PEM
+ * body, a multi-line .npmrc) are preserved verbatim.
+ */
+async function readStdin(): Promise<string> {
+	const chunks: Buffer[] = [];
+	for await (const chunk of process.stdin) {
+		chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+	}
+	return Buffer.concat(chunks).toString("utf-8").replace(/\r?\n$/, "");
 }
 
 function maskValue(value: string | null | undefined): string {

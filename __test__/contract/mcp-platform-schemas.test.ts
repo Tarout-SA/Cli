@@ -34,19 +34,28 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
  *      knows where it put the platform checkout).
  *   2. Sibling-relative: this test file lives at <cli>/__test__/contract/, so
  *      the CLI repo root is two dirs up and the platform checkout is expected
- *      as its sibling (<code>/platform). Computed from import.meta.url — NOT
- *      cwd, so it holds regardless of where the runner is invoked from.
- *   3. The original absolute dev path, as a last resort.
+ *      as its sibling. Computed from import.meta.url — NOT cwd, so it holds
+ *      regardless of where the runner is invoked from.
+ *
+ * The sibling is tried under BOTH names. The platform repo was renamed
+ * `platform/` -> `cloud/` in the July 2026 workspace reorg, and because this
+ * probe only knew the old name it silently skipped every assertion on every
+ * developer machine — a contract gate that reported green while checking
+ * nothing. Keep both names: an older checkout still uses `platform/`.
  */
+const SIBLING_NAMES = ["cloud", "platform"] as const;
+
 function resolvePlatformRoot(): string {
 	const fromEnv = process.env.TAROUT_PLATFORM_DIR?.trim();
 	if (fromEnv) return fromEnv;
 	const here = fileURLToPath(new URL(".", import.meta.url));
-	const sibling = join(here, "..", "..", "..", "platform");
-	if (existsSync(join(sibling, "src/server/validations/application.ts"))) {
-		return sibling;
+	for (const name of SIBLING_NAMES) {
+		const sibling = join(here, "..", "..", "..", name);
+		if (existsSync(join(sibling, "src/server/validations/application.ts"))) {
+			return sibling;
+		}
 	}
-	return "/Users/salehalibrahim/Desktop/Startups/Tarout/code/platform";
+	return join(here, "..", "..", "..", SIBLING_NAMES[0]);
 }
 
 const PLATFORM_ROOT = resolvePlatformRoot();
@@ -71,7 +80,7 @@ const requirePlatformContract = Boolean(
 if (!siblingPresent && !requirePlatformContract) {
 	console.warn(
 		`[contract] SKIPPING MCP↔platform schema contract: no platform checkout found at "${PLATFORM_ROOT}". ` +
-			"Point it at one with TAROUT_PLATFORM_DIR=/abs/path/to/platform (or clone the platform repo as a sibling of the CLI repo). " +
+			"Point it at one with TAROUT_PLATFORM_DIR=/abs/path/to/cloud (or clone the platform repo as a sibling of the CLI repo, named cloud/ or platform/). " +
 			"Set REQUIRE_PLATFORM_CONTRACT=1 to FAIL instead of skip when it's missing.",
 	);
 }
@@ -333,12 +342,29 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 				),
 				expectValid: true,
 			},
-			// Negative control — the ORIGINAL bug: app_create WITHOUT appName. If
-			// the harness can't detect this, it can't catch the bug class either.
+			// Omitting appName is now VALID by design — the create service
+			// auto-generates the display name and slug (see the `name`/`appName`
+			// `.optional()` in the platform's apiCreateApplication). This used to be
+			// the negative control for the original missing-appName bug; it flipped
+			// when resource names became optional on every surface, and nobody
+			// noticed because this whole suite was silently skipping.
 			{
-				id: "negative.app_create-missing-appName",
+				id: "app_create-without-appName",
 				schema: "apiCreateApplication",
 				payload: { name: "My API", organizationId: "org_1", plan: "SHARED" },
+				expectValid: true,
+			},
+			// Negative control — the harness must still be able to REJECT something,
+			// otherwise it cannot catch the bug class at all. An unknown plan is
+			// rejected by the same schema.
+			{
+				id: "negative.app_create-bad-plan",
+				schema: "apiCreateApplication",
+				payload: {
+					name: "My API",
+					organizationId: "org_1",
+					plan: "ENTERPRISE",
+				},
 				expectValid: false,
 			},
 		];
@@ -423,7 +449,8 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 				"env_set",
 				"env_unset.multi",
 				"env_unset.single",
-				"negative.app_create-missing-appName",
+				"app_create-without-appName",
+				"negative.app_create-bad-plan",
 			].sort(),
 		);
 	});
@@ -457,12 +484,19 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 		});
 	}
 
-	it("negative control: app_create WITHOUT appName is REJECTED by the schema", () => {
+	it("app_create WITHOUT appName is ACCEPTED — names are auto-generated", () => {
 		const r = validator.results.find(
-			(x) => x.id === "negative.app_create-missing-appName",
+			(x) => x.id === "app_create-without-appName",
+		);
+		expect(r?.valid, r?.errors.join("; ")).toBe(true);
+	});
+
+	it("negative control: an unknown plan is REJECTED by the schema", () => {
+		const r = validator.results.find(
+			(x) => x.id === "negative.app_create-bad-plan",
 		);
 		expect(r?.valid).toBe(false);
-		expect(r?.errors.join("; ")).toMatch(/appName/i);
+		expect(r?.errors.join("; ")).toMatch(/plan/i);
 	});
 
 	it("no phantom procedures — every referenced tRPC path exists in appRouter", () => {

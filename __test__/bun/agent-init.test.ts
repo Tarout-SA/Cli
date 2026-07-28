@@ -67,6 +67,56 @@ describe("scaffoldAgentConfig — claude", () => {
 		expect(result.nextSteps).toContain("tarout up --json --yes");
 	});
 
+	it("never tells the agent to run `tarout deploy --app` (that flag does not exist)", () => {
+		scaffoldAgentConfig({ cwd: dir, agent: "claude" });
+		const md = readFileSync(join(dir, "CLAUDE.md"), "utf-8");
+
+		// `--app <id|name>` is a `tarout up` flag only. `tarout deploy` takes the
+		// app as a POSITIONAL argument and rejects `--app` with
+		// `unknown option '--app'` (commander, exit 2). Scaffolding the wrong form
+		// broke every agent's redeploy loop, so pin the correct one.
+		expect(md).not.toMatch(/tarout deploy\s+(--\S+\s+)*--app\b/);
+		expect(md).toContain("tarout deploy <id|name> --wait");
+		// The block must keep explaining the up-vs-deploy asymmetry.
+		expect(md).toContain("unknown option '--app'");
+	});
+
+	it("scopes the 'say deploy' reminder to apps with no push-to-deploy", () => {
+		scaffoldAgentConfig({ cwd: dir, agent: "claude" });
+		const md = readFileSync(join(dir, "CLAUDE.md"), "utf-8");
+
+		// The reminder must NOT fire for a github app — pushes already redeploy
+		// there, so asking the user to say "deploy" would be wrong.
+		expect(md).toContain("**Only when the app has no push-to-deploy**");
+		expect(md).toContain("pushes auto-deploy");
+		expect(md).toContain("tarout apps info <id|name> --json");
+		// ...and it must not contradict the hands-free rule.
+		expect(md).toContain("This hands-free rule is about a deploy the user **asked");
+	});
+
+	it("tells the agent to connect a GitHub remote instead of uploading", () => {
+		scaffoldAgentConfig({ cwd: dir, agent: "claude" });
+		const md = readFileSync(join(dir, "CLAUDE.md"), "utf-8");
+
+		expect(md).toContain("Prefer connecting Git over uploading");
+		expect(md).toContain("tarout apps git github <id|name> --repo <owner/repo>");
+		// Installing the GitHub App is browser-only — the agent must hand off.
+		expect(md).toContain("browser-only");
+	});
+
+	it("warns that `tarout up` silently severs a Git connection", () => {
+		scaffoldAgentConfig({ cwd: dir, agent: "claude" });
+		const md = readFileSync(join(dir, "CLAUDE.md"), "utf-8");
+
+		// `tarout up` defaults to `--source upload`, and completeDropUpload spreads
+		// CLEAR_ALL_SOURCE_FIELDS — so running `up` on a github app nulls
+		// owner/repository/branch/githubId and push-to-deploy stops, with no
+		// warning. The scaffold's headline deploy command is `tarout up`, so this
+		// footgun is one step away for every agent.
+		expect(md).toContain("never run `tarout up` on it");
+		expect(md).toContain("silently wipes the Git connection");
+	});
+
 	it("runs deploys hands-free (no ask rule) but gates paid/destructive commands", () => {
 		scaffoldAgentConfig({ cwd: dir, agent: "claude" });
 		const settings = readJson(settingsPath());

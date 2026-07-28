@@ -55,32 +55,50 @@ export function registerAgentCommands(program: Command): void {
 		)
 		.requiredOption("--handoff <payload>", "Single-use dashboard handoff")
 		.option("--path <directory>", "Project directory", process.cwd())
-		.action(async (options: { handoff: string; path: string }) => {
-			try {
-				const cwd = resolve(options.path);
-				const result = await connectAgentFromHandoff(options.handoff, cwd);
+		.option(
+			"--global",
+			"Store the credential machine-wide instead of in this project's .tarout/auth.json",
+		)
+		.action(
+			async (options: { handoff: string; path: string; global?: boolean }) => {
+				try {
+					const cwd = resolve(options.path);
+					const result = await connectAgentFromHandoff(options.handoff, cwd, {
+						scope: options.global ? "global" : "project",
+					});
 
-				if (isJsonMode()) {
-					outputData(result);
-					return;
+					if (isJsonMode()) {
+						outputData(result);
+						return;
+					}
+
+					success(
+						result.reusedExistingCredential
+							? "Tarout CLI was already linked to this account"
+							: "Tarout CLI connected to this account",
+					);
+					box("Agent identity", [
+						`Account: ${colors.cyan(result.identity.userEmail)}`,
+						`Organization: ${colors.bold(result.identity.organizationName)}`,
+						`Project: ${colors.bold(result.identity.projectName || "None")}`,
+						result.scope === "project"
+							? `Credential: ${colors.bold(".tarout/auth.json")} ${colors.dim("(this project only)")}`
+							: `Credential: ${colors.bold("machine-wide CLI profile")}`,
+						`${colors.bold(result.identityFile.action)} ${result.identityFile.path}`,
+					]);
+					if (result.scope === "project") {
+						log(
+							colors.dim(
+								"This key applies only in this directory. Other projects keep their own credential.",
+							),
+						);
+					}
+					log("");
+				} catch (err) {
+					handleError(err);
 				}
-
-				success(
-					result.reusedExistingCredential
-						? "Tarout CLI was already linked to this account"
-						: "Tarout CLI connected to this account",
-				);
-				box("Agent identity", [
-					`Account: ${colors.cyan(result.identity.userEmail)}`,
-					`Organization: ${colors.bold(result.identity.organizationName)}`,
-					`Project: ${colors.bold(result.identity.projectName || "None")}`,
-					`${colors.bold(result.identityFile.action)} ${result.identityFile.path}`,
-				]);
-				log("");
-			} catch (err) {
-				handleError(err);
-			}
-		});
+			},
+		);
 
 	agent
 		.command("init")

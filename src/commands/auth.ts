@@ -7,15 +7,22 @@ import {
 	clearConfig,
 	deleteProfile,
 	getApiUrl,
+	getAuthScope,
 	getConfig,
 	getCurrentProfile,
+	getGlobalProfile,
 	getToken,
 	isLoggedIn,
 	listProfiles,
 	setCurrentProfile,
 	setProfile,
 } from "../lib/config.js";
-import { AuthError, handleError } from "../lib/errors.js";
+import {
+	getProjectCredential,
+	removeProjectCredential,
+	setProjectCredential,
+} from "../lib/project-auth.js";
+import { AuthError, CliError, handleError } from "../lib/errors.js";
 import {
 	box,
 	colors,
@@ -28,6 +35,7 @@ import {
 	warn,
 } from "../lib/output.js";
 import { stringifyJson } from "../utils/json.js";
+import { ExitCode } from "../utils/exit-codes.js";
 import { input, promptOrEmit } from "../utils/prompts.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
 
@@ -113,24 +121,100 @@ export function warnIfUntrustedHost(apiUrl: string): void {
  * saved profiles are left untouched; when the current profile was the last one,
  * the whole store is reset (identical to the historical single-profile flow).
  */
-export async function performLogout(): Promise<void> {
-	if (!isLoggedIn()) {
+/**
+ * Sign out of the PROJECT credential only — deletes `.tarout/auth.json` and
+ * leaves both the machine-wide profile and the rest of `.tarout` alone.
+ *
+ * The server-side key is deliberately NOT revoked here: the same key may still
+ * be the machine-wide credential or bound to another checkout of the project, so
+ * revoking it would sign the user out of directories this command never touched.
+ * Use `tarout logout --global` (or the dashboard) to actually kill a key.
+ */
+export async function performProjectLogout(): Promise<void> {
+	const resolved = getProjectCredential();
+	if (!resolved) {
 		if (isJsonMode()) {
-			outputData({ success: true, message: "Already logged out" });
+			outputData({
+				success: true,
+				scope: "project",
+				message: "No project credential in this directory",
+			});
+		} else {
+			log("No project credential in this directory.");
+		}
+		return;
+	}
+
+	const removed = removeProjectCredential(resolved.projectDir);
+	const fallback = getGlobalProfile();
+
+	if (isJsonMode()) {
+		outputData({
+			success: true,
+			scope: "project",
+			message: "Project credential removed",
+			removedPath: removed,
+			fallsBackTo: fallback
+				? { scope: "global", userEmail: fallback.userEmail }
+				: null,
+		});
+		return;
+	}
+
+	success(`Removed the project credential for ${resolved.credential.userEmail}`);
+	log(colors.dim(`  ${removed}`));
+	if (fallback) {
+		log(
+			`This directory now uses the machine-wide login (${colors.cyan(fallback.userEmail)}).`,
+		);
+	}
+	log(
+		colors.dim(
+			"The API key itself was not revoked — revoke it in the dashboard if it is no longer needed.",
+		),
+	);
+}
+
+export async function performLogout(
+	options: { scope?: "auto" | "project" | "global" } = {},
+): Promise<void> {
+	const scope = options.scope ?? "auto";
+
+	// A project credential wins over the machine-wide one for every other
+	// command, so an unqualified `logout` has to mean "sign this directory out".
+	// Doing otherwise would revoke the PROJECT's key (getApiClient() is holding
+	// that token) while deleting an unrelated global profile, leaving the
+	// directory pointed at a key that no longer works.
+	if (scope !== "global" && getProjectCredential()) {
+		await performProjectLogout();
+		return;
+	}
+
+	const globalProfile = getGlobalProfile();
+	if (!globalProfile?.token) {
+		if (isJsonMode()) {
+			outputData({ success: true, scope: "global", message: "Already logged out" });
 		} else {
 			log("Already logged out.");
 		}
 		return;
 	}
 
-	const profile = getCurrentProfile();
+	const profile = globalProfile;
 	const currentName = getConfig().currentProfile;
 
 	let revoked = false;
 	let revokeFailed = false;
 	try {
-		const { getApiClient } = await import("../lib/api.js");
-		const result = await getApiClient().user.revokeCurrentCliKey.mutate();
+		// Build the client from the GLOBAL credential explicitly — the shared
+		// singleton would revoke whichever key is currently winning, which is not
+		// necessarily the one being logged out of.
+		const { createCredentialClient } = await import("../lib/auth-profile.js");
+		const client = createCredentialClient(
+			globalProfile.apiUrl,
+			globalProfile.token,
+		);
+		const result = await client.user.revokeCurrentCliKey.mutate();
 		revoked = Boolean(result?.revoked);
 	} catch {
 		// Best-effort: offline, or a server too old to know the endpoint. Fall
@@ -150,13 +234,14 @@ export async function performLogout(): Promise<void> {
 	} else {
 		const nextName = remaining[0] as string;
 		setCurrentProfile(nextName);
-		const nextProfile = getCurrentProfile();
+		const nextProfile = getGlobalProfile();
 		switchedTo = { profile: nextName, userEmail: nextProfile?.userEmail };
 	}
 
 	if (isJsonMode()) {
 		outputData({
 			success: true,
+			scope: "global",
 			message: "Logged out successfully",
 			revoked,
 			switchedTo,
@@ -189,10 +274,12 @@ export async function performLogout(): Promise<void> {
 export async function authenticateWithToken(
 	apiToken: string,
 	apiUrl: string,
+	options: { scope?: "project" | "global"; cwd?: string } = {},
 ): Promise<void> {
 	const normalizedApiUrl = normalizeApiUrl(apiUrl);
 	warnIfUntrustedHost(normalizedApiUrl);
 
+	const scope = options.scope ?? "global";
 	const previous = isLoggedIn() ? getCurrentProfile() : null;
 
 	const _spinner = startSpinner("Verifying token...");
@@ -208,17 +295,33 @@ export async function authenticateWithToken(
 	}
 	succeedSpinner("Token verified!");
 
-	setProfile("default", profile);
-	setCurrentProfile("default");
+	let credentialPath: string | undefined;
+	if (scope === "project") {
+		credentialPath = setProjectCredential(
+			{ ...profile, source: "login --local" },
+			options.cwd ?? process.cwd(),
+		);
+	} else {
+		setProfile("default", profile);
+		setCurrentProfile("default");
+	}
 
+	// A project-scoped key does not replace anything — the machine-wide login is
+	// untouched and still applies everywhere else — so the "replaced" notice is
+	// only honest for the global path.
 	const replacedEmail =
-		previous && previous.userEmail && previous.userEmail !== profile.userEmail
+		scope === "global" &&
+		previous &&
+		previous.userEmail &&
+		previous.userEmail !== profile.userEmail
 			? previous.userEmail
 			: undefined;
 
 	if (isJsonMode()) {
 		outputData({
 			success: true,
+			scope,
+			credentialPath,
 			replacedProfile: replacedEmail ? { userEmail: replacedEmail } : undefined,
 			user: {
 				id: profile.userId,
@@ -246,6 +349,9 @@ export async function authenticateWithToken(
 	box("Account", [
 		`Organization: ${colors.bold(profile.organizationName || "None")}`,
 		`Project: ${colors.bold(profile.projectName || "None")}`,
+		scope === "project"
+			? `Credential: ${colors.bold(".tarout/auth.json")} ${colors.dim("(this project only)")}`
+			: `Credential: ${colors.bold("machine-wide CLI profile")}`,
 	]);
 }
 
@@ -286,14 +392,27 @@ export function registerAuthCommands(program: Command) {
 			"--token <api-token>",
 			"Authenticate with an existing API key instead of opening the browser (for headless/CI). Create one at /dashboard/agent/keys",
 		)
+		.option(
+			"--local",
+			"Store the key in this project's .tarout/auth.json instead of machine-wide (requires --token)",
+		)
 		.action(async (options) => {
 			try {
 				// Headless path: a pasted API key skips the browser entirely and is an
 				// explicit re-auth, so it overwrites any current session.
 				// authenticateWithToken warns about an untrusted --api-url itself.
 				if (options.token) {
-					await authenticateWithToken(options.token, options.apiUrl);
+					await authenticateWithToken(options.token, options.apiUrl, {
+						scope: options.local ? "project" : "global",
+					});
 					return;
+				}
+
+				if (options.local) {
+					throw new CliError(
+						"--local needs a key to store: pass --token <api-token>. The browser flow always signs in machine-wide.",
+						ExitCode.INVALID_ARGUMENTS,
+					);
 				}
 
 				if (isLoggedIn()) {
@@ -353,8 +472,6 @@ export function registerAuthCommands(program: Command) {
 						projectId: authData.projectId,
 						projectName: authData.projectName,
 						projectSlug: authData.projectSlug,
-						environmentId: authData.environmentId || "",
-						environmentName: authData.environmentName || "production",
 					};
 					const profile = await resolveProfileFromCredential({
 						token: authData.token,
@@ -403,10 +520,25 @@ export function registerAuthCommands(program: Command) {
 	// Logout command
 	program
 		.command("logout")
-		.description("Sign out and clear stored credentials")
-		.action(async () => {
+		.description(
+			"Sign out. Removes this project's credential when it has one, otherwise the machine-wide login",
+		)
+		.option(
+			"--global",
+			"Sign out of the machine-wide login even when this project has its own credential",
+		)
+		.option("--local", "Remove only this project's .tarout/auth.json")
+		.action(async (options: { global?: boolean; local?: boolean }) => {
 			try {
-				await performLogout();
+				if (options.global && options.local) {
+					throw new CliError(
+						"Pass either --global or --local, not both.",
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+				await performLogout({
+					scope: options.global ? "global" : options.local ? "project" : "auto",
+				});
 			} catch (err) {
 				handleError(err);
 			}
@@ -468,8 +600,6 @@ export function registerAuthCommands(program: Command) {
 						projectId: authData.projectId,
 						projectName: authData.projectName,
 						projectSlug: authData.projectSlug,
-						environmentId: authData.environmentId || "",
-						environmentName: authData.environmentName || "production",
 					};
 					const profile = await resolveProfileFromCredential({
 						token: authData.token,
@@ -523,9 +653,15 @@ export function registerAuthCommands(program: Command) {
 		.argument("<api-token>", "API token to authenticate with")
 		.description("Authenticate using an existing API key (for CI/scripts)")
 		.option("--api-url <url>", "Custom API URL", "https://tarout.sa")
+		.option(
+			"--local",
+			"Store the key in this project's .tarout/auth.json instead of machine-wide",
+		)
 		.action(async (apiToken, options) => {
 			try {
-				await authenticateWithToken(apiToken, options.apiUrl);
+				await authenticateWithToken(apiToken, options.apiUrl, {
+					scope: options.local ? "project" : "global",
+				});
 			} catch (err) {
 				handleError(err);
 			}
@@ -629,6 +765,7 @@ export function registerAuthCommands(program: Command) {
 				}
 
 				const profile = await resolveVerifiedCurrentProfile();
+				const authScope = getAuthScope();
 
 				if (isJsonMode()) {
 					outputData({
@@ -648,13 +785,21 @@ export function registerAuthCommands(program: Command) {
 									slug: profile.projectSlug,
 								}
 							: null,
-						environment: {
-							id: profile.environmentId,
-							name: profile.environmentName,
-						},
 						apiUrl: profile.apiUrl,
+						scope: authScope.scope,
+						credentialPath: authScope.path,
 					});
 				} else {
+					log("");
+					log(`${colors.bold("Credential")}`);
+					if (authScope.scope === "project") {
+						log(`  Scope: ${colors.cyan("project")} (this directory only)`);
+						log(`  File:  ${colors.dim(authScope.path ?? "")}`);
+					} else if (authScope.scope === "global") {
+						log(`  Scope: ${colors.cyan("machine-wide")}`);
+					} else {
+						log(`  Scope: ${colors.cyan("TAROUT_TOKEN")} (environment)`);
+					}
 					log("");
 					log(`${colors.bold("User")}`);
 					log(`  Email: ${colors.cyan(profile.userEmail)}`);
@@ -673,10 +818,6 @@ export function registerAuthCommands(program: Command) {
 					} else {
 						log(`  ${colors.dim("(none — using the org's default project)")}`);
 					}
-					log("");
-					log(`${colors.bold("Environment")}`);
-					log(`  Name: ${profile.environmentName}`);
-					log(`  ID: ${colors.dim(profile.environmentId)}`);
 					log("");
 				}
 			} catch (err) {

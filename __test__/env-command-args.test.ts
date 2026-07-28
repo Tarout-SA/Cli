@@ -80,7 +80,6 @@ describe("environment command argument normalization", () => {
 			"reveal",
 			"get",
 			"get-string",
-			"list-all-envs",
 			"bulk-set",
 			"bulk-delete",
 			"copy",

@@ -27,16 +27,6 @@ function pickUser(memberOrUser: any) {
 	return memberOrUser?.user ?? memberOrUser;
 }
 
-function pickEnvironmentName(environment: any, fallback?: string) {
-	return (
-		environment?.displayName ||
-		environment?.name ||
-		environment?.slug ||
-		fallback ||
-		"production"
-	);
-}
-
 async function queryOrNull<T>(query: () => Promise<T>): Promise<T | null> {
 	try {
 		return await query();
@@ -62,12 +52,12 @@ export async function resolveProfileFromCredential(params: {
 
 	const user = pickUser(member);
 	const organizations = await client.organization.all.query();
-	const [activeProject, activeEnvironment] = await Promise.all([
-		queryOrNull(() => client.project.getActive.query()),
-		queryOrNull(() => client.environment.getActive.query()),
-	]);
-	const project = activeProject as any;
-	const environment = activeEnvironment as any;
+	// Scope is org -> project -> resources. There is no environment layer:
+	// the platform dropped the `environment` table in migration
+	// 20260722150000_environment_removal_phase_b, so there is nothing to fetch.
+	const project = (await queryOrNull(() =>
+		client.project.getActive.query(),
+	)) as any;
 
 	const organizationId =
 		member.organizationId ||
@@ -94,12 +84,6 @@ export async function resolveProfileFromCredential(params: {
 		projectId: project?.projectId || params.fallback?.projectId,
 		projectName: project?.name || params.fallback?.projectName,
 		projectSlug: project?.slug || params.fallback?.projectSlug,
-		environmentId:
-			environment?.environmentId || params.fallback?.environmentId || "",
-		environmentName: pickEnvironmentName(
-			environment,
-			params.fallback?.environmentName,
-		),
 	};
 }
 

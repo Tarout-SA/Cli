@@ -14,9 +14,6 @@ export interface AuthCallbackData {
 	projectId: string;
 	projectName: string;
 	projectSlug?: string;
-	/** Compatibility hints from older platform releases; not auth scopes. */
-	environmentId?: string;
-	environmentName?: string;
 }
 
 export type ExchangeAuthorizationCode = (
@@ -66,12 +63,7 @@ function parseAuthCallbackData(value: unknown): AuthCallbackData {
 		"projectId",
 		"projectName",
 	] as const;
-	const optional = [
-		"userName",
-		"projectSlug",
-		"environmentId",
-		"environmentName",
-	] as const;
+	const optional = ["userName", "projectSlug"] as const;
 	const valid =
 		required.every(
 			(key) => typeof record[key] === "string" && record[key].length > 0,

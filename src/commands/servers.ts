@@ -6,6 +6,7 @@ import {
 	CliError,
 	findSimilar,
 	handleError,
+	InvalidArgumentError,
 	NotFoundError,
 } from "../lib/errors.js";
 import {
@@ -855,10 +856,15 @@ export function registerServersCommands(program: Command) {
 
 				log("");
 				table(
-					["ID", "NAME", "PROTOCOL", "PORTS", "SOURCE"],
+					// virtualMachineFirewallRule rows carry `direction` (schema default
+					// "ingress"), so show it — an egress rule listed without it looks
+					// identical to an inbound one, and its SOURCE column is really the
+					// destination range.
+					["ID", "NAME", "DIRECTION", "PROTOCOL", "PORTS", "SOURCE"],
 					items.map((r: any) => [
 						colors.cyan((r.id || r.ruleId || "").slice(0, 8)),
 						r.name || colors.dim("-"),
+						r.direction || "ingress",
 						r.protocol || colors.dim("-"),
 						r.portRange || colors.dim("-"),
 						r.sourceRanges || "0.0.0.0/0",
@@ -877,9 +883,24 @@ export function registerServersCommands(program: Command) {
 		.option("-p, --protocol <proto>", "Protocol: tcp, udp, icmp", "tcp")
 		.option("--port <range>", "Port or range (e.g., 80, 443, 8000-9000)")
 		.option("--source <cidr>", "Source CIDR range", "0.0.0.0/0")
+		.option(
+			"--direction <direction>",
+			"Rule direction: ingress (inbound) or egress (outbound)",
+			"ingress",
+		)
 		.action(async (serverIdentifier, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
+
+				// The platform enum is exactly ["ingress","egress"] (lowercase) — send
+				// anything else and the tRPC input parse fails with a raw zod error, so
+				// normalize + reject here where we can give a usable message.
+				const direction = String(options.direction || "ingress").toLowerCase();
+				if (direction !== "ingress" && direction !== "egress") {
+					throw new InvalidArgumentError(
+						`Invalid direction "${options.direction}". Must be "ingress" or "egress".`,
+					);
+				}
 
 				const client = getApiClient();
 
@@ -910,6 +931,7 @@ export function registerServersCommands(program: Command) {
 					protocol: options.protocol,
 					portRange,
 					sourceRanges: options.source,
+					direction,
 				});
 
 				succeedSpinner("Firewall rule added!");
@@ -918,9 +940,12 @@ export function registerServersCommands(program: Command) {
 					outputData(result);
 				} else {
 					box("Firewall Rule Added", [
+						`Direction: ${direction}`,
 						`Protocol: ${options.protocol.toUpperCase()}`,
 						`Port: ${portRange}`,
-						`Source: ${options.source}`,
+						// For an egress rule the platform applies this CIDR as the GCP
+						// destinationRanges, not sourceRanges — label it accordingly.
+						`${direction === "egress" ? "Destination" : "Source"}: ${options.source}`,
 					]);
 				}
 			} catch (err) {

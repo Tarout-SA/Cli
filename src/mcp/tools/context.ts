@@ -6,7 +6,11 @@
  * `link_app` writes .tarout/project.json in the given directory so future
  * deploy/env tools can infer the target when no `app` argument is passed.
  * `context_switch` performs a partial update: it only mutates the org /
- * project / environment fields the caller supplied.
+ * project fields the caller supplied.
+ *
+ * There is deliberately no "environment" dimension here: the platform has no
+ * environment model and no `environment` router, so any such call fails at
+ * runtime. Don't re-add it without a server-side router to back it.
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -25,42 +29,40 @@ export function registerContextTools(server: McpServer): void {
 	server.registerTool(
 		"context_status",
 		{
-			title: "Current org / project / env + link info",
+			title: "Current org / project + link info",
 			description:
-				"Returns the whoami identity, the active organization / project / environment, and whether the given directory is linked to an app via .tarout/project.json.",
+				"Returns the whoami identity, the active organization / project, and whether the given directory is linked to an app via .tarout/project.json.",
 			inputSchema: { path },
 			annotations: { readOnlyHint: true },
 		},
 		async ({ path: dir }) =>
 			withAuth(async (client) => {
 				const cwd = dir ?? process.cwd();
-				const [user, project, environment] = await Promise.all([
+				const [user, project] = await Promise.all([
 					client.user.get.query(),
-					// getActive endpoints throw when nothing is set — treat as null so
-					// status can still report identity + link info.
+					// getActive throws when nothing is set — treat as null so status can
+					// still report identity + link info.
 					client.project.getActive.query().catch(() => null),
-					client.environment.getActive.query().catch(() => null),
 				]);
 				const link = isProjectLinked(cwd)
 					? { linked: true, ...getProjectConfig(cwd) }
 					: { linked: false };
-				return { user, project, environment, link, cwd };
+				return { user, project, link, cwd };
 			}),
 	);
 
 	server.registerTool(
 		"context_switch",
 		{
-			title: "Switch active organization / project / environment",
+			title: "Switch active organization / project",
 			description:
-				"Any subset of the three can be provided (id, slug, or name). Only the fields you supply are changed.",
+				"Either or both can be provided (id, slug, or name). Only the fields you supply are changed.",
 			inputSchema: {
 				organization: z.string().optional(),
 				project: z.string().optional(),
-				environment: z.string().optional(),
 			},
 		},
-		async ({ organization, project, environment }) =>
+		async ({ organization, project }) =>
 			withAuth(async (client) => {
 				const changes: Record<string, unknown> = {};
 				if (organization) {
@@ -91,25 +93,6 @@ export function registerContextTools(server: McpServer): void {
 					if (!match) throw new Error(`Unknown project: ${project}`);
 					await client.project.setActive.mutate({ projectId: match.id });
 					changes.project = match;
-				}
-				if (environment) {
-					const envs = (await client.environment.all.query()) as Array<{
-						environmentId: string;
-						slug?: string;
-						displayName?: string;
-					}>;
-					const lower = environment.toLowerCase();
-					const match = envs.find(
-						(e) =>
-							e.environmentId === environment ||
-							e.slug?.toLowerCase() === lower ||
-							e.displayName?.toLowerCase() === lower,
-					);
-					if (!match) throw new Error(`Unknown environment: ${environment}`);
-					await client.environment.setActive.mutate({
-						environmentId: match.environmentId,
-					});
-					changes.environment = match;
 				}
 				return changes;
 			}),
