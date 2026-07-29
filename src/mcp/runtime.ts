@@ -7,6 +7,10 @@
  * They return one of the two shapes below via okResult()/errorResult().
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+	extractEntitlementKeyFromError,
+	isEntitlementError,
+} from "../commands/deploy.js";
 import { getApiClient } from "../lib/api.js";
 import { isLoggedIn } from "../lib/config.js";
 import {
@@ -15,10 +19,13 @@ import {
 	CliError,
 	DeploymentFailedError,
 	DeploymentTimeoutError,
+	getErrorCode,
 	NotFoundError,
+	staleCredentialGuidance,
 } from "../lib/errors.js";
 import { resolveEntitlementRemedy } from "../lib/entitlement-remedy.js";
 import { ExitCode } from "../utils/exit-codes.js";
+import { stringifyJson } from "../utils/json.js";
 import { sanitizeToolResult } from "./sanitize-result.js";
 
 export interface Envelope {
@@ -126,17 +133,27 @@ export function guardServerHandlers(server: McpServer): void {
 }
 
 export function okResult(data: unknown): ToolText {
+	// JSON.stringify(undefined) is undefined, which would put a non-string in a
+	// text content item and fail CallToolResult validation client-side.
+	if (data === null || data === undefined) {
+		return { content: [{ type: "text", text: "null" }] };
+	}
+	// Serialize via the bigint-aware replacer: the tRPC client's superjson
+	// transformer revives bigint (PostgreSQL statistics) which raw
+	// JSON.stringify rejects, and revived Date instances would be flattened to
+	// {} by the sanitizer's plain-object walk. Re-parsing the serialized form
+	// gives structuredContent the same plain-JSON view (bigint → string,
+	// Date → ISO string) instead of live class instances.
 	const text =
-		typeof data === "string" ? JSON.stringify(data) : JSON.stringify(data, null, 2);
+		typeof data === "string" ? JSON.stringify(data) : stringifyJson(data, 2);
+	const plain: unknown = typeof data === "string" ? data : JSON.parse(text);
 	const result: ToolText = {
 		content: [{ type: "text", text }],
 	};
-	if (data !== null && data !== undefined) {
-		result.structuredContent =
-			typeof data === "object" && !Array.isArray(data)
-				? (data as Record<string, unknown>)
-				: { value: data };
-	}
+	result.structuredContent =
+		plain !== null && typeof plain === "object" && !Array.isArray(plain)
+			? (plain as Record<string, unknown>)
+			: { value: plain };
 	return result;
 }
 
@@ -160,9 +177,14 @@ export function toEnvelope(err: unknown, procedurePath?: string): Envelope {
 				details: { attemptedExitCode: err.exitCode },
 			};
 		}
+		// The suppressed helper printed its real message to stderr, where no MCP
+		// client reads — the semantic ExitCode (AUTH_ERROR, NOT_FOUND, ...) is the
+		// only signal left, so surface it instead of a flat GENERAL_ERROR.
+		const mapped = getErrorCode(err.exitCode);
 		return {
 			error: err.message,
-			code: "GENERAL_ERROR",
+			code:
+				mapped === "ERROR" || mapped === "SUCCESS" ? "GENERAL_ERROR" : mapped,
 			details: { attemptedExitCode: err.exitCode },
 		};
 	}
@@ -201,25 +223,50 @@ export function toEnvelope(err: unknown, procedurePath?: string): Envelope {
 		return { error: err.message, code: "NOT_FOUND" };
 	}
 	if (err instanceof CliError) {
-		// CliError.code is a numeric ExitCode; the envelope carries string codes so
-		// downstream consumers can key off the same identifier the tRPC/agent side
-		// already uses. See errors.ts::getErrorCode for the parallel mapping.
-		return { error: err.message, code: String(err.code), details: err.details };
-	}
-	// tRPC client errors carry a `.data.code` from the server (FORBIDDEN, ...).
-	if (
-		err &&
-		typeof err === "object" &&
-		"data" in err &&
-		err.data &&
-		typeof (err as { data: { code?: unknown } }).data.code === "string"
-	) {
-		const e = err as { message?: string; data: { code: string } };
+		// CliError.code is a numeric ExitCode; the envelope carries the same
+		// string codes the CLI's JSON mode emits (errors.ts::getErrorCode).
+		const code =
+			typeof err.code === "number" ? getErrorCode(err.code) : String(err.code);
 		return {
-			error: e.message ?? "tRPC error",
-			code: e.data.code,
-			details: procedurePath ? { procedure: procedurePath } : undefined,
+			error: err.message,
+			code: code === "ERROR" ? "GENERAL_ERROR" : code,
+			details: err.details,
 		};
+	}
+	// tRPC client errors carry a `.data.code` from the server (FORBIDDEN, ...);
+	// local throw sites may attach a top-level string `code` (and optionally a
+	// `remediation`) to a plain Error. Accept both shapes, mirroring
+	// errors.ts::handleError.
+	if (err && typeof err === "object") {
+		const e = err as {
+			code?: unknown;
+			message?: string;
+			remediation?: unknown;
+			data?: { code?: unknown };
+		};
+		const code =
+			typeof e.code === "string"
+				? e.code
+				: typeof e.data?.code === "string"
+					? e.data.code
+					: undefined;
+		if (code) {
+			const env: Envelope = {
+				error: e.message ?? "Request failed",
+				code,
+				details: procedurePath ? { procedure: procedurePath } : undefined,
+			};
+			if (typeof e.remediation === "string") env.remediation = e.remediation;
+			// A stored-but-rejected credential gets the same re-auth guidance the
+			// CLI's handleError attaches, instead of a bare UNAUTHORIZED.
+			const stale = staleCredentialGuidance(code);
+			if (stale) {
+				env.error = `${env.error} — ${stale.hint}`;
+				env.remediation ??= stale.details.hint;
+				env.details = { ...(env.details ?? {}), ...stale.details };
+			}
+			return env;
+		}
 	}
 	const message = err instanceof Error ? err.message : String(err);
 	return { error: message, code: "GENERAL_ERROR" };
@@ -250,33 +297,25 @@ export async function withAuth(
 }
 
 /**
- * Parses the failed entitlement key from a server-side `assertEntitlement`
- * message of the form `Plan limit reached for <key>: <used>/<limit>.` (mirrors
- * commands/deploy.ts::extractEntitlementKeyFromError without importing that
- * heavy module into the runtime hot path).
- */
-function entitlementKeyFromError(err: unknown): string | undefined {
-	const msg = err instanceof Error ? err.message : "";
-	return msg.match(/Plan limit reached for ([\w.]+)/i)?.[1];
-}
-
-/**
- * Best-effort: turn a bare FORBIDDEN entitlement rejection into an actionable
+ * Best-effort: turn a FORBIDDEN *entitlement* rejection into an actionable
  * remedy (the exact `billing_upgrade`/addon command), the way tools/deploy.ts
- * does. Wrapped so a catalog-fetch or resolver failure never masks the original
- * error — on any failure the envelope is left as the plain FORBIDDEN it was.
+ * does. Gated on isEntitlementError so a plain RBAC permission denial is never
+ * answered with "buy an upgrade" (and pays no catalog round-trip). Wrapped so a
+ * catalog-fetch or resolver failure never masks the original error — on any
+ * failure the envelope is left as the plain FORBIDDEN it was.
  */
 async function enrichForbiddenEnvelope(
 	env: Envelope,
 	err: unknown,
 ): Promise<void> {
 	try {
+		if (!isEntitlementError(err)) return;
+		const failedKey = extractEntitlementKeyFromError(err);
 		const client = getApiClient();
 		// biome-ignore lint/suspicious/noExplicitAny: catalog shape narrows in resolveEntitlementRemedy.
 		const catalog: any = await client.subscription.getCatalog
 			.query()
 			.catch(() => ({ plans: [], addons: [] }));
-		const failedKey = entitlementKeyFromError(err);
 		const remedy = resolveEntitlementRemedy(failedKey, catalog, {});
 		env.remediation =
 			"Upgrade or add an addon: call `billing_upgrade` with the remedy in `details`.";

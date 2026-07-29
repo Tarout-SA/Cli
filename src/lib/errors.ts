@@ -243,7 +243,7 @@ export function handleError(err: unknown): never {
 	exit(ExitCode.GENERAL_ERROR);
 }
 
-function getErrorCode(exitCode: number): string {
+export function getErrorCode(exitCode: number): string {
 	const codes: Record<number, string> = {
 		[ExitCode.SUCCESS]: "SUCCESS",
 		[ExitCode.GENERAL_ERROR]: "ERROR",

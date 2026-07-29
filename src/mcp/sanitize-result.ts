@@ -31,12 +31,29 @@ export const CREDENTIAL_ALLOWLISTED_TOOLS = new Set([
 	// point of the tool. Without this the sanitizer masks the `secret` field and
 	// the caller can never recover it (the platform never shows it again).
 	"storage_access_key_create",
+	// Returns the file bytes the caller explicitly asked for. A base64 body is
+	// one long high-entropy run, so sanitizing replaces the ENTIRE payload with
+	// the placeholder (and reformats utf8 JSON); its oversize error also embeds
+	// a signed URL the heuristics would corrupt.
+	"storage_download",
+	// Returns a presigned backup URL whose credential/signature query params
+	// the value-shape passes (AWS key IDs, high-entropy tokens) would corrupt
+	// into a link that no longer works.
+	"db_backup_download",
 ]);
 
 // Matches the password segment of a credential URL (scheme://user:pass@host)
 // so it can be redacted in-place while keeping the rest of the URL legible.
+// The scheme run is bounded ({0,31} — real schemes are short) so a long
+// scheme-alphabet run with no "://" scans linearly instead of quadratically.
 const CREDENTIAL_URL_PATTERN =
-	/([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:)([^@\s/]+)(@)/gi;
+	/([a-z][a-z0-9+.-]{0,31}:\/\/[^\s:/@]+:)([^@\s/]+)(@)/gi;
+
+// Incremented on every redaction. sanitizeMcpCallResult is fully synchronous,
+// so a snapshot/compare around one call is race-free even with concurrent
+// tool handlers — it lets sanitizeString return parseable-JSON input untouched
+// (byte-for-byte) when nothing inside it needed redacting.
+let redactionCount = 0;
 
 function normalizeKey(key: string): string {
 	return key.replaceAll(/[^a-zA-Z0-9]/g, "").toLowerCase();
@@ -50,7 +67,10 @@ function isSensitiveKey(key: string): boolean {
 function redactUrlPassword(value: string): string {
 	return value.replace(
 		CREDENTIAL_URL_PATTERN,
-		(_match, prefix, _password, at) => `${prefix}${SECRET_PLACEHOLDER}${at}`,
+		(_match, prefix, _password, at) => {
+			redactionCount += 1;
+			return `${prefix}${SECRET_PLACEHOLDER}${at}`;
+		},
 	);
 }
 
@@ -63,11 +83,11 @@ const DOTENV_LINE_PATTERN =
 	/^([ \t]*(?:export[ \t]+)?)([A-Za-z_][A-Za-z0-9_.]*)([ \t]*=[ \t]*)(.+)$/gm;
 
 function redactDotenvSecrets(value: string): string {
-	return value.replace(
-		DOTENV_LINE_PATTERN,
-		(match, prefix, key, eq) =>
-			isSensitiveKey(key) ? `${prefix}${key}${eq}${SECRET_PLACEHOLDER}` : match,
-	);
+	return value.replace(DOTENV_LINE_PATTERN, (match, prefix, key, eq) => {
+		if (!isSensitiveKey(key)) return match;
+		redactionCount += 1;
+		return `${prefix}${key}${eq}${SECRET_PLACEHOLDER}`;
+	});
 }
 
 // Well-known credential value shapes that identify a secret by its OWN format,
@@ -111,7 +131,11 @@ const TOKEN_VALUE_PATTERNS: RegExp[] = [
 
 function redactTokenValues(value: string): string {
 	return TOKEN_VALUE_PATTERNS.reduce(
-		(acc, pattern) => acc.replace(pattern, SECRET_PLACEHOLDER),
+		(acc, pattern) =>
+			acc.replace(pattern, () => {
+				redactionCount += 1;
+				return SECRET_PLACEHOLDER;
+			}),
 		value,
 	);
 }
@@ -142,9 +166,11 @@ function looksLikeSecretToken(token: string): boolean {
 }
 
 function redactHighEntropyTokens(value: string): string {
-	return value.replace(HIGH_ENTROPY_CANDIDATE, (token) =>
-		looksLikeSecretToken(token) ? SECRET_PLACEHOLDER : token,
-	);
+	return value.replace(HIGH_ENTROPY_CANDIDATE, (token) => {
+		if (!looksLikeSecretToken(token)) return token;
+		redactionCount += 1;
+		return SECRET_PLACEHOLDER;
+	});
 }
 
 // Value-based redaction for a free-form (non-JSON) string. Layered so key-name
@@ -160,14 +186,30 @@ function redactSecretValues(value: string): string {
 
 function sanitizeString(value: string): string {
 	const withoutInlineImages = redactInlineImages(value);
+	if (withoutInlineImages !== value) redactionCount += 1;
 	const trimmed = withoutInlineImages.trimStart();
-	if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+	// Quote-prefixed strings matter too: okResult(string) serializes the value
+	// as a JSON-escaped single line whose \n escapes would defeat the
+	// ^-anchored dotenv pass — parse first so redaction sees real newlines.
+	if (
+		trimmed.startsWith("{") ||
+		trimmed.startsWith("[") ||
+		trimmed.startsWith('"')
+	) {
 		try {
-			return JSON.stringify(
-				sanitizeMcpCallResult(JSON.parse(withoutInlineImages)),
-				null,
-				2,
-			);
+			const parsed: unknown = JSON.parse(withoutInlineImages);
+			if (
+				parsed !== null &&
+				(typeof parsed === "object" || typeof parsed === "string")
+			) {
+				const before = redactionCount;
+				const sanitized = sanitizeMcpCallResult(parsed);
+				// Nothing inside needed redacting → return the input byte-for-byte
+				// so legitimate payloads keep their exact formatting/size.
+				return redactionCount === before
+					? withoutInlineImages
+					: JSON.stringify(sanitized, null, 2);
+			}
 		} catch {
 			// Not valid JSON after all — fall through to plain-string redaction.
 		}
@@ -186,6 +228,9 @@ export function sanitizeMcpCallResult<T>(value: T): T {
 	if (typeof value === "string") return sanitizeString(value) as T;
 	if (Array.isArray(value)) return value.map(sanitizeMcpCallResult) as T;
 	if (!value || typeof value !== "object") return value;
+	// A revived Date has no enumerable own properties — the entries walk below
+	// would flatten it to {}. Serialize it the way JSON transport would.
+	if (value instanceof Date) return value.toISOString() as unknown as T;
 
 	return Object.fromEntries(
 		Object.entries(value).map(([key, item]) => {
@@ -195,6 +240,7 @@ export function sanitizeMcpCallResult<T>(value: T): T {
 				item !== "" &&
 				isSensitiveKey(key)
 			) {
+				redactionCount += 1;
 				return [key, SECRET_PLACEHOLDER];
 			}
 			return [key, sanitizeMcpCallResult(item)];

@@ -24,7 +24,12 @@ import {
 	isEntitlementError,
 	uploadCurrentDirectorySource,
 } from "../../commands/deploy.js";
-import { getProjectConfig } from "../../lib/config.js";
+import { getApiClient } from "../../lib/api.js";
+import {
+	getCurrentProfile,
+	getProjectConfig,
+	isLoggedIn,
+} from "../../lib/config.js";
 // `deploy` archives the WHOLE target directory (createSourceArchive) and the
 // archive excludes only cover build artifacts + .env, so a steered agent could
 // point deploy at e.g. ~/.ssh or the home dir and ship keys/tokens to the
@@ -34,7 +39,9 @@ import { getProjectConfig } from "../../lib/config.js";
 import { unsafeDeployDirectory } from "../../lib/deploy-safety.js";
 import { resolveAppRef } from "../../lib/env-core.js";
 import { resolveEntitlementRemedy } from "../../lib/entitlement-remedy.js";
-import { errorResult, okResult, withAuth } from "../runtime.js";
+import { NotFoundError } from "../../lib/errors.js";
+import { formatAppUrl } from "../../utils/url.js";
+import { errorResult, okResult, toEnvelope, withAuth } from "../runtime.js";
 
 export function registerDeployTools(server: McpServer): void {
 	server.registerTool(
@@ -141,7 +148,6 @@ export function registerDeployTools(server: McpServer): void {
 			const timeoutS = timeoutSeconds ?? 600;
 			const doCreate = createIfMissing ?? true;
 			try {
-				const { isLoggedIn } = await import("../../lib/config.js");
 				if (!isLoggedIn()) {
 					return errorResult({
 						error: "Not authenticated.",
@@ -150,7 +156,6 @@ export function registerDeployTools(server: McpServer): void {
 							"Run `tarout login` on the machine running this MCP server, or set TAROUT_TOKEN.",
 					});
 				}
-				const { getApiClient } = await import("../../lib/api.js");
 				const client = getApiClient();
 
 				// 1) Inspect the project.
@@ -164,16 +169,14 @@ export function registerDeployTools(server: McpServer): void {
 					applicationId = linked.applicationId;
 					appName = linked.name;
 				} else if (name) {
-					const apps = (await client.application.allByOrganization.query()) as Array<{
-						applicationId: string;
-						name: string;
-					}>;
-					const match = apps.find(
-						(a) => a.name === name || a.applicationId === name,
-					);
-					if (match) {
-						applicationId = match.applicationId;
-						appName = match.name;
+					// Shared resolver (same ID-shape + name semantics as every other
+					// app-addressing tool); a miss falls through to createIfMissing.
+					try {
+						const resolved = await resolveAppRef(client, name);
+						applicationId = resolved.applicationId;
+						appName = resolved.name;
+					} catch (err) {
+						if (!(err instanceof NotFoundError)) throw err;
 					}
 				}
 				if (!applicationId) {
@@ -184,7 +187,6 @@ export function registerDeployTools(server: McpServer): void {
 						});
 					}
 					try {
-						const { getCurrentProfile } = await import("../../lib/config.js");
 						const profile = getCurrentProfile();
 						if (!profile) {
 							return errorResult({
@@ -250,38 +252,68 @@ export function registerDeployTools(server: McpServer): void {
 					return okResult({ status: "started", deploymentId, applicationId });
 				}
 
-				// 6) Poll with progress notifications.
+				// 6) Poll with progress notifications. Per the MCP spec a progress
+				// notification may only echo the token the CLIENT sent in the
+				// request's _meta (and must carry a numeric `progress`); when no
+				// token was provided, send nothing.
 				const deadline = Date.now() + timeoutS * 1000;
 				let last: Record<string, unknown> | undefined;
-				let progressToken = 0;
+				const clientProgressToken = extra?._meta?.progressToken;
+				let pollCount = 0;
 				while (Date.now() < deadline) {
+					if (extra?.signal?.aborted) {
+						return okResult({
+							status: "in_progress",
+							deploymentId,
+							hint: "Client cancelled the request; the deployment continues server-side. Poll `deployment_status`.",
+						});
+					}
 					last = (await client.deployment.one.query({ deploymentId })) as Record<
 						string,
 						unknown
 					>;
 					const status = String(last.status ?? "").toLowerCase();
-					const progress = extra?.sendNotification;
-					if (typeof progress === "function") {
-						progressToken += 1;
-						void progress({
-							method: "notifications/progress",
-							params: {
-								progressToken,
-								message: `deployment ${deploymentId}: ${status}`,
-							},
-						});
+					pollCount += 1;
+					if (
+						typeof extra?.sendNotification === "function" &&
+						clientProgressToken !== undefined
+					) {
+						void extra
+							.sendNotification({
+								method: "notifications/progress",
+								params: {
+									progressToken: clientProgressToken,
+									progress: pollCount,
+									message: `deployment ${deploymentId}: ${status}`,
+								},
+							})
+							.catch(() => {
+								// A failed notification must never break the poll.
+							});
 					}
 					if (status === "done" || status === "success") {
 						const logs = (await client.deployment.getDeploymentLogs
 							.query({ deploymentId, limit: 200 })
-							.catch(() => ({ logs: [] }))) as {
-							logs?: Array<Record<string, unknown>>;
+							.catch(() => ({ lines: [] }))) as {
+							lines?: Array<Record<string, unknown>>;
 						};
+						// The deployment record carries no URL — derive it from the
+						// application record the way the CLI does.
+						const app = (await client.application.one
+							.query({ applicationId })
+							.catch(() => null)) as {
+							appSubdomain?: string | null;
+							domain?: Array<{ host?: string | null }> | null;
+						} | null;
+						const appUrl =
+							formatAppUrl(app?.appSubdomain) ??
+							formatAppUrl(app?.domain?.[0]?.host) ??
+							undefined;
 						return okResult({
 							status: "done",
 							deploymentId,
-							appUrl: (last as { url?: string }).url,
-							logsTail: (logs.logs ?? []).slice(-80),
+							appUrl,
+							logsTail: (logs.lines ?? []).slice(-80),
 						});
 					}
 					if (status === "error" || status === "failed") {
@@ -306,7 +338,6 @@ export function registerDeployTools(server: McpServer): void {
 					hint: "Poll `deployment_status` / `deployment_logs`.",
 				});
 			} catch (err) {
-				const { toEnvelope } = await import("../runtime.js");
 				return errorResult(toEnvelope(err));
 			}
 		},

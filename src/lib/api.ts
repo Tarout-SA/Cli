@@ -33,7 +33,6 @@ export function createApiClient(): TaroutApiClient {
 		throw new AuthError();
 	}
 
-	const token = getToken();
 	const apiUrl = normalizeApiUrl(getApiUrl());
 
 	return createTRPCProxyClient({
@@ -41,7 +40,13 @@ export function createApiClient(): TaroutApiClient {
 		links: [
 			httpBatchLink({
 				url: `${apiUrl}/api/trpc`,
-				headers: () => (token ? { "x-api-key": token } : {}),
+				// Read the token per request (headers() runs on every call) so a
+				// long-lived process (the MCP stdio server) picks up a re-login
+				// without recreating the singleton client.
+				headers: () => {
+					const token = getToken();
+					return token ? { "x-api-key": token } : {};
+				},
 				fetch: platformFetch,
 			}),
 		],

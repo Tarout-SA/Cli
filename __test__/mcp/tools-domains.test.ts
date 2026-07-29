@@ -106,14 +106,10 @@ describe("domain tools", () => {
 		expect(fakeClient.domain.one.query).not.toHaveBeenCalled();
 	});
 
-	it("domain_verify polls domain.one when wait=true and first check is not verified", async () => {
-		fakeClient.domainRegistrar.verifyExternalDomain.mutate.mockResolvedValueOnce(
-			{ verified: false },
-		);
-		fakeClient.domain.one.query.mockResolvedValueOnce({
-			domainId: "d1",
-			verified: true,
-		});
+	it("domain_verify re-runs the registrar check when wait=true and the first check is not verified", async () => {
+		fakeClient.domainRegistrar.verifyExternalDomain.mutate
+			.mockResolvedValueOnce({ verified: false })
+			.mockResolvedValueOnce({ domainId: "d1", verified: true });
 		vi.useFakeTimers();
 		const promise = invoke("domain_verify", {
 			domainId: "d1",
@@ -130,8 +126,11 @@ describe("domain tools", () => {
 		};
 		expect(body.verified).toBe(true);
 		expect(body.domain.domainId).toBe("d1");
-		expect(fakeClient.domain.one.query).toHaveBeenCalledWith({
-			domainId: "d1",
-		});
+		expect(
+			fakeClient.domainRegistrar.verifyExternalDomain.mutate,
+		).toHaveBeenCalledTimes(2);
+		// Regression: `domain.one` is the app-domain table (its flag is
+		// `isVerified`), so polling it with a registrar domainId never resolves.
+		expect(fakeClient.domain.one.query).not.toHaveBeenCalled();
 	});
 });

@@ -5,8 +5,10 @@
  * apps by name OR id.
  *
  * `domain_verify` supports `wait?` + `timeoutSeconds?` — when wait=true and
- * the initial check does not report `verified: true`, it polls domain.one
- * every 5s until the domain flips to verified or the deadline elapses.
+ * the initial check does not report `verified: true`, it re-runs the
+ * registrar verification every 5s until it reports verified or the deadline
+ * elapses. (The `domain.one` router is the app-domain table whose flag is
+ * `isVerified` — polling it with a registrar domainId can never succeed.)
  *
  * Annotations:
  * - readOnlyHint on domain_list
@@ -64,7 +66,7 @@ export function registerDomainTools(server: McpServer): void {
 		{
 			title: "Verify an external domain's DNS",
 			description:
-				"Runs the verification check. When `wait` is true, polls domain.one until `verified` flips.",
+				"Runs the verification check. When `wait` is true, re-runs the check every 5s until it reports verified or the timeout elapses.",
 			inputSchema: {
 				domainId: z.string(),
 				wait: z.boolean().optional().default(false),
@@ -86,9 +88,11 @@ export function registerDomainTools(server: McpServer): void {
 				const deadline = Date.now() + timeoutSeconds * 1000;
 				while (Date.now() < deadline) {
 					await new Promise((r) => setTimeout(r, 5000));
-					const next = (await client.domain.one.query({ domainId })) as {
-						verified?: boolean;
-					};
+					// Re-run the registrar check — its mutation result carries the
+					// authoritative `verified` flag (commands/domains.ts verify flow).
+					const next = (await client.domainRegistrar.verifyExternalDomain.mutate(
+						{ domainId },
+					)) as { verified?: boolean };
 					if (next.verified) return { verified: true, domain: next };
 				}
 				return { verified: false, timedOut: true };

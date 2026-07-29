@@ -16,7 +16,8 @@ const fakeClient = {
 					name: "web",
 					status: "running",
 					plan: "SHARED",
-					deployedUrl: "https://web.tarout.sh",
+					// The platform stores appSubdomain ALREADY https://-prefixed.
+					appSubdomain: "https://web.tarout.sh",
 				},
 			]),
 		},
@@ -80,6 +81,26 @@ describe("apps tools", () => {
 			plan: "SHARED",
 			url: "https://web.tarout.sh",
 		});
+	});
+
+	it("app_list falls back to the first custom domain host", async () => {
+		fakeClient.application.allByOrganization.query.mockResolvedValueOnce([
+			{
+				applicationId: "app_1",
+				name: "web",
+				status: "running",
+				plan: "SHARED",
+				appSubdomain: null,
+				domain: [{ host: "acme.sa" }],
+			},
+		]);
+		const r = await invoke("app_list", {});
+		const body = JSON.parse(r.content[0].text) as {
+			apps: Array<{ url: string | null }>;
+		};
+		// Custom hosts arrive bare, unlike appSubdomain — both go through
+		// formatAppUrl so the tool never emits `https://https://…` or a bare host.
+		expect(body.apps[0]?.url).toBe("https://acme.sa");
 	});
 
 	it("app_info resolves by name and returns the full object", async () => {

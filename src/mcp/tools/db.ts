@@ -35,17 +35,17 @@
  * Postgres-only tools (db_sql / db_import / db_tables / db_preview /
  * db_analytics / db_external_access) reject MySQL with INVALID_ARGUMENTS BEFORE withAuth so
  * callers see the argument problem instead of an auth error when
- * unauthenticated. db_sql keeps its inline rejection; the tools added later
- * share postgresOnlyRejection().
+ * unauthenticated. All of them share postgresOnlyRejection().
  *
  * db_credentials is intentionally external-only. MCP clients run outside the
  * platform network, so private provider routes are neither useful nor safe to
  * expose. PostgreSQL uses the explicit external pooler fields; engines without
  * an external endpoint return a precondition error.
  *
- * db_external_access mirrors commands/db.ts: the server REPLACES the stored
- * allowlist/public/ssl with whatever the call sends, so the tool loads the
- * current row first and preserves every field the caller didn't override.
+ * db_external_access shares lib/db-external-access.ts with the CLI command:
+ * the server REPLACES the stored allowlist/public/ssl with whatever the call
+ * sends, so the helper loads the current row first and preserves every field
+ * the caller didn't override.
  *
  * db_backup_now takes a backup SCHEDULE id (from db_backups), not a database
  * ref — matching backup.manualBackup* whose input is `{ backupId }`.
@@ -62,7 +62,9 @@ import { readFileSync } from "node:fs";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { getCurrentProfile } from "../../lib/config.js";
+import { updateExternalAccessMerged } from "../../lib/db-external-access.js";
 import { NotFoundError } from "../../lib/errors.js";
+import { generateSlug } from "../../utils/slug.js";
 import { errorResult, type TrpcClient, withAuth } from "../runtime.js";
 
 const dbType = z.enum(["postgres", "mysql"]).describe("Database engine.");
@@ -75,21 +77,14 @@ const DEFAULT_DOCKER_IMAGE = {
 	mysql: "mysql:8",
 } as const;
 
-// URL-safe slug, mirroring generateSlug() in commands/db.ts. The platform
-// create schemas require an `appName` slug alongside the display `name`.
-function generateSlug(name: string): string {
-	return name
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "")
-		.slice(0, 63);
-}
-
 /**
- * Resolves a name-or-id reference to the database's `{id, name}` pair by
- * listing all databases of the given engine and matching. Mirrors
- * resolveAppRef() but routes to `postgres.allByOrganization` /
- * `mysql.allByOrganization` and picks the correct id field.
+ * Resolves a name-or-id reference by listing all databases of the given
+ * engine and matching. Mirrors resolveAppRef() but routes to
+ * `postgres.allByOrganization` / `mysql.allByOrganization`.
+ *
+ * Returns the matched `{id, name}` plus the engine's `router` (tRPC
+ * sub-router) and `idKey` ("postgresId" / "mysqlId") so handlers don't
+ * re-derive the engine ternaries on every call.
  *
  * Throws `NotFoundError` when no match is found — this maps to `NOT_FOUND`
  * in the tool envelope via `toEnvelope()`.
@@ -98,7 +93,12 @@ async function resolveDbRef(
 	client: TrpcClient,
 	ref: string,
 	type: "postgres" | "mysql",
-): Promise<{ id: string; name: string }> {
+): Promise<{
+	id: string;
+	name: string;
+	router: TrpcClient;
+	idKey: "postgresId" | "mysqlId";
+}> {
 	const router = type === "postgres" ? client.postgres : client.mysql;
 	const idKey = type === "postgres" ? "postgresId" : "mysqlId";
 	const list = (await router.allByOrganization.query()) as Array<
@@ -111,14 +111,18 @@ async function resolveDbRef(
 			ref,
 		);
 	}
-	return { id: match[idKey] as string, name: match.name as string };
+	return {
+		id: match[idKey] as string,
+		name: match.name as string,
+		router,
+		idKey,
+	};
 }
 
 /**
- * Pre-auth rejection for postgres-only tools, mirroring db_sql's inline guard:
- * a MySQL request is turned away with INVALID_ARGUMENTS BEFORE withAuth so the
- * caller sees the argument problem instead of an auth error when
- * unauthenticated. Same envelope shape db_sql hand-rolls, via errorResult().
+ * Pre-auth rejection for postgres-only tools: a MySQL request is turned away
+ * with INVALID_ARGUMENTS BEFORE withAuth so the caller sees the argument
+ * problem instead of an auth error when unauthenticated.
  */
 function postgresOnlyRejection(tool: string) {
 	return errorResult({
@@ -197,9 +201,7 @@ export function registerDbTools(server: McpServer): void {
 		},
 		async ({ type, db }) =>
 			withAuth(async (client) => {
-				const { id } = await resolveDbRef(client, db, type);
-				const router = type === "postgres" ? client.postgres : client.mysql;
-				const idKey = type === "postgres" ? "postgresId" : "mysqlId";
+				const { id, router, idKey } = await resolveDbRef(client, db, type);
 				const info = (await router.one.query({ [idKey]: id })) as unknown;
 				return { type, db: info };
 			}),
@@ -215,37 +217,37 @@ export function registerDbTools(server: McpServer): void {
 			annotations: { readOnlyHint: true },
 		},
 		async ({ type, db }) => {
-			let unavailable:
-				| { error: string; remediation: string }
-				| undefined;
-			const result = await withAuth(async (client) => {
-				const { id } = await resolveDbRef(client, db, type);
-				const router = type === "postgres" ? client.postgres : client.mysql;
-				const idKey = type === "postgres" ? "postgresId" : "mysqlId";
-				const info = (await router.one.query({
-					[idKey]: id,
+			// MySQL has no external pooler endpoint — reject BEFORE withAuth so an
+			// unauthenticated caller still sees the real problem.
+			if (type !== "postgres") {
+				return errorResult({
+					error: "External database credentials are unavailable for MySQL.",
+					code: "PRECONDITION_FAILED",
+					remediation:
+						"Use PostgreSQL for an externally reachable database, or manage this database in the Tarout dashboard.",
+				});
+			}
+			return withAuth(async (client) => {
+				const { id } = await resolveDbRef(client, db, "postgres");
+				const info = (await client.postgres.one.query({
+					postgresId: id,
 				})) as Record<string, unknown>;
-
-				if (type !== "postgres") {
-					unavailable = {
-						error: "External database credentials are unavailable for MySQL.",
-						remediation:
-							"Use PostgreSQL for an externally reachable database, or manage this database in the Tarout dashboard.",
-					};
-					return null;
-				}
 
 				if (
 					info.externalAccessEnabled !== true ||
 					typeof info.externalPoolerHost !== "string" ||
 					info.externalPoolerHost.length === 0
 				) {
-					unavailable = {
-						error: "External database access is disabled or unavailable.",
-						remediation:
-							"Enable public database access in the Tarout dashboard, then retry this tool.",
-					};
-					return null;
+					// toEnvelope honors top-level `code` + `remediation` on thrown
+					// errors, so this surfaces as a PRECONDITION_FAILED envelope.
+					throw Object.assign(
+						new Error("External database access is disabled or unavailable."),
+						{
+							code: "PRECONDITION_FAILED",
+							remediation:
+								"Enable public database access in the Tarout dashboard, then retry this tool.",
+						},
+					);
 				}
 
 				return {
@@ -257,15 +259,6 @@ export function registerDbTools(server: McpServer): void {
 					password: info.databasePassword ?? info.password ?? null,
 				};
 			});
-
-			if (!result.isError && unavailable) {
-				return errorResult({
-					error: unavailable.error,
-					code: "PRECONDITION_FAILED",
-					remediation: unavailable.remediation,
-				});
-			}
-			return result;
 		},
 	);
 
@@ -278,25 +271,7 @@ export function registerDbTools(server: McpServer): void {
 			inputSchema: { type: dbType, db: dbRef, sql: z.string() },
 		},
 		async ({ type, db, sql }) => {
-			if (type !== "postgres") {
-				return {
-					content: [
-						{
-							type: "text" as const,
-							text: JSON.stringify(
-								{
-									error:
-										"db_sql is postgres-only; use `call` for mysql-specific ops.",
-									code: "INVALID_ARGUMENTS",
-								},
-								null,
-								2,
-							),
-						},
-					],
-					isError: true,
-				};
-			}
+			if (type !== "postgres") return postgresOnlyRejection("db_sql");
 			return withAuth(async (client) => {
 				const { id } = await resolveDbRef(client, db, "postgres");
 				const result = (await client.postgres.executeSql.mutate({
@@ -377,9 +352,11 @@ export function registerDbTools(server: McpServer): void {
 		},
 		async ({ type, db }) =>
 			withAuth(async (client) => {
-				const { id, name } = await resolveDbRef(client, db, type);
-				const router = type === "postgres" ? client.postgres : client.mysql;
-				const idKey = type === "postgres" ? "postgresId" : "mysqlId";
+				const { id, name, router, idKey } = await resolveDbRef(
+					client,
+					db,
+					type,
+				);
 				const result = (await router.remove.mutate({
 					[idKey]: id,
 				})) as unknown;
@@ -477,11 +454,10 @@ export function registerDbTools(server: McpServer): void {
 		},
 		async ({ type, db }) =>
 			withAuth(async (client) => {
-				const { id } = await resolveDbRef(client, db, type);
-				const stats =
-					type === "postgres"
-						? await client.postgres.sharedStats.query({ postgresId: id })
-						: await client.mysql.sharedStats.query({ mysqlId: id });
+				const { id, router, idKey } = await resolveDbRef(client, db, type);
+				const stats = (await router.sharedStats.query({
+					[idKey]: id,
+				})) as unknown;
 				return { type, stats };
 			}),
 	);
@@ -496,8 +472,7 @@ export function registerDbTools(server: McpServer): void {
 		},
 		async ({ type, db }) =>
 			withAuth(async (client) => {
-				const { id } = await resolveDbRef(client, db, type);
-				const idKey = type === "postgres" ? "postgresId" : "mysqlId";
+				const { id, idKey } = await resolveDbRef(client, db, type);
 				const backups = (await client.backup.listByDatabase.query({
 					[idKey]: id,
 				})) as unknown;
@@ -546,17 +521,15 @@ export function registerDbTools(server: McpServer): void {
 		},
 		async ({ type, db }) =>
 			withAuth(async (client) => {
-				const { id, name } = await resolveDbRef(client, db, type);
-				const result =
-					type === "postgres"
-						? await client.postgres.changeStatus.mutate({
-								postgresId: id,
-								applicationStatus: "running",
-							})
-						: await client.mysql.changeStatus.mutate({
-								mysqlId: id,
-								applicationStatus: "running",
-							});
+				const { id, name, router, idKey } = await resolveDbRef(
+					client,
+					db,
+					type,
+				);
+				const result = (await router.changeStatus.mutate({
+					[idKey]: id,
+					applicationStatus: "running",
+				})) as unknown;
 				return { type, id, name, restarted: true, result };
 			}),
 	);
@@ -571,17 +544,15 @@ export function registerDbTools(server: McpServer): void {
 		},
 		async ({ type, db }) =>
 			withAuth(async (client) => {
-				const { id, name } = await resolveDbRef(client, db, type);
-				const result =
-					type === "postgres"
-						? await client.postgres.changeStatus.mutate({
-								postgresId: id,
-								applicationStatus: "stopped",
-							})
-						: await client.mysql.changeStatus.mutate({
-								mysqlId: id,
-								applicationStatus: "stopped",
-							});
+				const { id, name, router, idKey } = await resolveDbRef(
+					client,
+					db,
+					type,
+				);
+				const result = (await router.changeStatus.mutate({
+					[idKey]: id,
+					applicationStatus: "stopped",
+				})) as unknown;
 				return { type, id, name, stopped: true, result };
 			}),
 	);
@@ -595,9 +566,11 @@ export function registerDbTools(server: McpServer): void {
 		},
 		async ({ type, db }) =>
 			withAuth(async (client) => {
-				const { id, name } = await resolveDbRef(client, db, type);
-				const idKey = type === "postgres" ? "postgresId" : "mysqlId";
-				const router = type === "postgres" ? client.postgres : client.mysql;
+				const { id, name, router, idKey } = await resolveDbRef(
+					client,
+					db,
+					type,
+				);
 				const result = (await router.reactivate.mutate({
 					[idKey]: id,
 				})) as unknown;
@@ -619,9 +592,7 @@ export function registerDbTools(server: McpServer): void {
 		},
 		async ({ type, db, name, description }) =>
 			withAuth(async (client) => {
-				const { id } = await resolveDbRef(client, db, type);
-				const idKey = type === "postgres" ? "postgresId" : "mysqlId";
-				const router = type === "postgres" ? client.postgres : client.mysql;
+				const { id, router, idKey } = await resolveDbRef(client, db, type);
 				const result = (await router.update.mutate({
 					[idKey]: id,
 					name,
@@ -645,9 +616,7 @@ export function registerDbTools(server: McpServer): void {
 		},
 		async ({ type, db, applicationId }) =>
 			withAuth(async (client) => {
-				const { id } = await resolveDbRef(client, db, type);
-				const idKey = type === "postgres" ? "postgresId" : "mysqlId";
-				const router = type === "postgres" ? client.postgres : client.mysql;
+				const { id, router, idKey } = await resolveDbRef(client, db, type);
 				const result = (await router.attachToApplication.mutate({
 					[idKey]: id,
 					applicationId,
@@ -670,9 +639,7 @@ export function registerDbTools(server: McpServer): void {
 		},
 		async ({ type, db, applicationId }) =>
 			withAuth(async (client) => {
-				const { id } = await resolveDbRef(client, db, type);
-				const idKey = type === "postgres" ? "postgresId" : "mysqlId";
-				const router = type === "postgres" ? client.postgres : client.mysql;
+				const { id, router, idKey } = await resolveDbRef(client, db, type);
 				const result = (await router.detachFromApplication.mutate({
 					[idKey]: id,
 					applicationId,
@@ -709,22 +676,14 @@ export function registerDbTools(server: McpServer): void {
 			if (type !== "postgres") return postgresOnlyRejection("db_external_access");
 			return withAuth(async (client) => {
 				const { id } = await resolveDbRef(client, db, "postgres");
-				// Load-merge: the server wipes any omitted field to its default, so
-				// preserve the current value for anything the caller didn't override —
-				// matching commands/db.ts external-access.
-				const current = (await client.postgres.one.query({
-					postgresId: id,
-				})) as Record<string, unknown>;
-				const result = (await client.postgres.updateExternalAccess.mutate({
-					postgresId: id,
-					enabled:
-						enabled ?? (current.externalAccessEnabled as boolean) ?? false,
-					allowedCidrs:
-						allowedCidrs ?? (current.externalAllowedCidrs as string[]) ?? [],
-					public: isPublic ?? (current.externalPublicAccess as boolean) ?? false,
-					requireSsl:
-						requireSsl ?? (current.externalSslRequired as boolean) ?? false,
-				})) as unknown;
+				// Load-merge semantics (the server replaces omitted fields) live in
+				// the shared helper, also used by `tarout db external-access`.
+				const { result } = await updateExternalAccessMerged(client, id, {
+					enabled,
+					allowedCidrs,
+					public: isPublic,
+					requireSsl,
+				});
 				return { type, id, externalAccess: result };
 			});
 		},

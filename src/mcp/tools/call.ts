@@ -14,7 +14,7 @@ import {
 	loadManifest,
 	type ManifestEntry,
 } from "../../lib/surface-manifest.js";
-import { errorResult, withAuth } from "../runtime.js";
+import { withAuth } from "../runtime.js";
 
 // Discovery tools reach the hosted control plane; a hung host must surface a
 // clean MCP error instead of blocking the call forever. Every network await
@@ -75,53 +75,28 @@ export function registerCallTools(server: McpServer): void {
 					.describe("JSON input for the procedure. Default: empty object."),
 			},
 		},
-		async ({ procedure, input }) => {
-			const r = await withAuth(async (client) => {
+		async ({ procedure, input }) =>
+			withAuth(async (client) => {
 				const entry = await resolveEntry(procedure);
 				if (!entry) {
+					// toEnvelope honors top-level `code` + `remediation` on thrown
+					// errors, so this surfaces as a stable NOT_FOUND envelope.
 					throw Object.assign(new Error(`Unknown procedure: ${procedure}`), {
 						code: "NOT_FOUND",
+						remediation: "Run list_procedures to see the current surface.",
 					});
 				}
-				const [routerKey, procKey] = procedure.split(".") as [string, string];
-				const node = client[routerKey]?.[procKey];
-				if (!node) {
-					throw Object.assign(
-						new Error(`Procedure path not on client: ${procedure}`),
-						{ code: "NOT_FOUND" },
-					);
-				}
+				// Walk every dot segment so a nested-router path dispatches to the
+				// leaf procedure. The tRPC proxy answers ANY property path, so the
+				// manifest lookup above is the real existence gate.
+				const node = procedure
+					.split(".")
+					// biome-ignore lint/suspicious/noExplicitAny: untyped tRPC proxy walk.
+					.reduce<any>((acc, segment) => acc?.[segment], client);
 				return entry.type === "mutation"
 					? await node.mutate(input ?? {})
 					: await node.query(input ?? {});
-			}, procedure);
-			// Rewrite our "Unknown procedure" / "Procedure path" throws as a real
-			// NOT_FOUND envelope with a remediation. toEnvelope() defaults plain
-			// Errors to GENERAL_ERROR — we intercept here so callers get a stable
-			// code and a hint pointing at the discovery tool.
-			if (r.isError) {
-				try {
-					const body = JSON.parse(r.content[0].text) as {
-						error: string;
-						code: string;
-					};
-					if (
-						body.error.startsWith("Unknown procedure") ||
-						body.error.startsWith("Procedure path")
-					) {
-						return errorResult({
-							error: body.error,
-							code: "NOT_FOUND",
-							remediation:
-								"Run list_procedures to see the current surface.",
-						});
-					}
-				} catch {
-					// content isn't JSON — leave the envelope as-is
-				}
-			}
-			return r;
-		},
+			}, procedure),
 	);
 
 	server.registerTool(
@@ -167,6 +142,7 @@ export function registerCallTools(server: McpServer): void {
 				if (!found) {
 					throw Object.assign(new Error(`Unknown procedure: ${procedure}`), {
 						code: "NOT_FOUND",
+						remediation: "Run list_procedures to see the current surface.",
 					});
 				}
 				return found;

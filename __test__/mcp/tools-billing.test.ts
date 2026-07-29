@@ -11,6 +11,18 @@ const fakeClient = {
 		getCurrent: {
 			query: vi.fn().mockResolvedValue({ planKey: "shared", status: "ACTIVE" }),
 		},
+		// billing_upgrade classifies the target against the catalog's sortOrder
+		// to decide whether the change is a downgrade needing confirmation.
+		getCatalog: {
+			query: vi.fn().mockResolvedValue({
+				plans: [
+					{ planKey: "free", sortOrder: 0 },
+					{ planKey: "shared", sortOrder: 1 },
+					{ planKey: "dedicated_small", sortOrder: 2 },
+				],
+				addons: [],
+			}),
+		},
 	},
 	billing: {
 		getUsageBreakdown: {
@@ -65,18 +77,17 @@ describe("billing tools", () => {
 		expect(body.usage?.totalHalalas).toBe(1900);
 	});
 
-	it("billing_upgrade delegates to performBillingChange", async () => {
-		const r = await invoke("billing_upgrade", {
-			plan: "dedicated_small",
-			wait: true,
-		});
+	it("billing_upgrade delegates to performBillingChange without waiting", async () => {
+		const r = await invoke("billing_upgrade", { plan: "dedicated_small" });
 		expect(r.isError).toBeUndefined();
+		// wait is pinned false: over MCP there is no mid-call channel to hand the
+		// hosted checkout URL to a human, so blocking would just burn the timeout.
 		expect(performBillingChange).toHaveBeenCalledWith(
 			expect.anything(),
 			expect.objectContaining({
 				kind: "plan",
 				planKey: "dedicated_small",
-				wait: true,
+				wait: false,
 			}),
 		);
 	});
@@ -86,7 +97,6 @@ describe("billing tools", () => {
 		await invoke("billing_upgrade", {
 			plan: "dedicated_small",
 			billingPeriod: "yearly",
-			wait: true,
 		});
 		expect(performBillingChange).toHaveBeenCalledWith(
 			expect.anything(),
@@ -97,13 +107,16 @@ describe("billing tools", () => {
 	it("billing_upgrade maps planQuantity onto the engine's `quantity`", async () => {
 		(performBillingChange as any).mockClear();
 		await invoke("billing_upgrade", {
-			plan: "shared",
+			plan: "dedicated_small",
 			planQuantity: 5,
-			wait: true,
 		});
 		expect(performBillingChange).toHaveBeenCalledWith(
 			expect.anything(),
-			expect.objectContaining({ kind: "plan", planKey: "shared", quantity: 5 }),
+			expect.objectContaining({
+				kind: "plan",
+				planKey: "dedicated_small",
+				quantity: 5,
+			}),
 		);
 		// Regression: the engine input has no `planQuantity` field — the old code
 		// set it there where it was silently dropped.
@@ -113,10 +126,80 @@ describe("billing tools", () => {
 
 	it("billing_upgrade with only planQuantity uses plan_quantity kind", async () => {
 		(performBillingChange as any).mockClear();
-		await invoke("billing_upgrade", { planQuantity: 3, wait: false });
+		await invoke("billing_upgrade", { planQuantity: 3 });
 		expect(performBillingChange).toHaveBeenCalledWith(
 			expect.anything(),
 			expect.objectContaining({ kind: "plan_quantity", quantity: 3 }),
 		);
+	});
+
+	it("billing_upgrade refuses a downgrade without confirmDowngrade", async () => {
+		(performBillingChange as any).mockClear();
+		const r = await invoke("billing_upgrade", { plan: "free" });
+		expect(r.isError).toBe(true);
+		const body = JSON.parse(r.content[0].text) as {
+			code: string;
+			remediation?: string;
+		};
+		// A downgrade never reaches the hosted checkout, so the checkout page
+		// can't act as the consent surface — the flag is the only consent.
+		expect(body.code).toBe("NEEDS_INPUT");
+		expect(body.remediation).toContain("confirmDowngrade");
+		expect(performBillingChange).not.toHaveBeenCalled();
+	});
+
+	it("billing_upgrade performs the downgrade once confirmed", async () => {
+		(performBillingChange as any).mockClear();
+		const r = await invoke("billing_upgrade", {
+			plan: "free",
+			confirmDowngrade: true,
+		});
+		expect(r.isError).toBeUndefined();
+		expect(performBillingChange).toHaveBeenCalledWith(
+			expect.anything(),
+			expect.objectContaining({ kind: "plan", planKey: "free" }),
+		);
+	});
+
+	it("billing_upgrade short-circuits when already on the target plan", async () => {
+		(performBillingChange as any).mockClear();
+		const r = await invoke("billing_upgrade", { plan: "shared" });
+		expect(r.isError).toBeUndefined();
+		const body = JSON.parse(r.content[0].text) as { status: string };
+		expect(body.status).toBe("no_change");
+		expect(performBillingChange).not.toHaveBeenCalled();
+	});
+
+	it("billing_upgrade returns paymentUrl with a hint instead of blocking", async () => {
+		(performBillingChange as any).mockClear();
+		(performBillingChange as any).mockResolvedValueOnce({
+			status: "payment_required",
+			kind: "plan",
+			target: "dedicated_small",
+			paymentUrl: "https://pay.test/abc",
+		});
+		const r = await invoke("billing_upgrade", { plan: "dedicated_small" });
+		expect(r.isError).toBeUndefined();
+		const body = JSON.parse(r.content[0].text) as {
+			paymentUrl: string;
+			hint: string;
+		};
+		expect(body.paymentUrl).toBe("https://pay.test/abc");
+		expect(body.hint).toContain("billing_status");
+	});
+
+	it("billing_upgrade rejects contradictory argument combinations", async () => {
+		(performBillingChange as any).mockClear();
+		const both = await invoke("billing_upgrade", {
+			plan: "dedicated_small",
+			addon: "storage.standard",
+		});
+		expect(both.isError).toBe(true);
+		const none = await invoke("billing_upgrade", {});
+		expect(none.isError).toBe(true);
+		// `quantity` is the addon unit count; plan seats use `planQuantity`.
+		const orphanQuantity = await invoke("billing_upgrade", { quantity: 2 });
+		expect(orphanQuantity.isError).toBe(true);
+		expect(performBillingChange).not.toHaveBeenCalled();
 	});
 });

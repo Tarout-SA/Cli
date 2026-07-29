@@ -5,12 +5,12 @@
  * apps by name OR id. FS-touching tools (env_pull / env_push) default their
  * working path to process.cwd() and always end up at <path>/<file>.
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { parseDotenv, resolveAppRef, serializeDotenv } from "../../lib/env-core.js";
-import { withAuth } from "../runtime.js";
+import { resolveAppRef, serializeDotenv } from "../../lib/env-core.js";
+import { errorResult, withAuth } from "../runtime.js";
 
 const app = z.string().describe("Application name or id.");
 const path = z.string().optional().describe("Directory (defaults to cwd).");
@@ -21,7 +21,7 @@ export function registerEnvTools(server: McpServer): void {
 		{
 			title: "List environment variables of an app",
 			description:
-				"Returns keys (and values when reveal=true) for the selected environment. Wraps envVariable.list.",
+				"Returns keys (and values when reveal=true) for the selected environment. NOTE: values whose key looks credential-bearing (passwords, tokens, keys, connection strings) are replaced with a redaction placeholder in MCP responses — use env_pull to write the real values to a local file. Wraps envVariable.list.",
 			inputSchema: {
 				app,
 				reveal: z.boolean().optional().default(false),
@@ -43,6 +43,12 @@ export function registerEnvTools(server: McpServer): void {
 					keys: vars.map((v) => v.key),
 					vars: includeValues
 						? Object.fromEntries(vars.map((v) => [v.key, v.value ?? ""]))
+						: undefined,
+					// The result sanitizer masks credential-looking values AFTER this
+					// handler returns; without this note the reveal contract silently
+					// breaks and agents copy the placeholder into config files.
+					note: includeValues
+						? "Values that look credential-bearing appear as a redaction placeholder; use env_pull to write real values to a local file."
 						: undefined,
 				};
 			}),
@@ -135,16 +141,27 @@ export function registerEnvTools(server: McpServer): void {
 		{
 			title: "Write the app's environment to a local .env file",
 			description:
-				"Downloads variables via envVariable.export (dotenv format) and writes them to <path>/<file>. The file is created with mode 0600 because dotenv payloads may contain secrets.",
+				"Downloads variables via envVariable.export (dotenv format) and writes them to <path>/<file> with mode 0600 (dotenv payloads may contain secrets). Refuses to replace an existing file unless overwrite=true.",
 			inputSchema: {
 				app,
 				path,
 				file: z.string().optional().default(".env"),
 				maskSecrets: z.boolean().optional().default(false),
+				overwrite: z.boolean().optional().default(false),
 			},
 		},
-		async ({ app: appRef, path: dir, file, maskSecrets }) =>
-			withAuth(async (client) => {
+		async ({ app: appRef, path: dir, file, maskSecrets, overwrite }) => {
+			const target = resolve(dir ?? process.cwd(), file ?? ".env");
+			// The CLI's `env pull` confirms before clobbering an existing file;
+			// over MCP that consent is the explicit overwrite flag.
+			if (existsSync(target) && !overwrite) {
+				return errorResult({
+					error: `${target} already exists.`,
+					code: "PRECONDITION_FAILED",
+					remediation: "Pass overwrite:true to replace it.",
+				});
+			}
+			return withAuth(async (client) => {
 				const { applicationId, name } = await resolveAppRef(client, appRef);
 				const result = (await client.envVariable.export.query({
 					applicationId,
@@ -152,10 +169,14 @@ export function registerEnvTools(server: McpServer): void {
 					maskSecrets: maskSecrets ?? false,
 				})) as { content: string };
 				const text = result.content;
-				const target = resolve(dir ?? process.cwd(), file ?? ".env");
 				writeFileSync(target, text, { mode: 0o600 });
+				// writeFileSync's mode only applies when the file is CREATED —
+				// tighten an existing file too, so pulled secrets never sit in a
+				// world-readable .env.
+				chmodSync(target, 0o600);
 				return { app: { applicationId, name }, wrote: target, bytes: text.length };
-			}),
+			});
+		},
 	);
 
 	server.registerTool(
@@ -163,26 +184,31 @@ export function registerEnvTools(server: McpServer): void {
 		{
 			title: "Push a local .env file to the app",
 			description:
-				"Reads <path>/<file> as dotenv and uploads via envVariable.import (merge default true).",
+				"Reads <path>/<file> and uploads it via envVariable.import with merge/upsert semantics — existing keys are updated and absent ones are left alone. Remove keys with env_unset.",
 			inputSchema: {
 				app,
 				path,
 				file: z.string().optional().default(".env"),
-				merge: z.boolean().optional().default(true),
 				restart: z.boolean().optional().default(false),
 			},
 		},
-		async ({ app: appRef, path: dir, file, merge, restart }) =>
+		async ({ app: appRef, path: dir, file, restart }) =>
 			withAuth(async (client) => {
 				const { applicationId, name } = await resolveAppRef(client, appRef);
 				const source = resolve(dir ?? process.cwd(), file ?? ".env");
-				const raw = readFileSync(source, "utf8");
-				const content = serializeDotenv(parseDotenv(raw));
+				// Upload the RAW file like `tarout env push` does — a local
+				// parse/re-serialize round-trip can only lose information the
+				// platform's own parser handles.
+				const content = readFileSync(source, "utf8");
 				const result = (await client.envVariable.import.mutate({
 					applicationId,
 					content,
 					format: "dotenv",
-					merge: merge ?? true,
+					// Always upsert. The CLI's `--replace` (merge=false) DELETES every
+					// key absent from the file and the platform only accepts it
+					// alongside restart=true (apiImportEnvVariables.superRefine), so
+					// it is deliberately not reachable from an agent-driven tool.
+					merge: true,
 					restart: restart ?? false,
 				})) as unknown;
 				return { app: { applicationId, name }, source, result };

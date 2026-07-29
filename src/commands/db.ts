@@ -17,6 +17,7 @@ import {
 	resolveCheckoutAmountDisplay,
 } from "../lib/billing-upgrade.js";
 import { paymentBrowserOpener, shouldAutoConfirmPaidCheckout } from "../lib/browser.js";
+import { updateExternalAccessMerged } from "../lib/db-external-access.js";
 import {
 	box,
 	colors,
@@ -1244,52 +1245,46 @@ export function registerDbCommands(program: Command) {
 						ExitCode.INVALID_ARGUMENTS,
 					);
 				}
-				// The server REPLACES the stored allowlist/public/ssl with whatever
-				// this call sends (an omitted field is wiped to its default). Load the
-				// current state and preserve every field the user didn't explicitly
-				// change — matching the dashboard, which edits the loaded values in
-				// place instead of clearing them.
-				const current: any = await client.postgres.one.query({
-					postgresId: dbSummary.id,
-				});
-				const enabled = options.enable
-					? true
-					: options.disable
-						? false
-						: (current.externalAccessEnabled ?? false);
-				const allowedCidrs = options.cidrs
-					? options.cidrs
-							.split(",")
-							.map((c: string) => c.trim())
-							.filter(Boolean)
-					: (current.externalAllowedCidrs ?? []);
-				const isPublic = options.public
-					? true
-					: options.private
-						? false
-						: (current.externalPublicAccess ?? false);
-				const requireSsl = options.requireSsl
-					? true
-					: options.allowInsecure
-						? false
-						: (current.externalSslRequired ?? false);
 				const _updateSpinner = startSpinner("Updating external access...");
-				await client.postgres.updateExternalAccess.mutate({
-					postgresId: dbSummary.id,
-					enabled,
-					allowedCidrs,
-					public: isPublic,
-					requireSsl,
-				} as any);
+				// Load-merge semantics (server replaces omitted fields) live in
+				// updateExternalAccessMerged — an undefined override keeps the
+				// stored value.
+				const { settings } = await updateExternalAccessMerged(
+					client,
+					dbSummary.id,
+					{
+						enabled: options.enable
+							? true
+							: options.disable
+								? false
+								: undefined,
+						allowedCidrs: options.cidrs
+							? options.cidrs
+									.split(",")
+									.map((c: string) => c.trim())
+									.filter(Boolean)
+							: undefined,
+						public: options.public
+							? true
+							: options.private
+								? false
+								: undefined,
+						requireSsl: options.requireSsl
+							? true
+							: options.allowInsecure
+								? false
+								: undefined,
+					},
+				);
 				succeedSpinner("External access updated.");
 				if (isJsonMode())
 					outputData({
 						updated: true,
 						id: dbSummary.id,
-						enabled,
-						public: isPublic,
-						requireSsl,
-						allowedCidrs,
+						enabled: settings.enabled,
+						public: settings.public,
+						requireSsl: settings.requireSsl,
+						allowedCidrs: settings.allowedCidrs,
 					});
 			} catch (err) {
 				handleError(err);

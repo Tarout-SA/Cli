@@ -14,13 +14,17 @@
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { verifyProjectCredentialScope } from "../../commands/projects.js";
 import {
+	getCurrentProfile,
 	getProjectConfig,
 	isProjectLinked,
 	removeProjectConfig,
 	setProjectConfig,
+	updateProfile,
 } from "../../lib/config.js";
 import { resolveAppRef } from "../../lib/env-core.js";
+import { NotFoundError } from "../../lib/errors.js";
 import { withAuth } from "../runtime.js";
 
 const path = z.string().optional().describe("Directory (defaults to cwd).");
@@ -47,7 +51,19 @@ export function registerContextTools(server: McpServer): void {
 				const link = isProjectLinked(cwd)
 					? { linked: true, ...getProjectConfig(cwd) }
 					: { linked: false };
-				return { user, project, link, cwd };
+				// The local profile drives create tools (app_create, db_create,
+				// deploy send profile.organizationId) — report it alongside the
+				// server view so any divergence is observable.
+				const profile = getCurrentProfile();
+				const localProfile = profile
+					? {
+							organizationId: profile.organizationId,
+							organizationName: profile.organizationName,
+							projectId: profile.projectId,
+							projectName: profile.projectName,
+						}
+					: null;
+				return { user, project, profile: localProfile, link, cwd };
 			}),
 	);
 
@@ -66,32 +82,64 @@ export function registerContextTools(server: McpServer): void {
 			withAuth(async (client) => {
 				const changes: Record<string, unknown> = {};
 				if (organization) {
+					// organization.all rows carry `id` (see commands/orgs.ts findOrg).
 					const orgs = (await client.organization.all.query()) as Array<{
-						organizationId: string;
+						id: string;
 						name: string;
 					}>;
+					const lower = organization.toLowerCase();
 					const match = orgs.find(
 						(o) =>
-							o.organizationId === organization || o.name === organization,
+							o.id === organization ||
+							o.id.startsWith(organization) ||
+							o.name.toLowerCase() === lower,
 					);
-					if (!match) throw new Error(`Unknown organization: ${organization}`);
+					if (!match) throw new NotFoundError("Organization", organization);
 					await client.organization.setActive.mutate({
-						organizationId: match.organizationId,
+						organizationId: match.id,
 					});
-					changes.organization = match;
+					// Keep the LOCAL profile coherent: create tools (app_create,
+					// db_create, deploy) send getCurrentProfile().organizationId, so a
+					// server-only switch would silently create resources in the old
+					// org. Projects are org-scoped — clear the stale selection.
+					updateProfile({
+						organizationId: match.id,
+						organizationName: match.name,
+						projectId: undefined,
+						projectName: undefined,
+						projectSlug: undefined,
+					});
+					changes.organization = { organizationId: match.id, name: match.name };
 				}
 				if (project) {
+					// project.all rows carry `projectId` (see commands/projects.ts).
 					const projs = (await client.project.all.query()) as Array<{
-						id: string;
+						projectId: string;
 						slug?: string;
 						name?: string;
 					}>;
+					const lower = project.toLowerCase();
 					const match = projs.find(
 						(p) =>
-							p.id === project || p.slug === project || p.name === project,
+							p.projectId === project ||
+							p.slug === project ||
+							(p.name ?? "").toLowerCase() === lower,
 					);
-					if (!match) throw new Error(`Unknown project: ${project}`);
-					await client.project.setActive.mutate({ projectId: match.id });
+					if (!match) throw new NotFoundError("Project", project);
+					// Project-scoped API keys cannot be moved by mutating session
+					// state — verify the credential covers the target (throws
+					// AuthError otherwise), then update the local profile, exactly
+					// like `tarout projects use`.
+					await verifyProjectCredentialScope(client, {
+						projectId: match.projectId,
+						name: match.name ?? match.projectId,
+						slug: match.slug ?? "",
+					});
+					updateProfile({
+						projectId: match.projectId,
+						projectName: match.name,
+						projectSlug: match.slug,
+					});
 					changes.project = match;
 				}
 				return changes;
@@ -110,19 +158,20 @@ export function registerContextTools(server: McpServer): void {
 			withAuth(async (client) => {
 				const cwd = dir ?? process.cwd();
 				const { applicationId, name } = await resolveAppRef(client, appRef);
-				// resolveAppRef only surfaces { applicationId, name }; re-query to pick
-				// up organizationId, which ProjectConfig requires.
-				const apps = (await client.application.allByOrganization.query()) as Array<{
-					applicationId: string;
-					name: string;
-					organizationId?: string;
-				}>;
-				const full = apps.find((a) => a.applicationId === applicationId);
+				// resolveAppRef only surfaces { applicationId, name }; one direct
+				// record fetch (not a second full-list query) picks up
+				// organizationId, falling back to the profile's org rather than
+				// persisting an empty string.
+				const full = (await client.application.one
+					.query({ applicationId })
+					.catch(() => null)) as { organizationId?: string } | null;
+				const organizationId =
+					full?.organizationId ?? getCurrentProfile()?.organizationId ?? "";
 				setProjectConfig(
 					{
 						applicationId,
 						name,
-						organizationId: full?.organizationId ?? "",
+						organizationId,
 						linkedAt: new Date().toISOString(),
 					},
 					cwd,

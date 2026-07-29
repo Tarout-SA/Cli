@@ -263,6 +263,8 @@ export function registerStorageTools(server: McpServer): void {
 					url: string;
 					reservationToken?: string;
 					requiredHeaders?: Record<string, string>;
+					expectedSizeBytes?: number;
+					existingSizeBytes?: number;
 				};
 				// The presigned PUT signs Content-Length (undici sets it from the
 				// Buffer automatically) plus every header in requiredHeaders (the
@@ -283,6 +285,10 @@ export function registerStorageTools(server: McpServer): void {
 					bucketId,
 					reservationToken: upload.reservationToken,
 					fileName: key,
+					// Echo the reservation's sizes back, mirroring commands/storage.ts
+					// `put` — older servers still read them for quota accounting.
+					expectedSizeBytes: upload.expectedSizeBytes ?? body.byteLength,
+					existingSizeBytes: upload.existingSizeBytes ?? 0,
 				})) as {
 					sizeBytes?: number;
 					contentType?: string | null;

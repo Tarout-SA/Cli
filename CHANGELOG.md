@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **MCP tools now address the platform's real router shapes.** A review of the
+  curated tool surface found several handlers keyed off field names the platform
+  never returns, so they failed or silently produced nulls:
+  - `context_switch` matched organizations on `organizationId` (rows carry `id`)
+    and projects on `id` (rows carry `projectId`). It also switched only the
+    server session, leaving the **local** profile — which `app_create`,
+    `db_create` and `deploy` read — pointing at the previous org. Switching a
+    project now verifies the credential's scope first, exactly like
+    `tarout projects use`.
+  - `app_list` / `deploy` derived the app URL from a non-existent `deployedUrl`,
+    and `deploy` read deployment logs from `logs` instead of `lines`.
+  - `domain_verify --wait` polled the app-domain router with a registrar id,
+    which can never flip to verified; it now re-runs the registrar check.
+- **`billing_upgrade` no longer blocks on a checkout no one can see.** Over MCP
+  there is no mid-call channel to hand a hosted-checkout URL to a human, so the
+  tool returns `payment_required` plus `paymentUrl` immediately instead of
+  burning the timeout. A plan **downgrade** (which never reaches a checkout, so
+  the checkout page cannot act as the consent surface) now requires
+  `confirmDowngrade: true`, and contradictory argument combinations are rejected
+  up front.
+- **Error envelopes keep their semantic code.** A suppressed-exit or `CliError`
+  used to flatten to `GENERAL_ERROR`, discarding the only signal an MCP client
+  had (its real message went to stderr, which no client reads). Codes such as
+  `AUTH_ERROR` / `NOT_FOUND` now survive, stale credentials get the same re-auth
+  guidance the CLI prints, and a plain RBAC `FORBIDDEN` is no longer answered
+  with "buy an upgrade" — only genuine entitlement failures are.
+- **Secret sanitizer stops corrupting legitimate payloads.** Presigned download
+  URLs and base64 file bodies were being rewritten into unusable values, and a
+  JSON payload with nothing to redact is now returned byte-for-byte instead of
+  reformatted. Revived `Date` values no longer flatten to `{}`, and `bigint`
+  statistics survive serialization.
+- **`env_pull` refuses to clobber an existing file** unless `overwrite: true`,
+  and re-tightens mode `0600` on an existing file (the create-only mode flag
+  never applied). `env_list` documents that credential-looking values come back
+  redacted, so agents stop copying the placeholder into config files.
+- **`db external-access` no longer wipes settings it wasn't asked to change.**
+  The load-merge semantics are now a single helper shared by the CLI command and
+  the `db_external_access` tool.
+- A long-lived MCP server picks up a re-login without a restart: the API client
+  reads the token per request instead of capturing it once.
+
 ## [1.7.0]
 
 ### Added

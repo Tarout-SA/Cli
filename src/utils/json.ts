@@ -39,12 +39,16 @@ export function redactInlineImages(value: string): string {
  * machine-readable contract. PostgreSQL statistics can contain bigint values,
  * which JSON does not support natively, so encode them losslessly as strings.
  */
-export function stringifyJson(value: unknown): string {
-	return JSON.stringify(value, (_key, item) => {
-		if (typeof item === "bigint") return item.toString();
-		if (typeof item === "string") return redactInlineImages(item);
-		return item;
-	});
+export function stringifyJson(value: unknown, indent?: number): string {
+	return JSON.stringify(
+		value,
+		(_key, item) => {
+			if (typeof item === "bigint") return item.toString();
+			if (typeof item === "string") return redactInlineImages(item);
+			return item;
+		},
+		indent,
+	);
 }
 
 export function jsonSuccess<T>(

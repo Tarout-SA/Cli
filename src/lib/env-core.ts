@@ -15,7 +15,8 @@ type TrpcClient = any;
  *
  * Supports:
  * - `KEY=value` pairs
- * - Double-quoted values (`KEY="hello world"`) — quotes stripped
+ * - Double-quoted values (`KEY="hello world"`) — quotes stripped and the
+ *   standard dotenv escapes (`\n`, `\r`, `\"`, `\\`) interpreted
  * - Single-quoted values (`KEY='raw\nstring'`) — quotes stripped, escapes NOT interpreted
  * - `#` line comments and inline ` #` trailing comments outside quoted values
  * - Blank lines
@@ -36,7 +37,15 @@ export function parseDotenv(text: string): Record<string, string> {
 		if (value.length >= 2) {
 			const first = value[0];
 			const last = value[value.length - 1];
-			if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+			if (first === '"' && last === '"') {
+				out[key] = value
+					.slice(1, -1)
+					.replace(/\\([nr"\\])/g, (_m, c: string) =>
+						c === "n" ? "\n" : c === "r" ? "\r" : c,
+					);
+				continue;
+			}
+			if (first === "'" && last === "'") {
 				out[key] = value.slice(1, -1);
 				continue;
 			}
@@ -55,7 +64,10 @@ export function parseDotenv(text: string): Record<string, string> {
  * - Keys are emitted in sorted order (deterministic output).
  * - Values are quoted with double quotes when they contain whitespace,
  *   `=`, `"`, or a backslash.
- * - Double quotes inside a quoted value are escaped as `\"`.
+ * - Backslashes, double quotes and newlines inside a quoted value are escaped
+ *   (`\\`, `\"`, `\n`, `\r`) so a multiline value stays ONE physical line —
+ *   an unescaped newline would split the value across lines that no
+ *   line-based dotenv parser (including parseDotenv above) can round-trip.
  * - Output always ends with a trailing newline.
  */
 export function serializeDotenv(vars: Record<string, string>): string {
@@ -65,7 +77,11 @@ export function serializeDotenv(vars: Record<string, string>): string {
 			const v = vars[k] ?? "";
 			const needsQuote = /[\s="\\]/.test(v);
 			if (!needsQuote) return `${k}=${v}`;
-			const escaped = v.replace(/"/g, '\\"');
+			const escaped = v
+				.replace(/\\/g, "\\\\")
+				.replace(/"/g, '\\"')
+				.replace(/\n/g, "\\n")
+				.replace(/\r/g, "\\r");
 			return `${k}="${escaped}"`;
 		})
 		.join("\n")}\n`;
@@ -74,11 +90,14 @@ export function serializeDotenv(vars: Record<string, string>): string {
 const ID_SHAPE = /^(app_|[0-9a-f]{8}-)/i;
 
 /**
- * Resolves an application reference (id or name) against the caller's
+ * Resolves an application reference (id, name, or slug) against the caller's
  * organization to a `{ applicationId, name }` tuple.
  *
  * Recognized id shapes: `app_*` prefix or a UUID-looking `xxxxxxxx-` head.
- * Falls back to a name match if no id match is found.
+ * Falls back to an exact name match, then to the CLI's relaxed matching
+ * (commands/jobs.ts findApp): case-insensitive display name and the generated
+ * `appName` slug — e.g. creating "My App" yields slug "my-app", which agents
+ * naturally reuse as the ref.
  *
  * Throws `NotFoundError` when no application matches.
  */
@@ -89,6 +108,7 @@ export async function resolveAppRef(
 	const apps = (await client.application.allByOrganization.query()) as Array<{
 		applicationId: string;
 		name: string;
+		appName?: string;
 	}>;
 	if (ID_SHAPE.test(ref)) {
 		const byId = apps.find((a) => a.applicationId === ref);
@@ -96,5 +116,13 @@ export async function resolveAppRef(
 	}
 	const byName = apps.find((a) => a.name === ref);
 	if (byName) return { applicationId: byName.applicationId, name: byName.name };
+	const lower = ref.toLowerCase();
+	const relaxed = apps.find(
+		(a) =>
+			a.name.toLowerCase() === lower || a.appName?.toLowerCase() === lower,
+	);
+	if (relaxed) {
+		return { applicationId: relaxed.applicationId, name: relaxed.name };
+	}
 	throw new NotFoundError("Application", ref);
 }

@@ -6,9 +6,8 @@
  *
  * `app_list` returns a trimmed shape (id / name / status / plan / url) —
  * agents should call `app_info` for the full application object. The `url`
- * field falls back through `deployedUrl → url → null`; when the server
- * payload uses a different field name this is null and the caller can
- * fetch the full object.
+ * field is derived like the CLI does: `appSubdomain` first, then the first
+ * custom `domain[].host`, else null.
  *
  * Annotations:
  * - readOnlyHint on app_list / app_info / app_logs
@@ -19,20 +18,11 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { getCurrentProfile } from "../../lib/config.js";
 import { resolveAppRef } from "../../lib/env-core.js";
+import { generateSlug } from "../../utils/slug.js";
+import { formatAppUrl } from "../../utils/url.js";
 import { errorResult, withAuth } from "../runtime.js";
 
 const app = z.string().describe("Application name or id.");
-
-// URL-safe slug, mirroring generateSlug() in commands/apps.ts. The platform
-// application.create schema requires a distinct `appName` slug alongside the
-// display `name`.
-function generateSlug(name: string): string {
-	return name
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "")
-		.slice(0, 63);
-}
 
 export function registerAppsTools(server: McpServer): void {
 	server.registerTool(
@@ -55,7 +45,12 @@ export function registerAppsTools(server: McpServer): void {
 						name: a.name,
 						status: a.status,
 						plan: a.plan,
-						url: a.deployedUrl ?? a.url ?? null,
+						url:
+							formatAppUrl(a.appSubdomain as string | null) ??
+							formatAppUrl(
+								(a.domain as Array<{ host?: string }> | null)?.[0]?.host,
+							) ??
+							null,
 					})),
 				};
 			}),
@@ -123,8 +118,10 @@ export function registerAppsTools(server: McpServer): void {
 			inputSchema: {
 				app,
 				lines: z.number().int().positive().max(1000).optional().default(200),
-				level: z.enum(["debug", "info", "warn", "error"]).optional(),
-				timeRange: z.enum(["5m", "15m", "1h", "24h"]).optional(),
+				// Same vocabulary as `tarout apps logs` (--level / --range) — the
+				// platform expects uppercase levels and these exact range tokens.
+				level: z.enum(["ALL", "ERROR", "WARN", "INFO", "DEBUG"]).optional(),
+				timeRange: z.enum(["1h", "6h", "24h", "7d", "all"]).optional(),
 			},
 			annotations: { readOnlyHint: true },
 		},
