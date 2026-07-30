@@ -268,7 +268,7 @@ export async function finalizeBillingMutation(
 		};
 	}
 
-	if (!result?.paymentUrl || !result?.orderId) {
+	if (!(result?.publicPaymentUrl || result?.paymentUrl) || !result?.orderId) {
 		return {
 			status: "deferred",
 			kind,
@@ -279,7 +279,12 @@ export async function finalizeBillingMutation(
 	}
 
 	const orderId: string = result.orderId;
-	const paymentUrl: string = result.paymentUrl;
+	// Prefer the platform's unauthenticated checkout page. A CLI run is usually
+	// headless or driven by an agent, and whatever URL we surface here gets
+	// pasted to a human whose browser may not be signed in — the dashboard URL
+	// dead-ends that person at a login screen. Falls back to `paymentUrl` so a
+	// newer CLI still works against a platform that predates the public page.
+	const paymentUrl: string = result.publicPaymentUrl ?? result.paymentUrl;
 
 	// Surface the checkout URL before opening, but only when we're about to
 	// poll — `onCheckoutOpened` carries wait-specific copy ("Polling for

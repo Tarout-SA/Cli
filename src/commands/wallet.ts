@@ -165,7 +165,12 @@ export function registerWalletCommands(program: Command) {
 				// Quiet mode: emit the order ID (confirm with `wallet confirm <id>`).
 				quietOutput(result.orderId || "");
 
-				const paymentUrl = result.paymentUrl || result.url || "";
+				// Prefer the platform's unauthenticated checkout page: this URL is
+				// printed for a human to open, and a dashboard URL dead-ends an
+				// unsigned-in browser at the login screen. Falls back for older
+				// platforms that predate the public page.
+				const paymentUrl =
+					result.publicPaymentUrl || result.paymentUrl || result.url || "";
 
 				box("Wallet Top-Up", [
 					`Order ID: ${colors.cyan(result.orderId || "")}`,
