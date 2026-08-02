@@ -92,7 +92,9 @@ don't hand-edit infrastructure.
   the \`deploy_app\` needs_input.
 - **Re-deploy** a specific app: \`tarout deploy <id|name> --wait\`.
 - **Run locally** with cloud env vars: \`tarout dev\`.
-- **Full agent guide:** https://tarout.sa/docs/for-ai/onboarding.md
+- **Full agent guide:** https://tarout.sa/docs/for-ai/start.md
+  (one guide per task: \`deploy.md\`, \`database.md\`, \`storage.md\`, \`domains.md\`,
+  \`billing.md\`, \`troubleshoot.md\` — same URL prefix)
 
 Run Tarout commands with \`--json\` for machine-readable output, and run them
 **directly** in your shell (don't wrap them in pipes or redirects like \`2>&1\`, so
@@ -104,29 +106,30 @@ newer \`@tarout/cli\` (throttled) and, if found, installs it and re-runs the com
 on the new version — so you never need to update or reinstall it yourself. A
 \`{ "type": "event", "event": "cli_update" }\` line on stderr just means it upgraded.
 
-**Auth is hands-free — run it yourself.** If a command reports you're not logged in
-(\`AUTH_ERROR\` / exit 3), run \`tarout login\` **directly**. It opens a browser on the
-user's machine and waits for sign-in — tell the user to finish in the browser, then
-continue. Do **not** ask the user to run \`tarout login\` for you, and don't treat it
-as interactive. Deploys (\`tarout up\` / \`tarout deploy\`) also auto-launch this login
-when needed, so you can usually just run the deploy directly. On a headless/CI host
-with no browser, use \`tarout login --token <key>\` (create one at
-https://tarout.sa/dashboard/agent/keys).
+**Auth is hands-free — run it yourself, from this directory.** If a command reports
+you're not logged in (\`AUTH_ERROR\` / exit 3), run \`tarout login\` **directly**. It
+opens a browser on the user's machine and waits for sign-in — tell the user to finish
+in the browser, then continue. Do **not** ask the user to run \`tarout login\` for you,
+and don't treat it as interactive. Deploys (\`tarout up\` / \`tarout deploy\`) also
+auto-launch this login when needed, so you can usually just run the deploy directly.
+If the user hands you an API key (a pasted prompt often ends in \`Key: ...\`), use
+\`tarout login --token <key>\` instead — no browser needed. Create one at
+https://tarout.sa/dashboard/agent/keys.
 
-**Prefer this project's own credential over the machine-wide one.** If
-\`.tarout/auth.json\` exists here, the CLI already uses it automatically and it wins
-over any machine-wide login — check with \`tarout whoami --json\` and read the
-\`scope\` field (\`project\` vs \`global\`). When it says \`project\`:
+**Credentials belong to this project.** Every login path writes
+\`./.tarout/auth.json\` (mode 0600, git-ignored, excluded from deploy archives), and
+the CLI finds it by walking up from the working directory — so it wins over any
+machine-wide login automatically, and connecting a key here never re-points another
+project at a different account. Check with \`tarout whoami --json\` and read \`scope\`
+(\`project\` / \`global\` / \`env\` / \`none\`).
 
-- **Do not run \`tarout login\`, \`tarout logout\`, or \`tarout token\`.** Those act on the
-  machine-wide credential, so they cannot fix a failure here and will change which
-  account *other* projects use.
-- If the user gives you an API key for this project, store it here, not globally:
-  \`tarout login --token <key> --local\` (or \`tarout token <key> --local\`). Never paste
-  a key into a file yourself, and never echo it back.
-- Only use the machine-wide login when the user explicitly asks for it — that is what
-  the \`--global-auth\` flag (one command) and \`--global\` (on login/logout/agent
-  connect) are for.
+- **Never paste a key into a file yourself, and never echo one back.** Let
+  \`tarout login --token <key>\` store it.
+- Run login from the **project root**. In a directory that isn't a project (no
+  \`.tarout\`, \`.git\`, or package manifest above it) the CLI falls back to a
+  machine-wide credential and says so.
+- Machine-wide is opt-in: \`--global\` on \`login\`/\`logout\`/\`register\`/\`agent connect\`,
+  or \`--global-auth\` to ignore the project credential for a single command.
 
 **An \`AUTH_ERROR\` is the only failure a login fixes.** An API key can do everything a
 browser sign-in can — deploy, storage, databases, domains, AI Gateway keys, billing,

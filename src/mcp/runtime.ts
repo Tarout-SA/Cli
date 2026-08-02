@@ -7,8 +7,13 @@
  * They return one of the two shapes below via okResult()/errorResult().
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { getApiClient } from "../lib/api.js";
+import { getApiClient, resetApiClient } from "../lib/api.js";
 import { isLoggedIn } from "../lib/config.js";
+import {
+	getCredentialResolutionDir,
+	resetProjectAuthCache,
+	setCredentialResolutionDir,
+} from "../lib/project-auth.js";
 import {
 	AuthError,
 	BuildFailedError,
@@ -148,7 +153,7 @@ export function errorResult(env: Envelope): ToolText {
 }
 
 const AUTH_REMEDIATION =
-	"Run `tarout login` on the machine running this MCP server, or set the TAROUT_TOKEN env var to an API key.";
+	"Run `tarout login --token <api-key>` from the project directory on the machine running this MCP server. That writes ./.tarout/auth.json; start the MCP server from that same directory so it resolves the credential.";
 
 export function toEnvelope(err: unknown, procedurePath?: string): Envelope {
 	if (err instanceof ProcessExitAttemptedError) {
@@ -225,27 +230,56 @@ export function toEnvelope(err: unknown, procedurePath?: string): Envelope {
 	return { error: message, code: "GENERAL_ERROR" };
 }
 
+/**
+ * Run a tool body against an authenticated client.
+ *
+ * `cwd` matters more than it looks. Credentials are project-scoped
+ * (`.tarout/auth.json`, resolved by walking up from a directory), but an MCP
+ * server is launched by the editor and may be running from the editor's own
+ * working directory or `$HOME` — while the tool call names the project it should
+ * act on. Tools that take a `path` argument pass it here so the credential is
+ * resolved from the project being operated on, not from wherever the server
+ * happened to start. The override is restored afterwards so one tool call can
+ * never leak its directory into the next.
+ */
 export async function withAuth(
 	fn: (client: TrpcClient) => Promise<unknown>,
 	procedurePath?: string,
+	options: { cwd?: string } = {},
 ): Promise<ToolText> {
-	if (!isLoggedIn()) {
-		return errorResult({
-			error: "Not authenticated.",
-			code: "AUTH_ERROR",
-			remediation: AUTH_REMEDIATION,
-		});
+	const previousDir = options.cwd ? getCredentialResolutionDir() : null;
+	if (options.cwd) {
+		setCredentialResolutionDir(options.cwd);
+		resetProjectAuthCache();
+		// The client caches the token it was built with, so it has to be rebuilt
+		// against whatever credential this directory resolves to.
+		resetApiClient();
 	}
 	try {
-		const client = getApiClient();
-		const result = await fn(client);
-		return okResult(result);
-	} catch (err) {
-		const env = toEnvelope(err, procedurePath);
-		if (env.code === "FORBIDDEN") {
-			await enrichForbiddenEnvelope(env, err);
+		if (!isLoggedIn()) {
+			return errorResult({
+				error: "Not authenticated.",
+				code: "AUTH_ERROR",
+				remediation: AUTH_REMEDIATION,
+			});
 		}
-		return errorResult(env);
+		try {
+			const client = getApiClient();
+			const result = await fn(client);
+			return okResult(result);
+		} catch (err) {
+			const env = toEnvelope(err, procedurePath);
+			if (env.code === "FORBIDDEN") {
+				await enrichForbiddenEnvelope(env, err);
+			}
+			return errorResult(env);
+		}
+	} finally {
+		if (options.cwd) {
+			setCredentialResolutionDir(previousDir);
+			resetProjectAuthCache();
+			resetApiClient();
+		}
 	}
 }
 

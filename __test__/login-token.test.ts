@@ -35,6 +35,17 @@ const m = vi.hoisted(() => ({
 	getProjectCredential: vi.fn(() => null),
 	setProjectCredential: vi.fn(() => "/tmp/project/.tarout/auth.json"),
 	removeProjectCredential: vi.fn(() => "/tmp/project/.tarout/auth.json"),
+	// Mirrors the real resolver's contract without touching the filesystem:
+	// `auto` prefers the project, which is the shipped default.
+	resolveCredentialPlacement: vi.fn(
+		(requested: "project" | "global" | "auto", cwd?: string) =>
+			requested === "global"
+				? { scope: "global" as const }
+				: {
+						scope: "project" as const,
+						projectDir: cwd ?? "/tmp/project",
+					},
+	),
 }));
 const {
 	setProfile,
@@ -63,6 +74,7 @@ vi.mock("../src/lib/project-auth.js", () => ({
 	getProjectCredential: m.getProjectCredential,
 	setProjectCredential: m.setProjectCredential,
 	removeProjectCredential: m.removeProjectCredential,
+	resolveCredentialPlacement: m.resolveCredentialPlacement,
 }));
 
 vi.mock("../src/lib/api.js", () => ({
@@ -124,7 +136,10 @@ afterEach(() => {
 });
 
 describe("authenticateWithToken", () => {
-	it("persists the resolved profile as the default profile on success", async () => {
+	// The shipped default is project-scoped: a key handed to the CLI is a key for
+	// ONE project, and storing it machine-wide means connecting project B
+	// silently re-points project A at another account.
+	it("persists the resolved profile to the project by default", async () => {
 		resolveProfileFromCredential.mockResolvedValueOnce(RESOLVED);
 
 		await authenticateWithToken("tk_123", "https://tarout.sa");
@@ -133,8 +148,12 @@ describe("authenticateWithToken", () => {
 			token: "tk_123",
 			apiUrl: "https://tarout.sa",
 		});
-		expect(setProfile).toHaveBeenCalledWith("default", RESOLVED);
-		expect(setCurrentProfile).toHaveBeenCalledWith("default");
+		expect(m.setProjectCredential).toHaveBeenCalledWith(
+			expect.objectContaining({ token: "tk_123" }),
+			expect.any(String),
+		);
+		expect(setProfile).not.toHaveBeenCalled();
+		expect(setCurrentProfile).not.toHaveBeenCalled();
 
 		const events = logs
 			.map((l) => {
@@ -156,6 +175,18 @@ describe("authenticateWithToken", () => {
 		expect(success?.data).not.toHaveProperty("environment");
 	});
 
+	it("persists machine-wide when --global is requested", async () => {
+		resolveProfileFromCredential.mockResolvedValueOnce(RESOLVED);
+
+		await authenticateWithToken("tk_123", "https://tarout.sa", {
+			scope: "global",
+		});
+
+		expect(setProfile).toHaveBeenCalledWith("default", RESOLVED);
+		expect(setCurrentProfile).toHaveBeenCalledWith("default");
+		expect(m.setProjectCredential).not.toHaveBeenCalled();
+	});
+
 	it("reports the replaced identity when overwriting an existing session", async () => {
 		isLoggedIn.mockReturnValue(true);
 		getCurrentProfile.mockReturnValue({
@@ -164,7 +195,11 @@ describe("authenticateWithToken", () => {
 		} as never);
 		resolveProfileFromCredential.mockResolvedValueOnce(RESOLVED);
 
-		await authenticateWithToken("tk_123", "https://tarout.sa");
+		// Only the machine-wide path replaces anything — a project credential
+		// leaves the global login untouched, so there is nothing to report.
+		await authenticateWithToken("tk_123", "https://tarout.sa", {
+			scope: "global",
+		});
 
 		const events = logs
 			.map((l) => {

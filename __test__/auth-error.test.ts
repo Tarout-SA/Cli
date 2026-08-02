@@ -48,7 +48,11 @@ describe("staleCredentialGuidance", () => {
 			hint: AGENT_LOGIN_HINT,
 			nextCommand: "tarout login",
 		});
-		expect(STALE_CREDENTIAL_HINT).toMatch(/tarout login/);
+		// `nextCommand` carries the fix; the hint itself must not claim the key
+		// timed out, because agent keys have no expiry and an agent told
+		// "expired" reports that to the user and stops instead of checking scope.
+		expect(STALE_CREDENTIAL_HINT).toMatch(/whoami/);
+		expect(STALE_CREDENTIAL_HINT).not.toMatch(/expired/i);
 	});
 
 	it("stays silent when nothing is stored (the AuthError path owns that case)", () => {

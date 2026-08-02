@@ -73,12 +73,16 @@ export const AGENT_LOGIN_HINT =
 
 /**
  * Guidance for the case where a credential IS stored locally but the SERVER
- * rejected it (expired 30-day CLI key, revoked from the dashboard, or a wiped
- * account). The no-token AuthError already covers "never logged in"; without
+ * rejected it. The no-token AuthError already covers "never logged in"; without
  * this, a stale token surfaces as a bare "UNAUTHORIZED" with no way forward.
+ *
+ * It deliberately does NOT say "expired". Agent API keys have no expiry, so a
+ * rejection is a revoke, a freeze, or the wrong host — and an agent told the key
+ * "expired" concludes the credential simply aged out, reports that to the user,
+ * and stops. Naming the real causes is what keeps it moving.
  */
 export const STALE_CREDENTIAL_HINT =
-	"session expired or revoked — run `tarout login` to re-authenticate.";
+	"the stored credential was rejected. Agent keys do not expire, so this is not a timeout — it was revoked or paused in the dashboard, or it belongs to a different Tarout host. Check `tarout whoami --json`, then re-authenticate.";
 
 /**
  * When a server UNAUTHORIZED lands while a credential IS stored locally, return

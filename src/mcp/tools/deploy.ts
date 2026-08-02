@@ -140,6 +140,20 @@ export function registerDeployTools(server: McpServer): void {
 			const doWait = wait ?? true;
 			const timeoutS = timeoutSeconds ?? 600;
 			const doCreate = createIfMissing ?? true;
+			// This tool builds its own client rather than going through withAuth, so
+			// it has to point credential resolution at the directory being deployed
+			// itself — otherwise an MCP server started outside the project would
+			// miss its .tarout/auth.json.
+			const {
+				getCredentialResolutionDir,
+				resetProjectAuthCache,
+				setCredentialResolutionDir,
+			} = await import("../../lib/project-auth.js");
+			const { resetApiClient } = await import("../../lib/api.js");
+			const previousDir = getCredentialResolutionDir();
+			setCredentialResolutionDir(cwd);
+			resetProjectAuthCache();
+			resetApiClient();
 			try {
 				const { isLoggedIn } = await import("../../lib/config.js");
 				if (!isLoggedIn()) {
@@ -147,7 +161,7 @@ export function registerDeployTools(server: McpServer): void {
 						error: "Not authenticated.",
 						code: "AUTH_ERROR",
 						remediation:
-							"Run `tarout login` on the machine running this MCP server, or set TAROUT_TOKEN.",
+							"Run `tarout login --token <api-key>` from the project directory on the machine running this MCP server, then restart it from that directory so it picks up ./.tarout/auth.json.",
 					});
 				}
 				const { getApiClient } = await import("../../lib/api.js");
@@ -308,6 +322,10 @@ export function registerDeployTools(server: McpServer): void {
 			} catch (err) {
 				const { toEnvelope } = await import("../runtime.js");
 				return errorResult(toEnvelope(err));
+			} finally {
+				setCredentialResolutionDir(previousDir);
+				resetProjectAuthCache();
+				resetApiClient();
 			}
 		},
 	);

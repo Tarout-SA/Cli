@@ -18,10 +18,13 @@ import {
 	setProfile,
 } from "../lib/config.js";
 import {
+	type CredentialPlacement,
 	getProjectCredential,
 	removeProjectCredential,
-	setProjectCredential,
+	resolveCredentialPlacement,
 } from "../lib/project-auth.js";
+import { persistProfile } from "../lib/credential-store.js";
+import type { Profile } from "../lib/config.js";
 import { AuthError, CliError, handleError } from "../lib/errors.js";
 import {
 	box,
@@ -263,65 +266,19 @@ export async function performLogout(
 	}
 }
 
-/**
- * Headless authentication with an existing API key. Shared by `tarout login
- * --token` and `tarout token` — both resolve the key to a full profile (org,
- * project) and persist it as the `default` profile. A legacy environment hint
- * may still be hydrated for older commands, but it is not an authorization
- * boundary. Unlike browser
- * `login`, this is an explicit re-auth and overwrites any existing session.
- */
-export async function authenticateWithToken(
-	apiToken: string,
-	apiUrl: string,
-	options: { scope?: "project" | "global"; cwd?: string } = {},
-): Promise<void> {
-	const normalizedApiUrl = normalizeApiUrl(apiUrl);
-	warnIfUntrustedHost(normalizedApiUrl);
-
-	const scope = options.scope ?? "global";
-	const previous = isLoggedIn() ? getCurrentProfile() : null;
-
-	const _spinner = startSpinner("Verifying token...");
-	let profile: Awaited<ReturnType<typeof resolveProfileFromCredential>>;
-	try {
-		profile = await resolveProfileFromCredential({
-			token: apiToken,
-			apiUrl: normalizedApiUrl,
-		});
-	} catch (err) {
-		failSpinner("Token verification failed");
-		throw err;
-	}
-	succeedSpinner("Token verified!");
-
-	let credentialPath: string | undefined;
-	if (scope === "project") {
-		credentialPath = setProjectCredential(
-			{ ...profile, source: "login --local" },
-			options.cwd ?? process.cwd(),
-		);
-	} else {
-		setProfile("default", profile);
-		setCurrentProfile("default");
-	}
-
-	// A project-scoped key does not replace anything — the machine-wide login is
-	// untouched and still applies everywhere else — so the "replaced" notice is
-	// only honest for the global path.
-	const replacedEmail =
-		scope === "global" &&
-		previous &&
-		previous.userEmail &&
-		previous.userEmail !== profile.userEmail
-			? previous.userEmail
-			: undefined;
-
+/** Shared success reporting for every authentication path. */
+function reportAuthenticated(
+	profile: Profile,
+	placement: CredentialPlacement,
+	credentialPath: string | undefined,
+	replacedEmail: string | undefined,
+): void {
 	if (isJsonMode()) {
 		outputData({
 			success: true,
-			scope,
+			scope: placement.scope,
 			credentialPath,
+			scopeFallbackReason: placement.fallbackReason,
 			replacedProfile: replacedEmail ? { userEmail: replacedEmail } : undefined,
 			user: {
 				id: profile.userId,
@@ -345,14 +302,79 @@ export async function authenticateWithToken(
 	if (replacedEmail) {
 		log(colors.dim(`Replaced previous session for ${replacedEmail}.`));
 	}
+	if (placement.fallbackReason) {
+		warn(placement.fallbackReason);
+	}
 	success(`Authenticated as ${colors.cyan(profile.userEmail)}`);
 	box("Account", [
 		`Organization: ${colors.bold(profile.organizationName || "None")}`,
 		`Project: ${colors.bold(profile.projectName || "None")}`,
-		scope === "project"
-			? `Credential: ${colors.bold(".tarout/auth.json")} ${colors.dim("(this project only)")}`
+		// Always print the real path: the whole point of project scope is that the
+		// user can see, move, and delete the credential.
+		credentialPath
+			? `Credential: ${colors.bold(credentialPath)} ${colors.dim("(this project only)")}`
 			: `Credential: ${colors.bold("machine-wide CLI profile")}`,
 	]);
+}
+
+/**
+ * Headless authentication with an existing API key. Shared by `tarout login
+ * --token` and `tarout token` — both resolve the key to a full profile (org,
+ * project) and persist it at the resolved destination, which defaults to this
+ * project's `.tarout/auth.json`. A legacy environment hint may still be hydrated
+ * for older commands, but it is not an authorization boundary. Unlike browser
+ * `login`, this is an explicit re-auth and overwrites any existing session at
+ * that destination.
+ */
+export async function authenticateWithToken(
+	apiToken: string,
+	apiUrl: string,
+	options: {
+		scope?: "project" | "global" | "auto";
+		cwd?: string;
+		source?: string;
+	} = {},
+): Promise<void> {
+	const normalizedApiUrl = normalizeApiUrl(apiUrl);
+	warnIfUntrustedHost(normalizedApiUrl);
+
+	const placement = resolveCredentialPlacement(
+		options.scope ?? "auto",
+		options.cwd,
+	);
+	const previous = isLoggedIn() ? getCurrentProfile() : null;
+
+	const _spinner = startSpinner("Verifying token...");
+	let profile: Awaited<ReturnType<typeof resolveProfileFromCredential>>;
+	try {
+		profile = await resolveProfileFromCredential({
+			token: apiToken,
+			apiUrl: normalizedApiUrl,
+		});
+	} catch (err) {
+		failSpinner("Token verification failed");
+		throw err;
+	}
+	succeedSpinner("Token verified!");
+
+	const credentialPath = persistProfile(
+		profile,
+		placement,
+		options.source ?? "login --token",
+	);
+
+	// A project-scoped key does not replace anything — the machine-wide login is
+	// untouched and still applies everywhere else — so the "replaced" notice is
+	// only honest for the global path.
+	const replacedEmail =
+		placement.scope === "global" &&
+		previous &&
+		previous.userEmail &&
+		previous.userEmail !== profile.userEmail
+			? previous.userEmail
+			: undefined;
+
+	reportAuthenticated(profile, placement, credentialPath, replacedEmail);
 }
 
 /**
@@ -393,29 +415,64 @@ export function registerAuthCommands(program: Command) {
 			"Authenticate with an existing API key instead of opening the browser (for headless/CI). Create one at /dashboard/agent/keys",
 		)
 		.option(
+			"--global",
+			"Store the credential machine-wide instead of in this project's .tarout/auth.json",
+		)
+		.option(
 			"--local",
-			"Store the key in this project's .tarout/auth.json instead of machine-wide (requires --token)",
+			"Force this project's .tarout/auth.json (the default when run inside a project)",
 		)
 		.action(async (options) => {
 			try {
+				if (options.local && options.global) {
+					throw new CliError(
+						"Pass either --local or --global, not both.",
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+				const requestedScope = options.global
+					? "global"
+					: options.local
+						? "project"
+						: "auto";
+
 				// Headless path: a pasted API key skips the browser entirely and is an
 				// explicit re-auth, so it overwrites any current session.
 				// authenticateWithToken warns about an untrusted --api-url itself.
 				if (options.token) {
 					await authenticateWithToken(options.token, options.apiUrl, {
-						scope: options.local ? "project" : "global",
+						scope: requestedScope,
 					});
 					return;
 				}
 
-				if (options.local) {
-					throw new CliError(
-						"--local needs a key to store: pass --token <api-token>. The browser flow always signs in machine-wide.",
-						ExitCode.INVALID_ARGUMENTS,
-					);
-				}
-
-				if (isLoggedIn()) {
+				// "Already logged in" must be judged against the destination this
+				// invocation would write to. A machine-wide profile is not a reason to
+				// skip signing this project in — that is exactly the case project
+				// scope exists for.
+				const placement = resolveCredentialPlacement(requestedScope);
+				if (placement.scope === "project") {
+					const existing = getProjectCredential();
+					if (existing && existing.projectDir === placement.projectDir) {
+						if (isJsonMode()) {
+							outputData({
+								alreadyLoggedIn: true,
+								scope: "project",
+								credentialPath: existing.path,
+								userEmail: existing.credential.userEmail,
+								organizationName: existing.credential.organizationName,
+							});
+							return;
+						}
+						log(
+							`This project is already signed in as ${colors.cyan(existing.credential.userEmail)}`,
+						);
+						log(colors.dim(`Credential: ${existing.path}`));
+						log("");
+						log(`Run ${colors.dim("tarout logout")} to sign this project out.`);
+						return;
+					}
+				} else if (isLoggedIn()) {
 					const profile = getCurrentProfile();
 					if (profile) {
 						if (isJsonMode()) {
@@ -478,12 +535,17 @@ export function registerAuthCommands(program: Command) {
 						apiUrl,
 						fallback: fallbackProfile,
 					}).catch(() => fallbackProfile);
-					setProfile("default", profile);
-					setCurrentProfile("default");
+					// Browser login lands in the same place a token login would: this
+					// project, unless the user asked for machine-wide or the working
+					// directory is not a project at all.
+					const credentialPath = persistProfile(profile, placement, "login");
 
 					if (isJsonMode()) {
 						outputData({
 							success: true,
+							scope: placement.scope,
+							credentialPath,
+							scopeFallbackReason: placement.fallbackReason,
 							user: {
 								id: authData.userId,
 								email: authData.userEmail,
@@ -501,10 +563,14 @@ export function registerAuthCommands(program: Command) {
 						});
 					} else {
 						log("");
+						if (placement.fallbackReason) warn(placement.fallbackReason);
 						success(`CLI authorized as ${colors.cyan(authData.userEmail)}`);
 						box("Account", [
 							`Organization: ${colors.bold(authData.organizationName)}`,
 							`Project: ${colors.bold(profile.projectName || authData.projectName)}`,
+							credentialPath
+								? `Credential: ${colors.bold(credentialPath)} ${colors.dim("(this project only)")}`
+								: `Credential: ${colors.bold("machine-wide CLI profile")}`,
 						]);
 					}
 				} catch (err) {
@@ -549,8 +615,15 @@ export function registerAuthCommands(program: Command) {
 		.command("register")
 		.description("Create a new Tarout account via browser")
 		.option("--api-url <url>", "Custom API URL", "https://tarout.sa")
+		.option(
+			"--global",
+			"Store the credential machine-wide instead of in this project's .tarout/auth.json",
+		)
 		.action(async (options) => {
 			try {
+				const placement = resolveCredentialPlacement(
+					options.global ? "global" : "auto",
+				);
 				if (isLoggedIn()) {
 					const profile = getCurrentProfile();
 					if (profile) {
@@ -606,12 +679,17 @@ export function registerAuthCommands(program: Command) {
 						apiUrl,
 						fallback: fallbackProfile,
 					}).catch(() => fallbackProfile);
-					setProfile("default", profile);
-					setCurrentProfile("default");
+					const credentialPath = persistProfile(
+						profile,
+						placement,
+						"register",
+					);
 
 					if (isJsonMode()) {
 						outputData({
 							success: true,
+							scope: placement.scope,
+							credentialPath,
 							user: {
 								id: authData.userId,
 								email: authData.userEmail,
@@ -635,6 +713,9 @@ export function registerAuthCommands(program: Command) {
 						box("Account", [
 							`Organization: ${colors.bold(authData.organizationName)}`,
 							`Project: ${colors.bold(profile.projectName || authData.projectName)}`,
+							credentialPath
+								? `Credential: ${colors.bold(credentialPath)} ${colors.dim("(this project only)")}`
+								: `Credential: ${colors.bold("machine-wide CLI profile")}`,
 						]);
 					}
 				} catch (err) {
@@ -654,13 +735,28 @@ export function registerAuthCommands(program: Command) {
 		.description("Authenticate using an existing API key (for CI/scripts)")
 		.option("--api-url <url>", "Custom API URL", "https://tarout.sa")
 		.option(
+			"--global",
+			"Store the key machine-wide instead of in this project's .tarout/auth.json",
+		)
+		.option(
 			"--local",
-			"Store the key in this project's .tarout/auth.json instead of machine-wide",
+			"Force this project's .tarout/auth.json (the default when run inside a project)",
 		)
 		.action(async (apiToken, options) => {
 			try {
+				if (options.local && options.global) {
+					throw new CliError(
+						"Pass either --local or --global, not both.",
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
 				await authenticateWithToken(apiToken, options.apiUrl, {
-					scope: options.local ? "project" : "global",
+					scope: options.global
+						? "global"
+						: options.local
+							? "project"
+							: "auto",
+					source: "token",
 				});
 			} catch (err) {
 				handleError(err);
@@ -746,7 +842,7 @@ export function registerAuthCommands(program: Command) {
 				log("");
 				log(colors.warn("Save this token — it will not be shown again."));
 				log(
-					`  Use with: ${colors.dim("tarout token <your-token>")} or set ${colors.dim("TAROUT_TOKEN")} env var`,
+					`  Use with: ${colors.dim("tarout login --token <your-token>")} ${colors.dim("(stores it in this project's .tarout/auth.json)")}`,
 				);
 				log("");
 			} catch (err) {

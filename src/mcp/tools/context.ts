@@ -35,9 +35,10 @@ export function registerContextTools(server: McpServer): void {
 			inputSchema: { path },
 			annotations: { readOnlyHint: true },
 		},
-		async ({ path: dir }) =>
-			withAuth(async (client) => {
-				const cwd = dir ?? process.cwd();
+		async ({ path: dir }) => {
+			const cwd = dir ?? process.cwd();
+			return withAuth(
+				async (client) => {
 				const [user, project] = await Promise.all([
 					client.user.get.query(),
 					// getActive throws when nothing is set — treat as null so status can
@@ -48,7 +49,11 @@ export function registerContextTools(server: McpServer): void {
 					? { linked: true, ...getProjectConfig(cwd) }
 					: { linked: false };
 				return { user, project, link, cwd };
-			}),
+				},
+				undefined,
+				{ cwd },
+			);
+		},
 	);
 
 	server.registerTool(
@@ -106,9 +111,10 @@ export function registerContextTools(server: McpServer): void {
 				"Writes .tarout/project.json in the given directory so future deploy / env tools can infer the target when no `app` argument is passed.",
 			inputSchema: { app: z.string(), path },
 		},
-		async ({ app: appRef, path: dir }) =>
-			withAuth(async (client) => {
-				const cwd = dir ?? process.cwd();
+		async ({ app: appRef, path: dir }) => {
+			const cwd = dir ?? process.cwd();
+			return withAuth(
+				async (client) => {
 				const { applicationId, name } = await resolveAppRef(client, appRef);
 				// resolveAppRef only surfaces { applicationId, name }; re-query to pick
 				// up organizationId, which ProjectConfig requires.
@@ -128,7 +134,11 @@ export function registerContextTools(server: McpServer): void {
 					cwd,
 				);
 				return { linked: true, applicationId, name, cwd };
-			}),
+				},
+				undefined,
+				{ cwd },
+			);
+		},
 	);
 
 	server.registerTool(
@@ -139,11 +149,16 @@ export function registerContextTools(server: McpServer): void {
 				"Deletes .tarout/project.json in the given directory. Only untracks the local link — does not touch the remote app.",
 			inputSchema: { path },
 		},
-		async ({ path: dir }) =>
-			withAuth(async () => {
-				const cwd = dir ?? process.cwd();
-				removeProjectConfig(cwd);
-				return { unlinked: true, cwd };
-			}),
+		async ({ path: dir }) => {
+			const cwd = dir ?? process.cwd();
+			return withAuth(
+				async () => {
+					removeProjectConfig(cwd);
+					return { unlinked: true, cwd };
+				},
+				undefined,
+				{ cwd },
+			);
+		},
 	);
 }

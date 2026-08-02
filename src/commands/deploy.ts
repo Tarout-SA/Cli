@@ -40,10 +40,13 @@ import {
 	getToken,
 	isLoggedIn,
 	type Profile,
-	setCurrentProfile,
-	setProfile,
 	setProjectConfig,
 } from "../lib/config.js";
+import {
+	persistProfile,
+	refreshActiveProfile,
+} from "../lib/credential-store.js";
+import { resolveCredentialPlacement } from "../lib/project-auth.js";
 import { unsafeDeployDirectory } from "../lib/deploy-safety.js";
 import {
 	type Catalog,
@@ -272,8 +275,11 @@ export async function ensureAuthenticatedForDeploy(
 			fallback: existingProfile,
 		});
 		if (existingProfile) {
-			setProfile("default", profile);
-			setCurrentProfile("default");
+			// Refresh the layer that is actually in effect. Writing this to the
+			// machine-wide profile instead would copy a project's key into the
+			// global store on every deploy run and re-point unrelated directories
+			// at this project's account.
+			refreshActiveProfile(profile);
 			resetApiClient();
 		}
 		return profile;
@@ -478,8 +484,12 @@ async function authenticateViaBrowser(
 			apiUrl,
 			fallback: fallbackProfile,
 		}).catch(() => fallbackProfile);
-		setProfile("default", profile);
-		setCurrentProfile("default");
+		// Deploy-driven sign-in lands where `tarout login` would: this project.
+		const credentialPath = persistProfile(
+			profile,
+			resolveCredentialPlacement("auto"),
+			action === "register" ? "register" : "login",
+		);
 		resetApiClient();
 
 		if (isJsonMode()) {
@@ -488,6 +498,8 @@ async function authenticateViaBrowser(
 				event: "authenticated",
 				userEmail: profile.userEmail,
 				organization: profile.organizationName,
+				scope: credentialPath ? "project" : "global",
+				credentialPath,
 			});
 		}
 
@@ -525,9 +537,16 @@ async function authenticateViaApiToken(
 		});
 		succeedSpinner("Token verified!");
 
+		let credentialPath: string | undefined;
 		if (options.persist) {
-			setProfile("default", profile);
-			setCurrentProfile("default");
+			// Same placement rules as `tarout login --token`: a key passed to
+			// `deploy`/`up`/`init` is a key for *this* project, so it lands in
+			// ./.tarout/auth.json unless the directory is not a project at all.
+			credentialPath = persistProfile(
+				profile,
+				resolveCredentialPlacement("auto"),
+				"deploy --token",
+			);
 			resetApiClient();
 		}
 
@@ -537,6 +556,9 @@ async function authenticateViaApiToken(
 			box("Account", [
 				`Organization: ${colors.bold(profile.organizationName)}`,
 				`Project: ${colors.bold(profile.projectName || "None")}`,
+				credentialPath
+					? `Credential: ${colors.bold(credentialPath)} ${colors.dim("(this project only)")}`
+					: `Credential: ${colors.bold("machine-wide CLI profile")}`,
 			]);
 		}
 

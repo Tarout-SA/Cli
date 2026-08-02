@@ -74,6 +74,19 @@ export interface ResolvedProjectCredential {
  */
 let globalOnly = false;
 
+/**
+ * Directory that unqualified credential lookups resolve from, when it should not
+ * be `process.cwd()`.
+ *
+ * The CLI never needs this — it runs *in* the project. `tarout-mcp` does: an
+ * editor may launch the MCP server from the editor's own working directory (or
+ * `$HOME`), while each tool call names the project it should act on via its
+ * `path` argument. Without this, every call would resolve credentials from
+ * wherever the server happens to have been started and miss the project's
+ * `.tarout/auth.json` entirely.
+ */
+let resolutionDir: string | null = null;
+
 /** Resolution cache keyed by the directory the search started from. */
 const cache = new Map<string, ResolvedProjectCredential | null>();
 
@@ -89,6 +102,20 @@ export function setGlobalAuthOnly(value: boolean): void {
 /** Whether project-scoped credentials are currently being ignored. */
 export function isGlobalAuthOnly(): boolean {
 	return globalOnly;
+}
+
+/**
+ * Point unqualified credential lookups at a directory other than `process.cwd()`.
+ * Pass null to go back to the working directory.
+ * @param {string | null} dir - Directory to resolve from.
+ */
+export function setCredentialResolutionDir(dir: string | null): void {
+	resolutionDir = dir ? resolve(dir) : null;
+}
+
+/** The directory unqualified lookups currently resolve from. */
+export function getCredentialResolutionDir(): string {
+	return resolutionDir ?? process.cwd();
 }
 
 /**
@@ -214,7 +241,7 @@ export function isWorldOrGroupReadable(path: string): boolean {
  * @returns {string | null} Absolute path to the credential file, or null.
  */
 export function findProjectAuthFile(startDir?: string): string | null {
-	let dir = resolve(startDir || process.cwd());
+	let dir = resolve(startDir || getCredentialResolutionDir());
 	const home = resolve(homedir());
 	const { root } = parse(dir);
 
@@ -239,7 +266,7 @@ export function getProjectCredential(
 ): ResolvedProjectCredential | null {
 	if (globalOnly) return null;
 
-	const key = resolve(startDir || process.cwd());
+	const key = resolve(startDir || getCredentialResolutionDir());
 	const cached = cache.get(key);
 	if (cached !== undefined) return cached;
 
@@ -295,6 +322,116 @@ export function unsafeCredentialDirectory(baseDir: string): string | undefined {
 		return `Refusing to write a project credential to '${abs}': a home or root directory is not a project. Run this from the project directory, or use the machine-wide credential.`;
 	}
 	return undefined;
+}
+
+/**
+ * Files whose presence means "this directory is a project". Deliberately broad
+ * and language-agnostic: the cost of a false positive is one extra `.tarout/`
+ * folder in a real project, while the cost of a false negative is a credential
+ * silently landing machine-wide when the user expected it scoped.
+ */
+const PROJECT_MARKERS = [
+	".git",
+	"package.json",
+	"pyproject.toml",
+	"requirements.txt",
+	"go.mod",
+	"Cargo.toml",
+	"composer.json",
+	"Gemfile",
+	"pom.xml",
+	"build.gradle",
+	"build.gradle.kts",
+	"Dockerfile",
+	"docker-compose.yml",
+	"deno.json",
+	"bun.lockb",
+];
+
+/**
+ * Find the directory a project credential should belong to, walking UP from
+ * `startDir`.
+ *
+ * An existing `.tarout/` wins outright — re-authenticating from a subdirectory
+ * of a linked project must update that project's credential, not scatter a
+ * second one further down the tree. Otherwise the shallowest ancestor carrying a
+ * recognisable project marker is used.
+ *
+ * The walk stops before $HOME and the filesystem root, so neither can ever be
+ * mistaken for a project.
+ *
+ * @param {string} [startDir] - Directory to search from (defaults to cwd).
+ * @returns {string | null} Absolute project directory, or null when there is none.
+ */
+export function findProjectDir(startDir?: string): string | null {
+	let dir = resolve(startDir || getCredentialResolutionDir());
+	const home = resolve(homedir());
+	const { root } = parse(dir);
+	let markerMatch: string | null = null;
+
+	for (let depth = 0; depth < MAX_WALK_DEPTH; depth += 1) {
+		if (dir === home || dir === root) break;
+		// An existing .tarout/ is an explicit statement about where this project
+		// lives — take it immediately, even if a marker matched deeper down.
+		if (existsSync(getProjectAuthDir(dir))) return dir;
+		if (!markerMatch && PROJECT_MARKERS.some((m) => existsSync(join(dir, m)))) {
+			markerMatch = dir;
+		}
+		const parent = dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+
+	return markerMatch;
+}
+
+/** Where a newly-obtained credential will be stored. */
+export interface CredentialPlacement {
+	scope: "project" | "global";
+	/** Directory that will own the credential, when scope is `project`. */
+	projectDir?: string;
+	/** Human-readable explanation, set only when `auto` fell back to global. */
+	fallbackReason?: string;
+}
+
+/**
+ * Decide where `login` / `token` should persist a credential.
+ *
+ * `auto` — the default — prefers this project's `.tarout/auth.json`, because a
+ * credential handed to an agent is a credential for *one* project; storing it
+ * machine-wide means connecting project B silently re-points project A at
+ * another account. It degrades to the machine-wide profile when the working
+ * directory is not a project at all (a bare `~/Downloads`, $HOME itself), so
+ * running `tarout login` in a scratch shell does not litter the filesystem.
+ *
+ * `project` and `global` are the explicit overrides (`--local` / `--global`).
+ *
+ * @param {"project" | "global" | "auto"} requested - Caller's preference.
+ * @param {string} [cwd] - Working directory (defaults to `process.cwd()`).
+ * @returns {CredentialPlacement} The resolved destination.
+ */
+export function resolveCredentialPlacement(
+	requested: "project" | "global" | "auto",
+	cwd?: string,
+): CredentialPlacement {
+	if (requested === "global") return { scope: "global" };
+
+	const startDir = resolve(cwd || getCredentialResolutionDir());
+
+	if (requested === "project") {
+		// Explicit --local: honour the working directory itself, and let
+		// setProjectCredential throw if it is $HOME or the root.
+		return { scope: "project", projectDir: findProjectDir(startDir) ?? startDir };
+	}
+
+	const projectDir = findProjectDir(startDir);
+	if (!projectDir) {
+		return {
+			scope: "global",
+			fallbackReason: `'${startDir}' does not look like a project (no .tarout, .git, or package manifest above it), so the credential was saved machine-wide. Run this from a project directory for a project-scoped credential.`,
+		};
+	}
+	return { scope: "project", projectDir };
 }
 
 /**

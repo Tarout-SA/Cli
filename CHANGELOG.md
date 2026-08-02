@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Credentials are now project-scoped by default.** Every authentication path —
+  `tarout login`, `tarout login --token`, `tarout token`, `tarout register`, and
+  the sign-in that `deploy`/`up`/`init` trigger — writes `./.tarout/auth.json`
+  instead of a machine-wide profile. `--local` was the opt-in for this on the
+  token paths only, and browser `login` could not do it at all; `--local` is now
+  the default and stays accepted as a no-op alias.
+
+  A credential handed to an agent is a credential for *one* project. Storing it
+  machine-wide meant connecting project B silently re-pointed project A at
+  another account.
+
+  Machine-wide is still available with `--global` on `login` / `token` /
+  `register` / `logout` / `agent connect`, and `--global-auth` ignores the
+  project layer for a single command. Running `tarout login` somewhere that is
+  not a project (no `.tarout`, `.git`, or package manifest above it) falls back
+  to the machine-wide profile and says so, so a scratch shell does not get a
+  stray `.tarout/`. Every login now prints the path it wrote.
+
+- **`TAROUT_TOKEN` is no longer documented.** It still works, unchanged, as the
+  lowest-precedence fallback — but it was always ignored whenever a stored
+  profile existed, which made it a misleading thing to recommend. Docs, CLI
+  hints, and MCP error messages now point at `tarout login --token <key>`.
+
+### Fixed
+
+- **`deploy` / `up` / `init` no longer copy a project credential into the
+  machine-wide store.** `ensureAuthenticatedForDeploy` re-resolved the active
+  token on every run and persisted the result with `setProfile("default", …)`.
+  Inside a project-scoped directory the token being refreshed was the
+  *project's*, so each deploy overwrote the user's global login and re-pointed
+  every unrelated directory at this project's account — surfacing later as "my
+  login changed by itself". It now refreshes whichever layer is actually in
+  effect.
+
+- **`tarout-mcp` resolves credentials from the project it is asked to act on.**
+  Credential lookup started from the MCP server's own `process.cwd()`, which is
+  set by the editor that launched it — often not the project. A server started
+  outside the project reported `AUTH_ERROR` for a project that was perfectly
+  well authenticated. Tools that take a `path` argument now resolve from it.
+
 ## [1.7.0]
 
 ### Added

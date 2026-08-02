@@ -45,7 +45,11 @@ describe("scaffoldAgentConfig — claude", () => {
 		const md = readFileSync(join(dir, "CLAUDE.md"), "utf-8");
 		expect(md).toContain("<!-- BEGIN TAROUT -->");
 		expect(md).toContain("<!-- END TAROUT -->");
-		expect(md).toContain("https://tarout.sa/docs/for-ai/onboarding.md");
+		expect(md).toContain("https://tarout.sa/docs/for-ai/start.md");
+		// Credentials are project-scoped by default; the scaffold must not teach
+		// the machine-wide env-var model.
+		expect(md).toContain(".tarout/auth.json");
+		expect(md).not.toContain("TAROUT_TOKEN");
 
 		// The classifier-denied / buy-add-on-vs-upgrade paragraph was removed: the
 		// CLI surfaces NEEDS_UPGRADE (plan-upgrade only) at runtime, so the scaffold

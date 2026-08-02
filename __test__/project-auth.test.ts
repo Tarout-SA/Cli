@@ -8,8 +8,10 @@ import {
 	getProjectCredential,
 	isWorldOrGroupReadable,
 	parseProjectCredential,
+	findProjectDir,
 	removeProjectCredential,
 	resetProjectAuthCache,
+	resolveCredentialPlacement,
 	setGlobalAuthOnly,
 	setProjectCredential,
 	unsafeCredentialDirectory,
@@ -193,5 +195,78 @@ describe("account-switch notice", () => {
 			describeProjectCredentialSwitch("agent@example.com", root),
 		).toBeUndefined();
 		expect(describeProjectCredentialSwitch(undefined, root)).toBeUndefined();
+	});
+});
+
+/**
+ * Where a freshly-obtained credential lands. `auto` is what every login path
+ * now passes, so these cases are the shipped default behaviour of
+ * `tarout login`, `tarout token`, and `deploy --token`.
+ */
+describe("credential placement", () => {
+	it("prefers the project when a marker file is present", () => {
+		writeFileSync(join(root, "package.json"), "{}\n");
+
+		const placement = resolveCredentialPlacement("auto", root);
+
+		expect(placement.scope).toBe("project");
+		expect(placement.projectDir).toBe(root);
+		expect(placement.fallbackReason).toBeUndefined();
+	});
+
+	it("resolves from a subdirectory up to the project root", () => {
+		writeFileSync(join(root, "go.mod"), "module x\n");
+		const nested = join(root, "src", "deep");
+		mkdirSync(nested, { recursive: true });
+
+		expect(resolveCredentialPlacement("auto", nested).projectDir).toBe(root);
+	});
+
+	// Re-authenticating from anywhere inside a linked project must update that
+	// project's credential, not scatter a second one further down the tree.
+	it("an existing .tarout wins over a deeper marker", () => {
+		setProjectCredential(CREDENTIAL, root);
+		const nested = join(root, "packages", "api");
+		mkdirSync(nested, { recursive: true });
+		writeFileSync(join(nested, "package.json"), "{}\n");
+
+		expect(resolveCredentialPlacement("auto", nested).projectDir).toBe(root);
+	});
+
+	// Running `tarout login` in a scratch shell must not litter the filesystem
+	// with a .tarout folder that then shadows nothing useful.
+	it("falls back to machine-wide outside a project, with a reason", () => {
+		const bare = join(root, "not-a-project");
+		mkdirSync(bare);
+
+		const placement = resolveCredentialPlacement("auto", bare);
+
+		expect(placement.scope).toBe("global");
+		expect(placement.projectDir).toBeUndefined();
+		expect(placement.fallbackReason).toMatch(/does not look like a project/);
+	});
+
+	it("never treats $HOME or the filesystem root as a project", () => {
+		const home = homedir();
+		expect(resolveCredentialPlacement("auto", home).scope).toBe("global");
+		expect(resolveCredentialPlacement("auto", parse(home).root).scope).toBe(
+			"global",
+		);
+	});
+
+	it("honours the explicit overrides", () => {
+		writeFileSync(join(root, "package.json"), "{}\n");
+
+		expect(resolveCredentialPlacement("global", root).scope).toBe("global");
+		expect(resolveCredentialPlacement("project", root)).toEqual({
+			scope: "project",
+			projectDir: root,
+		});
+	});
+
+	it("findProjectDir returns null when nothing marks a project", () => {
+		const bare = join(root, "empty");
+		mkdirSync(bare);
+		expect(findProjectDir(bare)).toBeNull();
 	});
 });

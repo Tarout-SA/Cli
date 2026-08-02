@@ -89,9 +89,11 @@ claude mcp add tarout -- tarout-mcp
 
 ### Auth
 
-The server reuses your CLI profile (created by `tarout login`) or the
-`TAROUT_TOKEN` env var. If neither is set, tool calls return a structured
-`AUTH_ERROR` — run `tarout login` on the same machine.
+The server reuses the credential `tarout login` wrote — the project's
+`.tarout/auth.json` first, then the machine-wide profile. **Launch it from the
+project directory**, or pass a `path` argument on the tools that accept one, so
+it resolves the right project. If nothing resolves, tool calls return a
+structured `AUTH_ERROR`.
 
 ### Bootstrap URL
 
@@ -104,13 +106,25 @@ install the CLI + register the server in one shot.
 
 | Command | Description |
 |---------|-------------|
-| `tarout login` | Authenticate via browser |
-| `tarout logout` | Sign out and clear credentials |
-| `tarout whoami` | Show current user, organization, and project |
+| `tarout login` | Authenticate via browser; writes this project's `.tarout/auth.json` |
+| `tarout login --token <key>` | Same, headless — no browser |
+| `tarout register` | Create a new account via browser |
+| `tarout token <key>` | Alias for `login --token` |
+| `tarout token:create` | Mint a new API key for the current account |
+| `tarout logout` | Sign this project out (`--global` for the machine-wide login) |
+| `tarout whoami` | Show current user, organization, project, and credential `scope` |
+
+Credentials are **per project** — see [Configuration](#configuration).
 
 ```bash
 # Login with a custom API URL (e.g. staging)
 tarout login --api-url https://staging.tarout.sa
+
+# Store the credential machine-wide instead of in this project
+tarout login --global
+
+# Ignore this project's credential for a single command
+tarout whoami --global-auth
 ```
 
 ### Applications
@@ -474,16 +488,48 @@ Flags currently supported by `tarout up` for skipping the relay:
 
 ## Configuration
 
-Profiles are written by `tarout login`; you normally never edit them by hand.
-The config file lives in the OS-standard config directory (via the `conf`
-package), **not** `~/.tarout/`:
+**Credentials are per project.** `tarout login` writes `./.tarout/auth.json`,
+and the CLI finds it by walking **up** from the working directory — so it works
+from any subfolder, and connecting a key in one project never re-points another
+at a different account.
+
+```
+your-project/
+  .tarout/
+    auth.json      # the credential — mode 0600, in a 0700 directory
+    project.json   # which Tarout app this directory deploys to
+    .gitignore     # written automatically: ignores everything but itself
+```
+
+`.tarout/` is git-ignored on creation and excluded from deploy archives, so the
+key never ships anywhere. You normally never edit these by hand.
+
+### Resolution order
+
+| # | Layer | Set by |
+|---|-------|--------|
+| 1 | `.tarout/auth.json` at or above the cwd | `tarout login` (default) |
+| 2 | Machine-wide profile | `tarout login --global` |
+| 3 | `TAROUT_TOKEN` environment variable | your shell — **lowest** precedence, and ignored entirely whenever 1 or 2 exists |
+
+`tarout whoami --json` reports which one is in effect as `scope`
+(`project` / `global` / `env` / `none`) plus the `credentialPath`. Pass
+`--global-auth` on any command to skip layer 1 for that invocation.
+
+Running `tarout login` somewhere that is not a project (no `.tarout`, `.git`, or
+package manifest above it) falls back to the machine-wide profile and tells you
+so, rather than scattering a `.tarout/` folder.
+
+### The machine-wide profile
+
+Stored in the OS-standard config directory (via the `conf` package), **not**
+`~/.tarout/`:
 
 - **macOS**: `~/Library/Preferences/tarout-nodejs/config.json`
 - **Linux**: `~/.config/tarout-nodejs/config.json` (or `$XDG_CONFIG_HOME`)
 - **Windows**: `%APPDATA%\tarout-nodejs\Config\config.json`
 
-To authenticate without a browser (CI / agents), run `tarout login --token <key>`
-or set the `TAROUT_TOKEN` env var. The file's shape:
+Both layers hold the same shape:
 
 ```json
 {
@@ -494,8 +540,9 @@ or set the `TAROUT_TOKEN` env var. The file's shape:
       "apiUrl": "https://tarout.sa",
       "organizationId": "...",
       "organizationName": "My Org",
-      "environmentId": "...",
-      "environmentName": "production",
+      "projectId": "...",
+      "projectName": "My Project",
+      "projectSlug": "my-project",
       "userId": "...",
       "userEmail": "user@example.com"
     }
