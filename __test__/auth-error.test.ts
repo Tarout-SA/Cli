@@ -53,6 +53,15 @@ describe("staleCredentialGuidance", () => {
 		// "expired" reports that to the user and stops instead of checking scope.
 		expect(STALE_CREDENTIAL_HINT).toMatch(/whoami/);
 		expect(STALE_CREDENTIAL_HINT).not.toMatch(/expired/i);
+		// Must not assert a cause it cannot know. A rejection has server-side
+		// explanations the CLI cannot see, and a confident wrong diagnosis sends
+		// an agent chasing a problem that isn't there.
+		expect(STALE_CREDENTIAL_HINT).not.toMatch(/revoked or paused/i);
+		// The anti-fallback instruction is the point: project-scoped creds in the
+		// cwd outrank the global login, so "try another credential" is how a
+		// failed auth becomes a deploy into someone else's organization.
+		expect(STALE_CREDENTIAL_HINT).toMatch(/do not switch to a different credential/i);
+		expect(STALE_CREDENTIAL_HINT).toMatch(/wrong organization/i);
 	});
 
 	it("stays silent when nothing is stored (the AuthError path owns that case)", () => {

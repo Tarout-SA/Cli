@@ -76,13 +76,27 @@ export const AGENT_LOGIN_HINT =
  * rejected it. The no-token AuthError already covers "never logged in"; without
  * this, a stale token surfaces as a bare "UNAUTHORIZED" with no way forward.
  *
- * It deliberately does NOT say "expired". Agent API keys have no expiry, so a
- * rejection is a revoke, a freeze, or the wrong host — and an agent told the key
- * "expired" concludes the credential simply aged out, reports that to the user,
- * and stops. Naming the real causes is what keeps it moving.
+ * It deliberately does NOT say "expired". Agent API keys have no expiry, so an
+ * agent told the key "expired" concludes the credential simply aged out,
+ * reports that to the user, and stops.
+ *
+ * It also does not hand out an exhaustive list of causes. The earlier wording
+ * asserted the rejection was "revoked or paused in the dashboard, or it belongs
+ * to a different Tarout host" — confident, and in the incident that prompted
+ * this, wrong: the key was live and unexpired, and the org simply had no
+ * project yet for the credential to scope to (fixed server-side; the auth path
+ * now bootstraps one). Stating causes as fact sends an agent hunting for a
+ * problem that does not exist.
+ *
+ * The last sentence is the load-bearing one. Given a definite-sounding "this
+ * key is bad", an agent's next move is to find a credential that works — and
+ * `.tarout/auth.json` from an unrelated project is right there and outranks the
+ * global login. That is how a rejected key turns into a deployment landing in
+ * somebody else's organization. A supplied key names the intended account; if
+ * it will not authenticate, the run stops.
  */
 export const STALE_CREDENTIAL_HINT =
-	"the stored credential was rejected. Agent keys do not expire, so this is not a timeout — it was revoked or paused in the dashboard, or it belongs to a different Tarout host. Check `tarout whoami --json`, then re-authenticate.";
+	"the stored credential was rejected by the server. Agent keys do not expire, so this is not a timeout — run `tarout whoami --json` to see which account the CLI is actually using, and check the key is still active at https://tarout.sa/dashboard/agent/keys. Do NOT switch to a different credential to get past this: if a key was supplied for this task it names the intended account, and project-scoped credentials in the working directory take precedence over the global login, so falling back can deploy into the wrong organization. Report the rejection instead.";
 
 /**
  * When a server UNAUTHORIZED lands while a credential IS stored locally, return
