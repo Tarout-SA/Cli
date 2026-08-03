@@ -171,19 +171,7 @@ Expected: PASS. Do **not** commit (platform git is user-managed).
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `platform/__test__/services/cli-account-scope.test.ts`:
-
-```ts
-describe("account-scoped key metadata", () => {
-	it("marks CLI keys accountScoped with no projectId", () => {
-		const metadata = { organizationId: "org_1", accountScoped: true as const };
-		expect(metadata.accountScoped).toBe(true);
-		expect((metadata as { projectId?: string }).projectId).toBeUndefined();
-	});
-});
-```
-
-Then the real assertion — a unit test of the metadata builder you are about to extract:
+Append to `platform/__test__/services/cli-account-scope.test.ts` — a unit test of the metadata builder you are about to extract:
 
 ```ts
 import { buildCliKeyMetadata } from "@/server/services/cli-authorization";
@@ -898,12 +886,18 @@ git commit -m "feat(project): resolve active project from flag, profile, or pick
 ## Task 8: Run project resolution in the command hook (cli)
 
 **Files:**
-- Modify: `cli/src/index.ts:54-97` (exempt sets + predicate), `:181-193` (hook body), and the root `.option(...)` chain (~104-120)
+- Create: `cli/src/lib/command-gates.ts`
+- Modify: `cli/src/index.ts` — import the predicate, add the `--project` option (~104-120), call it in the hook (~181-193)
 - Test: `cli/__test__/project-gate.test.ts` (create)
 
 **Interfaces:**
 - Consumes: `resolveActiveProject` from Task 7
-- Produces: `commandRequiresProject(actionCommand: Command | undefined, root: Command): boolean` exported from `src/index.ts`
+- Produces: `commandRequiresProject(actionCommand: Command | undefined, root: Command): boolean` and `PROJECT_EXEMPT_LEAF` exported from **`src/lib/command-gates.ts`**
+
+**Why a new module:** `src/index.ts` calls `program.parseAsync(process.argv)` at
+module top level (line ~278), so importing it from a test would execute the CLI
+against vitest's argv. The predicate must live in its own module to be testable.
+Leave the existing `commandRequiresAuth` where it is — moving it is out of scope.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -912,7 +906,7 @@ Create `cli/__test__/project-gate.test.ts`:
 ```ts
 import { Command } from "commander";
 import { describe, expect, it } from "vitest";
-import { commandRequiresProject } from "../src/index.js";
+import { commandRequiresProject } from "../src/lib/command-gates.js";
 
 function tree(): { root: Command; leaf: (path: string[]) => Command } {
 	const root = new Command();
@@ -971,15 +965,17 @@ Expected: FAIL — `commandRequiresProject` is not exported.
 
 - [ ] **Step 3: Implement the predicate**
 
-In `cli/src/index.ts`, add below `AUTH_EXEMPT_LEAF` (after line 74):
+Create `cli/src/lib/command-gates.ts`:
 
 ```ts
+import type { Command } from "commander";
+
 /**
  * Commands that run without an active project. Everything else resolves one in
  * the preAction hook, so a resource command never acts on an unexpected
  * project. These are org-level surfaces or manage the selection itself.
  */
-const PROJECT_EXEMPT_LEAF = new Set([
+export const PROJECT_EXEMPT_LEAF = new Set([
 	"login",
 	"register",
 	"token",
@@ -1034,10 +1030,11 @@ Add the global flag to the root option chain in `cli/src/index.ts` (after the `-
 		)
 ```
 
-Add the import near the other lib imports:
+Add the imports near the other lib imports:
 
 ```ts
 import { resolveActiveProject } from "./lib/active-project.js";
+import { commandRequiresProject } from "./lib/command-gates.js";
 ```
 
 In the `preAction` hook, immediately after the `ensureAuthenticated` block (after line 193), add:
