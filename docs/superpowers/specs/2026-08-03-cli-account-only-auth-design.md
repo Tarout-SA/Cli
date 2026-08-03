@@ -50,14 +50,38 @@ CLI feature or already-issued key.
 
 In the API-key session path, resolve `session.projectScopeId` as follows:
 
+**Blocking discovery — the legacy back-fill.** `validateRequest()` today *auto-pins*
+any key whose metadata lacks a `projectId`: it derives the default/oldest project
+and **persists it into `apikey.metadata`** (`platform/src/server/lib/auth.ts:1414-1424`),
+precisely so legacy org-only keys can't drift. Left alone, the very first request
+from a new org key would re-pin it and restore the old behavior. An org key is
+therefore not merely "a key without `projectId`" — it needs an explicit marker.
+
+**Discriminator:** new keys are minted with metadata
+`{ organizationId, accountScoped: true }` and **no** `projectId`. The back-fill at
+auth.ts:1414 is skipped when `accountScoped === true`; every other key keeps
+today's behavior byte-for-byte.
+
 | Key metadata | `x-tarout-project` header | Result |
 |---|---|---|
-| has `projectId` (legacy pinned) | absent | pinned project (today's behavior, unchanged) |
-| has `projectId` | matches pin | pinned project |
-| has `projectId` | differs from pin | **403** — "key is pinned to project X; re-login to switch" |
-| no `projectId` (org key) | valid project **in the key's org** | header project becomes `projectScopeId` |
-| no `projectId` | nonexistent or cross-org project | **403** with project id in message |
-| no `projectId` | absent | `projectScopeId` unset; `getApiKeyProjectScope()` (auth.ts:984) throws only when a project-scoped procedure needs it: "No project selected — run `tarout projects use` or pass `--project`" |
+| `projectId` set (legacy pinned) | absent | pinned project (today's behavior, unchanged) |
+| `projectId` set | matches pin | pinned project |
+| `projectId` set | differs from pin | **403** — "key is pinned to project X; re-login to switch" |
+| `accountScoped` | valid project **in the key's org** | header project becomes `projectScopeId` |
+| `accountScoped` | nonexistent or cross-org project | **403** with project id in message |
+| `accountScoped` | absent | `projectScopeId` unset; `getApiKeyProjectScope()` (auth.ts:984) throws only when a project-scoped procedure needs it: "No project selected — run `tarout projects use` or pass `--project`" |
+| neither (legacy org-only) | any | back-fill runs exactly as today |
+
+`accountScoped` keys must **not** be rejected by the "org has no project" guard
+(auth.ts:1401-1412) — an account key authenticating against a zero-project org is
+valid; it simply has no scope until one is selected. That guard stays for
+non-account keys.
+
+**Authorization intent:** `CliAuthorizationIntent.projectId` becomes optional
+(`platform/src/server/services/cli-authorization.ts:178, 192-237`) and the exchange
+endpoint (`platform/src/pages/api/cli/exchange.ts:101-155`) stops requiring a
+project row. Intents live 5 minutes, so in-flight v2 records still parse — no
+version bump needed.
 
 **Security invariant:** header project MUST belong to the key's organization —
 validated before setting scope (prevents cross-org access). Billing/entitlement
@@ -75,11 +99,25 @@ existing per-router `assertApiKeyProjectScope()` call sites remain unchanged.
 - A central auth gate already runs in the `preAction` hook
   (`cli/src/index.ts:121-194`): `commandRequiresAuth()` + `AUTH_EXEMPT_LEAF`
   auto-recover a logged-out invocation via `ensureAuthenticated()`
-  (`cli/src/commands/deploy.ts:331`). `requireProject()` is a **separate,
-  later** step that runs inside command actions, after the gate has guaranteed
-  a credential. Do not add project resolution to the preAction hook — many
-  gated commands (`projects *`, `orgs *`, org billing) legitimately need no
-  project.
+  (`cli/src/commands/deploy.ts:331`). Project resolution mirrors this exact
+  pattern in the same hook, immediately after it.
+
+**Where project resolution runs.** Only 4 of ~30 command files read
+`profile.projectId` (`auth.ts`, `deploy.ts`, `projects.ts`, `apps.ts`) — every
+other command relies on the *server-side* key scope. So the change is carried by
+two centralized pieces, with no per-command churn:
+
+1. `api.ts` attaches `x-tarout-project` whenever a project is set. Existing
+   commands keep working untouched.
+2. `resolveActiveProject()` runs in the `preAction` hook behind a
+   `PROJECT_EXEMPT_LEAF` set (mirroring `AUTH_EXEMPT_LEAF`), guaranteeing a
+   project is selected before non-exempt commands run.
+
+Exempt from project resolution (they are org-level or manage projects
+themselves): `projects`, `orgs`, `billing`, `login`, `register`, `token`,
+`logout`, `whoami`, plus the already-auth-exempt `agent` namespace. A missing
+entry fails loudly and safely — the server returns "No project selected" rather
+than acting on the wrong project.
 - Credentials resolve through two layers (`cli/src/lib/project-auth.ts`): a
   per-directory `.tarout/auth.json` and the machine-wide profile, with
   `--global-auth` forcing the latter. Both use the same `Profile` shape, so the
@@ -95,11 +133,15 @@ existing per-router `assertApiKeyProjectScope()` call sites remain unchanged.
   id resolution for `--project` happens once in `requireProject()` (one API
   lookup, cached for the process) before project-scoped requests are made — the
   header function itself stays synchronous.
-- **`requireProject()` helper**: used by every project-dependent command
-  (deploy, db, env, storage, backups, domains, monitor, jobs). Resolution
-  order: `--project` flag → profile → interactive picker (TTY: lists org
-  projects + "Create new project…" inline option; saves choice to profile) →
-  non-TTY: error with exact commands to run.
+- **`resolveActiveProject()`** (new `cli/src/lib/active-project.ts`), called from
+  the `preAction` hook for non-exempt commands. Resolution order: `--project`
+  flag → profile → single project in org (auto-select, printed notice) →
+  interactive picker. The picker uses the existing `select()` primitive
+  (`cli/src/utils/prompts.ts:113`) with a `PromptDescriptor`, so `--json` /
+  non-TTY runs emit a structured `needs_input` (`field: "project"`,
+  `flag: "--project"`) and exit 6 instead of hanging — matching how the rest of
+  the CLI handles agent-driven input. Includes a "Create new project…" choice
+  that runs the create flow inline. The resolved project is saved to the profile.
 - **`tarout login`** (`cli/src/commands/auth.ts:408`): authorizes account+org.
   On success in a TTY, offers the picker ("Select or create a project now?"),
   skippable, never blocking.
