@@ -89,6 +89,7 @@ const EXPECTED_TOOLS = [
 	"deploy",
 	"deployment_status",
 	"deployment_logs",
+	"deployment_retry",
 	// Scheduled tasks (cron)
 	"job_list",
 	"job_info",

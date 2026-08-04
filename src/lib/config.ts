@@ -424,22 +424,45 @@ export function setProjectConfig(
 	}
 	chmodIfSupported(configDir, 0o700);
 
-	// Write the config file
-	writeFileSync(configPath, JSON.stringify(config, null, 2), {
+	// Write the config file. Trailing newline like every other file we emit —
+	// its absence is invisible today only because .tarout/.gitignore keeps this
+	// file out of version control and therefore out of most formatters' reach.
+	writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, {
 		encoding: "utf-8",
 		mode: 0o600,
 	});
 	chmodIfSupported(configPath, 0o600);
 
-	// Create .gitignore in .tarout directory to ignore sensitive files
+	// Create .gitignore in .tarout directory to ignore sensitive files.
+	//
+	// `auth.json` is a credential and `project.json` is machine-local link
+	// state, so the default is ignore-everything. `config.json` is the opposite:
+	// it is the project's declared deploy contract, and it is only useful if it
+	// travels with the repo — a manifest that a teammate or CI doesn't get is
+	// just a local override with extra steps.
 	const gitignorePath = join(configDir, ".gitignore");
 	if (!existsSync(gitignorePath)) {
 		writeFileSync(
 			gitignorePath,
-			"# Ignore local tarout config\n*\n!.gitignore\n",
+			"# Ignore local tarout config\n*\n!.gitignore\n!config.json\n",
 			{ encoding: "utf-8", mode: 0o600 },
 		);
 		chmodIfSupported(gitignorePath, 0o600);
+	} else {
+		// An existing .gitignore predates config.json and would hide it. Add the
+		// negation rather than rewriting a file the user may have edited.
+		try {
+			const current = readFileSync(gitignorePath, "utf-8");
+			if (!current.includes("!config.json")) {
+				writeFileSync(
+					gitignorePath,
+					`${current.replace(/\n*$/, "\n")}!config.json\n`,
+					{ encoding: "utf-8", mode: 0o600 },
+				);
+			}
+		} catch {
+			// Best-effort: failing to update .gitignore must not fail a link.
+		}
 	}
 }
 

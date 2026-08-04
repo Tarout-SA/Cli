@@ -17,6 +17,13 @@ import { getApiClient } from "../lib/api.js";
 import { getProjectConfig, setProjectConfig } from "../lib/config.js";
 import { unsafeDeployDirectory } from "../lib/deploy-safety.js";
 import {
+	applyManifestResources,
+	generateSecretValue,
+	manifestBuildConfig,
+	missingGeneratedSecrets,
+	readProjectManifest,
+} from "../lib/project-manifest.js";
+import {
 	findSimilar,
 	handleError,
 	InvalidArgumentError,
@@ -70,6 +77,13 @@ export { inferSuggestedPlan, isEntitlementError };
  * `*.attachToApplication`) and provision only DETECTED-or-requested resources
  * the app is MISSING. Attach is idempotent server-side, so re-provisioning a
  * present resource would be harmless — but we skip it to avoid needless work.
+ *
+ * Known limit of that signal: a user who sets their own `DATABASE_URL` pointing
+ * at an external database reads as "already has a DB", so we won't provision a
+ * managed one. That is usually what they want, and when it isn't,
+ * `.tarout/config.json` is the way to say so — `resources.postgres` is a
+ * declaration and overrides everything inferred here (see
+ * applyManifestResources, which folds it over `inspection` before this runs).
  *
  * Returns the effective options to hand to `configureOptionalResources({
  * appReused: true })`, or null when nothing needs doing (a genuine redeploy of a
@@ -263,13 +277,28 @@ export function registerUpCommand(program: Command): void {
 				}
 
 				emitEvent({ event: "inspect_started", cwd });
-				const inspection = inspectCurrentProject(cwd);
+				// A declared manifest beats the dependency scan. Read it BEFORE
+				// inspecting so a malformed one fails here — with a message naming
+				// the field — rather than after we have already created an app.
+				const manifest = readProjectManifest(cwd);
+				const inspection = applyManifestResources(
+					inspectCurrentProject(cwd),
+					manifest,
+				);
 				emitEvent({
 					event: "inspect_done",
 					database: inspection.database,
 					storage: inspection.storage,
 					git: inspection.git,
+					manifest: manifest ? true : false,
 				});
+				if (manifest && !isJsonMode()) {
+					log(
+						colors.dim(
+							`Using .tarout/config.json — declared settings override detection.`,
+						),
+					);
+				}
 
 				emitEvent({ event: "auth_check_started" });
 				const profile = await ensureAuthenticatedForDeploy({
@@ -594,6 +623,69 @@ export function registerUpCommand(program: Command): void {
 						app.name,
 					);
 					emitEvent({ event: "upload_done" });
+				}
+
+				// Apply the manifest's declared build/health/release settings before
+				// triggering, so this deploy runs under them rather than the next
+				// one. Applied last so a manifest edit takes effect on the very
+				// deploy that follows it.
+				if (manifest) {
+					const buildConfig = manifestBuildConfig(manifest);
+					if (buildConfig) {
+						await client.application.saveBuildConfig.mutate({
+							applicationId: app.applicationId,
+							...buildConfig,
+						});
+						emitEvent({
+							event: "manifest_applied",
+							applicationId: app.applicationId,
+							settings: Object.keys(buildConfig),
+						});
+						if (!isJsonMode()) {
+							log(
+								colors.dim(
+									`Applied from .tarout/config.json: ${Object.keys(buildConfig).join(", ")}`,
+								),
+							);
+						}
+					}
+
+					// Mint any declared secret the app doesn't have yet. ADD only —
+					// an existing secret is never touched, because silently rotating
+					// e.g. SESSION_SECRET on a deploy would sign every user out.
+					const currentKeys = new Set<string>(
+						(
+							(await client.envVariable.list.query({
+								applicationId: app.applicationId,
+								includeValues: false,
+							})) as Array<{ key: string }>
+						).map((v) => v.key),
+					);
+					const toGenerate = missingGeneratedSecrets(manifest, currentKeys);
+					for (const key of toGenerate) {
+						await client.envVariable.create.mutate({
+							applicationId: app.applicationId,
+							key,
+							value: generateSecretValue(),
+							isSecret: true,
+						});
+					}
+					if (toGenerate.length > 0) {
+						emitEvent({
+							event: "secrets_generated",
+							applicationId: app.applicationId,
+							// Names only. The values are secrets and must not reach a
+							// log, a JSON event, or an agent's transcript.
+							keys: toGenerate,
+						});
+						if (!isJsonMode()) {
+							log(
+								colors.dim(
+									`Generated ${toGenerate.length} secret${toGenerate.length === 1 ? "" : "s"}: ${toGenerate.join(", ")}`,
+								),
+							);
+						}
+					}
 				}
 
 				emitEvent({

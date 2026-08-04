@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`.tarout/config.json` — a declared deploy contract.** Health check path and
+  expected status, `smokePaths`, `releaseCommand`, build overrides, which
+  resources to provision, and secrets to generate once. Committed to the repo,
+  so a teammate, an agent and CI all get the same deploy instead of whatever the
+  dependency scan happened to infer. Precedence is manifest > app settings >
+  detection, and a declaration wins in both directions — `"postgres": false` in
+  a repo that depends on `pg` means no database. A malformed manifest fails the
+  command and names the field rather than silently falling back to guessing.
+- **`tarout deploy:retry <app>`** re-runs only the deploy step of a *failed*
+  deployment, reusing the image it already built. For the case where the build
+  succeeded and everything after it did not — image pull failed, registry token
+  stale, target host unavailable — where redeploying from scratch rebuilds an
+  identical image for nothing. Also exposed as the `deployment_retry` MCP tool.
+- **`tarout env list` reports build visibility.** A new `AVAILABLE` column shows
+  `build + runtime` or `runtime only`, and `tarout env set` says so when a key
+  is runtime-only. Only public-prefixed keys reach the build; everything else
+  exists only in the running container, which is why a build reading
+  `DATABASE_URL` sees nothing however correctly it was set. `tarout up` prints
+  the runtime-only variables it just injected.
+
+### Fixed
+
+- **`--json` deploys printed TWO terminal envelopes on failure and timeout.**
+  The stream emitted a full envelope and then threw, so the global handler
+  printed a second, lossier one that dropped `errorAnalysis`, `logs` and
+  `deploymentId`. An agent parsing stdout as one JSON document failed outright;
+  one taking last-line-wins silently lost the suggested fixes its own
+  instructions told it to read. There is now exactly one terminal envelope, and
+  a test asserts it.
+- **A Docker build failure reported `DEPLOYMENT_FAILED` while exiting `12`
+  (`BUILD_FAILED`).** The envelope code and the exit code were computed from two
+  different category lists; they now come from one.
+- **`tarout agent init` broke Biome in the project it set up.**
+  `.claude/settings.local.json` was always written with two-space indent, and
+  Biome's default is tab, so `biome ci` failed on a file the user never wrote.
+  Indentation is now detected from `biome.json`/`biome.jsonc`, `.editorconfig`,
+  Prettier config, or the existing file. `agent init --json` also emits the
+  documented `{success, data}` envelope instead of a bespoke shape.
+- **`.tarout/project.json` was written without a trailing newline.**
+- **Credential rejections now say why, when the server knows.** The server
+  supplies a reason (`key_revoked`, `key_frozen`, `insufficient_tier`,
+  `needs_approval`, `no_project`, …) and the CLI maps it to specific guidance.
+  Without one it stays deliberately vague rather than guessing — an earlier
+  version guessed "revoked", was wrong, and sent an agent looking for a
+  different credential, which deployed into another organization.
+- **"Invalid or expired Tarout credential"** no longer says "expired": agent
+  keys have no expiry, and an agent told otherwise concludes the key aged out
+  and stops.
+- **The `deploy` MCP tool reported a wait-window timeout as success.** It now
+  returns `DEPLOYMENT_TIMEOUT` with `stillRunning: true`, so an agent resumes
+  polling instead of treating an unfinished deployment as shipped.
+
 ## [1.8.0]
 
 ### Changed

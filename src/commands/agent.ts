@@ -128,9 +128,12 @@ export function registerAgentCommands(program: Command): void {
 							...(file.reason ? { reason: file.reason } : {}),
 						});
 					}
-					outputJsonLine({
-						type: "result",
-						ok: true,
+					// The terminal envelope must be the same `{success, data}` shape
+					// every other command emits and the README documents. This used to
+					// be a bespoke `{type:"result", ok:true, …}`, so an agent that
+					// checked `.success` — as it does for every other Tarout command —
+					// read a successful scaffold as a failure.
+					outputData({
 						agent: result.agent,
 						files: result.files,
 						nextSteps: result.nextSteps,

@@ -566,7 +566,11 @@ async function authenticateViaApiToken(
 	} catch (err) {
 		failSpinner("Token verification failed");
 		if (isCredentialError(err)) {
-			throw new AuthError("Invalid or expired Tarout credential.");
+			// Deliberately does not say "expired". Agent keys have no expiry
+			// (STALE_CREDENTIAL_HINT says so explicitly), and an agent told the
+			// credential expired concludes it simply aged out and stops looking.
+			// handleError appends the server's reason when it named one.
+			throw new AuthError("Tarout rejected this credential.");
 		}
 		throw err;
 	}
@@ -2634,6 +2638,50 @@ export async function configureOptionalResources(
 
 	if (createdResources.length > 0 && !isJsonMode()) {
 		box("Provisioned Resources", createdResources);
+		await warnAboutRuntimeOnlyVariables(client, app);
+	}
+}
+
+/**
+ * Say which of the app's variables the BUILD can see.
+ *
+ * Attaching a database or bucket injects DATABASE_URL, STORAGE_BUCKET and
+ * friends — all runtime-only, because only public-prefixed keys are passed to
+ * the builder. A build step that reads one of them (a Prisma config, a build
+ * script validating its environment) gets nothing, and the resulting failure
+ * reads as "the variable isn't set" when it very much is. Say so up front,
+ * once, right after the variables appear.
+ *
+ * Best-effort: this is an explanatory note, so it must never fail a deploy.
+ */
+async function warnAboutRuntimeOnlyVariables(
+	// biome-ignore lint/suspicious/noExplicitAny: untyped tRPC proxy client.
+	client: any,
+	app: AppSummary,
+): Promise<void> {
+	try {
+		const variables = await client.envVariable.list.query({
+			applicationId: app.applicationId,
+			includeValues: false,
+		});
+		const runtimeOnly = variables
+			.filter((v: any) => v.buildTimeAvailable === false)
+			.map((v: any) => v.key);
+		if (runtimeOnly.length === 0) return;
+
+		log("");
+		log(
+			colors.dim(
+				`Runtime-only (injected at container start, not visible during the build): ${runtimeOnly.join(", ")}`,
+			),
+		);
+		log(
+			colors.dim(
+				"If your build needs one of these, move that step to a release command instead.",
+			),
+		);
+	} catch {
+		// An explanatory note is not worth failing a deploy over.
 	}
 }
 
@@ -5202,6 +5250,109 @@ export function registerDeployCommands(program: Command) {
 			}
 		});
 
+	// Retry a failed deployment WITHOUT rebuilding.
+	//
+	// A deployment can build a good image and then fail afterwards — the host
+	// can't pull it, a registry token went stale, the target server hiccuped.
+	// Deploying again from scratch in that situation re-resolves the commit,
+	// re-runs preflight and re-enters the builder to arrive at the identical
+	// image. This skips to the part that actually failed.
+	program
+		.command("deploy:retry")
+		.argument("<app>", "Application ID or name")
+		.description(
+			"Retry a failed deployment using the image it already built (no rebuild)",
+		)
+		.option(
+			"--deployment <id>",
+			"Failed deployment to retry (defaults to the most recent failure)",
+		)
+		.option("-w, --wait", "Wait for the retry to complete")
+		.action(async (appIdentifier, options) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+
+				const client = getApiClient();
+
+				const _spinner = startSpinner("Finding application...");
+				const apps: AppSummary[] =
+					await client.application.allByOrganization.query();
+				const appSummary = findApp(apps, appIdentifier);
+				if (!appSummary) {
+					failSpinner();
+					const suggestions = findSimilar(
+						appIdentifier,
+						apps.map((a) => a.name),
+					);
+					throw new NotFoundError("Application", appIdentifier, suggestions);
+				}
+
+				const deployments: DeploymentSummary[] =
+					await client.deployment.all.query({
+						applicationId: appSummary.applicationId,
+					});
+				succeedSpinner();
+
+				let targetDeploymentId: string | undefined = options.deployment;
+				if (!targetDeploymentId) {
+					// Most recent failure. `deployment.all` is newest-first, and the
+					// server rejects anything that isn't actually failed, so a wrong
+					// guess here fails loudly rather than redeploying the wrong thing.
+					const lastFailed = deployments.find((d) => d.status === "error");
+					if (!lastFailed) {
+						throw new NotFoundError(
+							"Failed deployment",
+							appSummary.name,
+							[],
+						);
+					}
+					targetDeploymentId = lastFailed.deploymentId;
+				}
+
+				const _retrySpinner = startSpinner("Retrying deployment...");
+				const result = await client.deployment.retry.mutate({
+					applicationId: appSummary.applicationId,
+					deploymentId: targetDeploymentId,
+				});
+
+				if (options.wait) {
+					await streamDeploymentWithLogs(
+						client,
+						result.deploymentId,
+						appSummary.name,
+						appSummary.applicationId,
+					);
+					return;
+				}
+
+				succeedSpinner("Retry started — reusing the existing image.");
+
+				if (isJsonMode()) {
+					outputData({
+						deploymentId: result.deploymentId,
+						retryOf: targetDeploymentId,
+						reusedImage: true,
+						status: "running",
+					});
+				} else {
+					quietOutput(result.deploymentId);
+					log("");
+					log(`Deployment ID: ${colors.cyan(result.deploymentId)}`);
+					log(
+						`Reusing the image from: ${colors.dim(targetDeploymentId.slice(0, 8))}`,
+					);
+					log("");
+					log("No rebuild needed — only the deploy step runs again.");
+					log(
+						`Check status: ${colors.dim(`tarout deploy:status ${appSummary.applicationId.slice(0, 8)}`)}`,
+					);
+					log("");
+				}
+			} catch (err) {
+				handleError(err);
+			}
+		});
+
 	// NOTE: `deploy:list-by-type` was removed. It duplicated `deploy:list`, and
 	// its source-type filter (git/upload/docker) was never a server capability —
 	// `deployment.allByType` filters by resource KIND (application /
@@ -5710,15 +5861,21 @@ export async function streamDeploymentWithLogs(
 				);
 				const duration = Math.round((Date.now() - startTime) / 1000);
 
+				// One category test decides BOTH the envelope code and the exit
+				// code. They used to be computed separately, with `docker_build`
+				// present in the exit-code list and absent from the envelope list —
+				// so a Docker failure reported DEPLOYMENT_FAILED while exiting 12
+				// (BUILD_FAILED), and a caller that trusted one disagreed with a
+				// caller that trusted the other.
+				const isBuildFailure =
+					errorAnalysis.category === "build_script" ||
+					errorAnalysis.category === "npm_install" ||
+					errorAnalysis.category === "typescript" ||
+					errorAnalysis.category === "docker_build";
+
 				if (isJsonMode()) {
-					const failureCode =
-						errorAnalysis.category === "build_script" ||
-						errorAnalysis.category === "npm_install" ||
-						errorAnalysis.category === "typescript"
-							? "BUILD_FAILED"
-							: "DEPLOYMENT_FAILED";
 					outputError(
-						failureCode,
+						isBuildFailure ? "BUILD_FAILED" : "DEPLOYMENT_FAILED",
 						updatedDeployment.errorMessage || "Deployment failed",
 						{
 							deploymentId,
@@ -5727,6 +5884,19 @@ export async function streamDeploymentWithLogs(
 							errors: errors.length > 0 ? errors : undefined,
 							errorAnalysis,
 						},
+					);
+					// Exit here rather than throwing. Throwing would unwind into
+					// handleError, which emits a SECOND envelope — and a lossier one,
+					// since CliError.details is undefined for these errors, so
+					// `errorAnalysis`, `logs` and `deploymentId` all vanish from it.
+					// An agent parsing stdout as one JSON document then fails outright,
+					// and one taking last-line-wins silently loses the suggested fixes
+					// its own instructions tell it to read. Same shape `tarout build`
+					// already uses.
+					exit(
+						isBuildFailure
+							? ExitCode.BUILD_FAILED
+							: ExitCode.DEPLOYMENT_FAILED,
 					);
 				} else {
 					log("");
@@ -5757,13 +5927,9 @@ export async function streamDeploymentWithLogs(
 					log("");
 				}
 
-				// Throw appropriate error for exit code
-				if (
-					errorAnalysis.category === "build_script" ||
-					errorAnalysis.category === "npm_install" ||
-					errorAnalysis.category === "typescript" ||
-					errorAnalysis.category === "docker_build"
-				) {
+				// Human path only — JSON mode already emitted its envelope and
+				// exited above. handleError renders these for a terminal reader.
+				if (isBuildFailure) {
 					throw new BuildFailedError(
 						updatedDeployment.errorMessage || "Build failed",
 						deploymentId,
@@ -5797,6 +5963,11 @@ export async function streamDeploymentWithLogs(
 				logs: logLines,
 				errors: errors.length > 0 ? errors : undefined,
 			});
+			// Exit rather than throw — see the failure branch above. This envelope
+			// is the interesting one (it carries `stillRunning` and the resume
+			// command); the one handleError would print instead says only that the
+			// deployment timed out, which reads as failure.
+			exit(ExitCode.DEPLOYMENT_TIMEOUT);
 		} else {
 			log("");
 			log(colors.dim("─".repeat(50)));

@@ -102,6 +102,56 @@ export function registerDeployTools(server: McpServer): void {
 	);
 
 	server.registerTool(
+		"deployment_retry",
+		{
+			title: "Retry a failed deployment without rebuilding",
+			description:
+				"Re-runs only the deploy step of a FAILED deployment, reusing the image it already built. Use this when a deployment failed AFTER its build succeeded (image pull failed, registry auth stale, target host unavailable) — it skips source resolution, preflight and the build entirely. If the deployment failed during the build, there is no image to reuse; fix the code and call `deploy` instead.",
+			inputSchema: {
+				app: z.string().describe("Application name or id"),
+				deploymentId: z
+					.string()
+					.optional()
+					.describe(
+						"Failed deployment to retry. Defaults to the most recent failure.",
+					),
+			},
+		},
+		async ({ app: appRef, deploymentId }) =>
+			withAuth(async (client) => {
+				const { applicationId, name } = await resolveAppRef(client, appRef);
+
+				let target = deploymentId;
+				if (!target) {
+					const deployments = (await client.deployment.all.query({
+						applicationId,
+					})) as Array<{ deploymentId: string; status: string }>;
+					// The server rejects a target that isn't actually failed, so a
+					// wrong guess here fails loudly rather than redeploying something
+					// unintended.
+					target = deployments.find((d) => d.status === "error")?.deploymentId;
+					if (!target) {
+						throw new Error(
+							`No failed deployment found for ${name}. Nothing to retry.`,
+						);
+					}
+				}
+
+				const result = (await client.deployment.retry.mutate({
+					applicationId,
+					deploymentId: target,
+				})) as Record<string, unknown>;
+
+				return {
+					app: { applicationId, name },
+					retryOf: target,
+					reusedImage: true,
+					...result,
+				};
+			}),
+	);
+
+	server.registerTool(
 		"deploy",
 		{
 			title: "Deploy the current directory to an app",
@@ -314,10 +364,23 @@ export function registerDeployTools(server: McpServer): void {
 					}
 					await new Promise((r) => setTimeout(r, 3000));
 				}
-				return okResult({
-					status: "in_progress",
-					deploymentId,
-					hint: "Poll `deployment_status` / `deployment_logs`.",
+				// Running out of the wait window is not success. An okResult here
+				// meant an agent that checked only `ok` treated an unfinished — and
+				// possibly failing — deployment as shipped, which is the same class
+				// of false-positive as reporting a deploy healthy without checking
+				// that it serves. The CLI's own wait path returns DEPLOYMENT_TIMEOUT
+				// for this; match it, and keep `stillRunning` so the agent can tell
+				// "not finished yet" from "broken" and resume rather than redeploy.
+				return errorResult({
+					error: `Deployment still running after ${timeoutS}s. It has not failed — the server is still working on it.`,
+					code: "DEPLOYMENT_TIMEOUT",
+					details: {
+						deploymentId,
+						stillRunning: true,
+						status: String(last?.status ?? "unknown"),
+						phase: last?.phase ?? null,
+						hint: "Poll `deployment_status` / `deployment_logs` to follow it to completion.",
+					},
 				});
 			} catch (err) {
 				const { toEnvelope } = await import("../runtime.js");

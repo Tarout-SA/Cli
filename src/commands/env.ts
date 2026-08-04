@@ -125,11 +125,19 @@ export function registerEnvCommands(program: Command) {
 
 				log("");
 				table(
-					["KEY", "VALUE", "SECRET", "UPDATED"],
+					["KEY", "VALUE", "SECRET", "AVAILABLE", "UPDATED"],
 					variables.map((v: any) => [
 						colors.cyan(v.key),
 						options.reveal ? v.value || colors.dim("-") : maskValue(v.value),
 						v.isSecret ? colors.warn("Yes") : "No",
+						// Which stage can actually read this variable. Only public
+						// prefixes reach the build; everything else exists solely in
+						// the running container. A build that reads a runtime-only
+						// variable sees nothing, and without this column there was no
+						// way to tell that from "the variable is set".
+						v.buildTimeAvailable
+							? "build + runtime"
+							: colors.dim("runtime only"),
 						formatDate(v.updatedAt),
 					]),
 				);
@@ -139,6 +147,13 @@ export function registerEnvCommands(program: Command) {
 						`${variables.length} variable${variables.length === 1 ? "" : "s"}`,
 					),
 				);
+				if (variables.some((v: any) => v.buildTimeAvailable === false)) {
+					log(
+						colors.dim(
+							"Runtime-only variables are injected when the container starts — they are not visible to your build.",
+						),
+					);
+				}
 			} catch (err) {
 				handleError(err);
 			}
@@ -230,13 +245,37 @@ export function registerEnvCommands(program: Command) {
 
 				succeedSpinner(`Set ${key}`);
 
+				// Whether the build can see this key at all. The server is the
+				// authority (isSafeBuildTimeEnvironmentKey); re-read the row we just
+				// wrote rather than duplicating the prefix list here, where it would
+				// drift.
+				const written = (
+					await client.envVariable.list
+						.query({
+							applicationId: app.applicationId,
+							includeValues: false,
+						})
+						.catch(() => [] as any[])
+				).find((v: any) => v.key === key);
+				const buildTimeAvailable = written?.buildTimeAvailable !== false;
+
 				if (isJsonMode()) {
-					outputData({ key, updated: !!existingVar });
+					outputData({ key, updated: !!existingVar, buildTimeAvailable });
 				} else {
 					quietOutput(key);
 					// create/update persist the value but do not push it to the
 					// running container — it takes effect on the next deploy.
 					log(colors.dim(`Applies on next deploy: tarout deploy ${appIdentifier}`));
+					if (!buildTimeAvailable) {
+						// Said here rather than discovered from a failed build: a
+						// build step that reads this key gets nothing, however
+						// correctly it was set.
+						log(
+							colors.dim(
+								`${key} is runtime-only — it is injected when the container starts and is NOT visible during the build.`,
+							),
+						);
+					}
 				}
 			} catch (err) {
 				handleError(err);

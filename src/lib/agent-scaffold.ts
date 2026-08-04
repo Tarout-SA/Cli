@@ -385,18 +385,83 @@ export function hasTaroutAgentConfig(cwd: string): boolean {
  * never destroys a file whose JSON can't be parsed — that case returns "skipped"
  * with a reason.
  */
-export function mergeClaudeSettings(claudeDir: string): ScaffoldedFile {
+/**
+ * How this project indents JSON.
+ *
+ * We write a file into someone else's repo, and that repo's formatter checks
+ * it. Biome's default `indentStyle` is **tab**, so hard-coding two spaces made
+ * `biome ci` fail on a file the user never wrote — the scaffold broke the
+ * project it was supposed to set up.
+ *
+ * Resolution order is most-authoritative first: an explicit Biome setting, then
+ * .editorconfig, then Prettier, then the file's own current indentation. Two
+ * spaces only when nothing says otherwise. Deliberately cheap and
+ * dependency-free: a wrong guess is a formatting nit, and reading a config file
+ * must never be able to fail the scaffold.
+ */
+export function detectJsonIndent(projectRoot: string, existing?: string): string {
+	const read = (name: string): string | null => {
+		try {
+			const path = join(projectRoot, name);
+			return existsSync(path) ? readFileSync(path, "utf-8") : null;
+		} catch {
+			return null;
+		}
+	};
+
+	for (const name of ["biome.json", "biome.jsonc"]) {
+		const raw = read(name);
+		if (raw === null) continue;
+		// Regex rather than a JSONC parser: biome.jsonc allows comments and
+		// trailing commas, and this only needs one well-known key.
+		const style = raw.match(/"indentStyle"\s*:\s*"(tab|space)"/)?.[1];
+		const width = raw.match(/"indentWidth"\s*:\s*(\d+)/)?.[1];
+		if (style === "space") return " ".repeat(Number(width ?? 2));
+		// Biome's own default is tab, so a biome config that doesn't say
+		// otherwise means tab.
+		return "\t";
+	}
+
+	const editorconfig = read(".editorconfig");
+	if (editorconfig) {
+		const style = editorconfig.match(/^\s*indent_style\s*=\s*(\w+)/m)?.[1];
+		const size = editorconfig.match(/^\s*indent_size\s*=\s*(\d+)/m)?.[1];
+		if (style === "tab") return "\t";
+		if (style === "space") return " ".repeat(Number(size ?? 2));
+	}
+
+	for (const name of [".prettierrc", ".prettierrc.json"]) {
+		const raw = read(name);
+		if (raw === null) continue;
+		if (/"useTabs"\s*:\s*true/.test(raw)) return "\t";
+		const width = raw.match(/"tabWidth"\s*:\s*(\d+)/)?.[1];
+		return " ".repeat(Number(width ?? 2));
+	}
+
+	// Nothing declared — match whatever the file already does, so we at least
+	// don't reformat a file we're only adding a key to.
+	const firstIndent = existing?.match(/\n([ \t]+)"/)?.[1];
+	if (firstIndent) return firstIndent.includes("\t") ? "\t" : firstIndent;
+
+	return "  ";
+}
+
+export function mergeClaudeSettings(
+	claudeDir: string,
+	projectRoot?: string,
+): ScaffoldedFile {
 	const settingsPath = join(claudeDir, "settings.local.json");
 	const relPath = join(".claude", "settings.local.json");
+	const root = projectRoot ?? join(claudeDir, "..");
 
 	const exists = existsSync(settingsPath);
 
 	let settings: ClaudeSettings = {};
+	let rawExisting: string | undefined;
 	if (exists) {
 		try {
-			settings = JSON.parse(
-				readFileSync(settingsPath, "utf-8"),
-			) as ClaudeSettings;
+			rawExisting = readFileSync(settingsPath, "utf-8");
+			settings = JSON.parse(rawExisting) as ClaudeSettings;
 		} catch {
 			return {
 				path: relPath,
@@ -417,12 +482,13 @@ export function mergeClaudeSettings(claudeDir: string): ScaffoldedFile {
 	}
 
 	const changed = applyTaroutRules(settings);
+	const indent = detectJsonIndent(root, rawExisting);
 
 	if (!exists) {
 		mkdirSync(claudeDir, { recursive: true });
 		writeFileSync(
 			settingsPath,
-			`${JSON.stringify(settings, null, 2)}\n`,
+			`${JSON.stringify(settings, null, indent)}\n`,
 			"utf-8",
 		);
 		return { path: relPath, action: "created" };
@@ -432,7 +498,7 @@ export function mergeClaudeSettings(claudeDir: string): ScaffoldedFile {
 
 	writeFileSync(
 		settingsPath,
-		`${JSON.stringify(settings, null, 2)}\n`,
+		`${JSON.stringify(settings, null, indent)}\n`,
 		"utf-8",
 	);
 	return { path: relPath, action: "updated" };
@@ -453,7 +519,7 @@ export function scaffoldAgentConfig(options: ScaffoldOptions): ScaffoldResult {
 	});
 
 	if (agent === "claude") {
-		files.push(mergeClaudeSettings(join(cwd, ".claude")));
+		files.push(mergeClaudeSettings(join(cwd, ".claude"), cwd));
 	}
 
 	return {

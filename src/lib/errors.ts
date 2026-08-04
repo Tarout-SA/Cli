@@ -99,16 +99,70 @@ export const STALE_CREDENTIAL_HINT =
 	"the stored credential was rejected by the server. Agent keys do not expire, so this is not a timeout — run `tarout whoami --json` to see which account the CLI is actually using, and check the key is still active at https://tarout.sa/dashboard/agent/keys. Do NOT switch to a different credential to get past this: if a key was supplied for this task it names the intended account, and project-scoped credentials in the working directory take precedence over the global login, so falling back can deploy into the wrong organization. Report the rejection instead.";
 
 /**
+ * Specific guidance, keyed on the reason the SERVER reported.
+ *
+ * The vague STALE_CREDENTIAL_HINT above exists because the CLI cannot tell
+ * these cases apart on its own, and the previous attempt to guess was wrong in
+ * a way that made an agent deploy into the wrong organization. It is not vague
+ * because vagueness is good — it is vague because guessing is worse.
+ *
+ * When the server names the reason (`error.data.reason`, added alongside this),
+ * that objection disappears: it is not a guess, it is the answer from the side
+ * that knows. Anything not listed here falls back to the neutral wording.
+ */
+const REASON_HINTS: Record<string, string> = {
+	key_revoked:
+		"this API key has been revoked. It will not start working again — ask the user for a new key from https://tarout.sa/dashboard/agent/keys. Do NOT fall back to another stored credential: it may belong to a different organization.",
+	key_frozen:
+		"agent access is currently paused for this key (the kill switch is on). Nothing is wrong with the key itself — ask the user to re-enable agent access at https://tarout.sa/dashboard/agent, then retry.",
+	key_expired:
+		"this credential has passed its expiry date. Agent keys created today never expire, so this is an older key — ask the user to issue a new one at https://tarout.sa/dashboard/agent/keys.",
+	insufficient_tier:
+		"the key is valid but its access tier does not allow this operation. Ask the user to widen the key's tier at https://tarout.sa/dashboard/agent/keys. Retrying will not help.",
+	area_not_allowed:
+		"the key is valid but this part of the platform is outside its allowed areas. Ask the user to widen the key's areas at https://tarout.sa/dashboard/agent/keys. Retrying will not help.",
+	needs_approval:
+		"this action is waiting for human approval — it has not failed. Tell the user to approve it under Agent → Approvals in the dashboard, then poll `tarout call approvals.get` rather than retrying the action.",
+	needs_interactive_session:
+		"this action is deliberately unavailable to API keys and must be done by a signed-in human in the dashboard. Re-authenticating will not help, and neither will a different key.",
+	no_project:
+		"the credential is valid, but its organization has no project for it to work in. Ask the user to create a project in the dashboard, then retry. The key itself is fine — do not replace it.",
+	wrong_host:
+		"this credential was issued by a different Tarout host than the one being called. Check the API URL rather than the key.",
+	not_org_member:
+		"the credential is valid but this account is not an owner of the target organization. Ask the user which organization this work belongs to; do not switch credentials to find one that works.",
+	account_suspended:
+		"the account is suspended, so no credential will work until that is resolved. Ask the user to contact support.",
+};
+
+/**
  * When a server UNAUTHORIZED lands while a credential IS stored locally, return
  * the re-auth guidance (mirroring the no-token AuthError's structured details)
  * so an agent/user knows the fix is `tarout login`, not that the request shape
- * was wrong. Returns null for any other code, or when nothing is stored (the
- * AuthError path already handles "not logged in").
+ * was wrong. Returns null when nothing is stored (the AuthError path already
+ * handles "not logged in").
+ *
+ * `reason` comes from the server when it knows; without it we fall back to the
+ * deliberately-neutral hint.
  */
-export function staleCredentialGuidance(code: string): {
+export function staleCredentialGuidance(
+	code: string,
+	reason?: string | null,
+): {
 	hint: string;
-	details: { hint: string; nextCommand: string };
+	details: { hint: string; nextCommand: string; reason?: string };
 } | null {
+	const reasonHint = reason ? REASON_HINTS[reason] : undefined;
+	if (reasonHint && reason) {
+		return {
+			hint: reasonHint,
+			details: {
+				hint: AGENT_LOGIN_HINT,
+				nextCommand: "tarout login",
+				reason,
+			},
+		};
+	}
 	if (code !== "UNAUTHORIZED" || !isLoggedIn()) return null;
 	return {
 		hint: STALE_CREDENTIAL_HINT,
@@ -232,7 +286,7 @@ export function handleError(err: unknown): never {
 		const e = err as {
 			code?: string;
 			message?: string;
-			data?: { code?: string };
+			data?: { code?: string; reason?: string | null };
 		};
 		const code = e.code ?? e.data?.code;
 		if (code) {
@@ -240,7 +294,9 @@ export function handleError(err: unknown): never {
 			const rawMessage = e.message ?? "Request failed";
 			// A rejected stored credential (vs. no credential) gets an actionable
 			// re-auth hint; exit code stays AUTH_ERROR (3) via mapTrpcErrorCode.
-			const stale = staleCredentialGuidance(code);
+			// `data.reason` is the server naming WHY when it knows — without it we
+			// stay deliberately vague rather than guess (see REASON_HINTS).
+			const stale = staleCredentialGuidance(code, e.data?.reason);
 			const message = stale ? `${rawMessage} — ${stale.hint}` : rawMessage;
 			if (isJsonMode()) {
 				outputJson(jsonError(code, message, undefined, stale?.details));

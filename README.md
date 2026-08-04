@@ -156,6 +156,8 @@ tarout apps delete my-api --yes
 | `tarout deploy:status <app>` | Check deployment status |
 | `tarout deploy:cancel <app>` | Cancel running deployment |
 | `tarout deploy:list <app>` | List recent deployments |
+| `tarout deploy:retry <app>` | Retry a failed deployment without rebuilding |
+| `tarout deploy:rollback <app>` | Roll back to a previous deployment |
 
 ```bash
 # Inspect and deploy the current folder
@@ -167,6 +169,21 @@ tarout deploy my-app --wait
 # Check deployment status
 tarout deploy:status my-app
 ```
+
+#### Retrying a failed deployment
+
+A deployment can build a good image and then fail *after* the build — the host
+could not pull the image, a registry token went stale, the target server
+hiccuped. Deploying again from scratch re-resolves the commit, re-runs preflight
+and re-enters the builder just to arrive at the identical image.
+
+```bash
+tarout deploy:retry my-app --wait
+```
+
+This reuses the image the failed deployment already produced and re-runs only
+the deploy step. It refuses deployments that failed *during* the build, because
+there is no image to reuse — fix the code and run `tarout deploy` instead.
 
 `tarout deploy` inspects the current folder for database, file storage, and Git signals before it asks questions. If Git exists, local upload remains available, so users without GitHub can still deploy. If the user chooses GitHub, run `tarout providers github connect` to open Tarout's Git provider setup page, then connect the repository to the app and deploy with `--source configured`.
 
@@ -206,6 +223,17 @@ tarout logs my-app --follow
 | `tarout env <app> unset <KEY>` | Remove an environment variable |
 | `tarout env <app> pull` | Download variables as .env file |
 | `tarout env <app> push` | Upload variables from .env file |
+
+`tarout env <app> list` shows an **AVAILABLE** column: `build + runtime` or
+`runtime only`.
+
+This is not cosmetic. Only public-prefixed keys (`NEXT_PUBLIC_*`, `VITE_*`,
+`EXPO_PUBLIC_*`, `PUBLIC_*`, `GATSBY_*`, `NUXT_PUBLIC_*`, `REACT_APP_*`) are
+passed to the build — everything else, including `DATABASE_URL` and every
+secret, exists only in the running container, so that secrets can never land in
+build logs or image history. A build step that reads a runtime-only variable
+sees nothing, however correctly you set it. If your build genuinely needs one,
+move that step to a `releaseCommand` instead.
 
 ```bash
 # Set a variable
@@ -496,13 +524,73 @@ at a different account.
 ```
 your-project/
   .tarout/
-    auth.json      # the credential — mode 0600, in a 0700 directory
-    project.json   # which Tarout app this directory deploys to
-    .gitignore     # written automatically: ignores everything but itself
+    auth.json      # the credential — mode 0600, in a 0700 directory (never committed)
+    project.json   # which Tarout app this directory deploys to (never committed)
+    config.json    # your deploy contract — COMMIT THIS
+    .gitignore     # written automatically: ignores everything but itself and config.json
 ```
 
-`.tarout/` is git-ignored on creation and excluded from deploy archives, so the
-key never ships anywhere. You normally never edit these by hand.
+`auth.json` and `project.json` are git-ignored on creation and excluded from
+deploy archives, so the key never ships anywhere. You normally never edit those
+two by hand.
+
+### `.tarout/config.json` — the deploy contract
+
+Everything else Tarout needs used to be inferred: which database to provision
+came from scanning your dependencies, and "working" meant `/` returned 200.
+Heuristics are a good default and a bad contract — they cannot be reviewed, and
+they can differ between the laptop that ran `tarout up` and the CI that runs it
+next. This file is the declaration, and it is committed so it travels with the
+repo.
+
+```jsonc
+{
+  // Container readiness probe (loopback, inside the container).
+  "healthCheck": { "path": "/", "expectedStatus": 200 },
+
+  // Routes fetched on your PUBLIC url after the container is healthy.
+  // If one of these does not serve, the deployment is NOT promoted.
+  "smokePaths": ["/", "/ar"],
+
+  // Runs once inside the new container, after it starts and before the
+  // deployment goes live. Where migrations belong.
+  "releaseCommand": "bunx prisma migrate deploy",
+  "releaseCommandTimeoutSec": 300,
+
+  // Overrides the framework detector.
+  "build": { "buildCommand": "bun run build" },
+
+  // What to provision. Beats dependency scanning in BOTH directions:
+  // "postgres": false means don't, even if you depend on `pg`.
+  "resources": { "postgres": true, "storage": false },
+
+  // Created once if missing, never rotated.
+  "generatedSecrets": ["SESSION_SECRET"]
+}
+```
+
+Precedence is **manifest > what is already set on the app > detection**. Every
+key is optional; an absent file means absent, not empty.
+
+A malformed manifest fails the command and names the offending field, rather
+than falling back to detection — a contract that silently doesn't apply would
+deploy something other than what the file says.
+
+#### Why `smokePaths` matters
+
+The container health probe runs on the container's own loopback and asks "is a
+process listening". That is not the same question as "does the app work": an app
+whose `/` returns 200 while every real route 500s passes it. Listing the routes
+that must actually work turns that into a gate — and until you list one, Tarout
+only warns, because it cannot know which of your routes are supposed to serve.
+
+#### Why `releaseCommand` matters
+
+Without it, `prisma migrate deploy` has nowhere to run except your start
+command, where it re-runs on every container restart and every replica, races
+itself, and cannot fail a deployment. A release command runs exactly once per
+deployment, and a non-zero exit stops the rollout with the current version still
+serving.
 
 ### Resolution order
 

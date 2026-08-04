@@ -206,7 +206,7 @@ describe("deploy tool", () => {
 		expect(body.deploymentId).toBe("dep_9");
 	});
 
-	it("times out cleanly and returns in_progress (not an error)", async () => {
+	it("reports a wait-window timeout as DEPLOYMENT_TIMEOUT, not success", async () => {
 		const client = fakeClient as unknown as {
 			deployment: { one: { query: ReturnType<typeof vi.fn> } };
 			application: {
@@ -230,9 +230,19 @@ describe("deploy tool", () => {
 			timeoutSeconds: 1, // fastest possible cap
 			// The tool's internal poll is fake-timed via the deadline check.
 		});
-		expect(r.isError).toBeUndefined();
-		const body = JSON.parse(r.content[0].text) as { status: string };
-		expect(body.status).toBe("in_progress");
+		// This used to return an ok envelope with status "in_progress", so an
+		// agent checking only `ok` treated an unfinished — possibly failing —
+		// deployment as shipped. Running out of the wait window is not success.
+		// It is also not failure, hence `stillRunning`: the agent should resume
+		// polling rather than redeploy.
+		expect(r.isError).toBe(true);
+		const body = JSON.parse(r.content[0].text) as {
+			code: string;
+			details: { stillRunning: boolean; deploymentId: string };
+		};
+		expect(body.code).toBe("DEPLOYMENT_TIMEOUT");
+		expect(body.details.stillRunning).toBe(true);
+		expect(body.details.deploymentId).toBe("dep_slow");
 	}, 10000);
 
 	it("returns PERMISSION_DENIED with a remedy when app creation hits an entitlement gate", async () => {
