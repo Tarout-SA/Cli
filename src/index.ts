@@ -47,7 +47,7 @@ import { resolveActiveProject } from "./lib/active-project.js";
 import { emitAgentSetupHint } from "./lib/agent-setup.js";
 import { announceProjectCredential } from "./lib/auth-notice.js";
 import { commandRequiresProject } from "./lib/command-gates.js";
-import { isLoggedIn } from "./lib/config.js";
+import { getCurrentProfile, isLoggedIn } from "./lib/config.js";
 import { handleError } from "./lib/errors.js";
 import { outputError, setGlobalOptions } from "./lib/output.js";
 import { setGlobalAuthOnly } from "./lib/project-auth.js";
@@ -208,14 +208,22 @@ program
 		// because they authenticate inside their own action, and resolving a
 		// project here needs an API call, which would dead-end a logged-out
 		// invocation on AuthError before its self-auth ever ran.
-		if (commandRequiresProject(actionCommand, thisCommand) && isLoggedIn()) {
-			const actionProject = actionCommand?.opts().project;
-			const projectFlag =
-				typeof opts.project === "string"
-					? opts.project
-					: typeof actionProject === "string"
-						? actionProject
-						: undefined;
+		//
+		// Also requires somewhere to resolve FROM. A TAROUT_TOKEN session is
+		// logged in with no profile (config.getCurrentProfile reads only the
+		// stored layers), so resolving would find nothing saved, fall through to
+		// the picker, and in CI emit needs_input + exit 6 on every command — and
+		// updateProfile would be a no-op, so it would repeat forever. With no
+		// profile and no flag, send no header and let the server decide: a legacy
+		// pinned key keeps working on its pin, an account key gets an actionable
+		// "No project selected — pass --project".
+		const projectFlag =
+			typeof opts.project === "string" ? opts.project : undefined;
+		if (
+			commandRequiresProject(actionCommand, thisCommand) &&
+			isLoggedIn() &&
+			(projectFlag || getCurrentProfile())
+		) {
 			await resolveActiveProject({ projectFlag });
 		}
 	});
