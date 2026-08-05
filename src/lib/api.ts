@@ -7,7 +7,12 @@
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import superjson from "superjson";
 import { normalizeApiUrl } from "./api-url.js";
-import { getApiUrl, getToken, isLoggedIn } from "./config.js";
+import {
+	getApiUrl,
+	getCurrentProfile,
+	getToken,
+	isLoggedIn,
+} from "./config.js";
 import { AuthError } from "./errors.js";
 import { platformFetch } from "./password-gate.js";
 
@@ -19,6 +24,35 @@ type TaroutApiClient = any;
 
 /** Singleton API client instance */
 let client: TaroutApiClient | null = null;
+
+/**
+ * Active project for this invocation, set from `--project` or the interactive
+ * picker before any project-scoped request. Login is account-scoped, so the
+ * server learns the project only from the `x-tarout-project` header.
+ */
+let requestProjectId: string | null = null;
+
+export function setRequestProjectId(projectId: string | null): void {
+	requestProjectId = projectId;
+}
+
+/**
+ * The project this process acts on: the explicit override first, else whichever
+ * profile layer resolved the credential (a directory-local `.tarout/auth.json`
+ * keeps its own active project).
+ */
+export function getRequestProjectId(): string | null {
+	return requestProjectId ?? getCurrentProfile()?.projectId ?? null;
+}
+
+export function buildRequestHeaders(): Record<string, string> {
+	const headers: Record<string, string> = {};
+	const token = getToken();
+	if (token) headers["x-api-key"] = token;
+	const projectId = getRequestProjectId();
+	if (projectId) headers["x-tarout-project"] = projectId;
+	return headers;
+}
 
 /**
  * Creates a new tRPC API client configured with the user's authentication token.
@@ -33,7 +67,6 @@ export function createApiClient(): TaroutApiClient {
 		throw new AuthError();
 	}
 
-	const token = getToken();
 	const apiUrl = normalizeApiUrl(getApiUrl());
 
 	return createTRPCProxyClient({
@@ -41,7 +74,9 @@ export function createApiClient(): TaroutApiClient {
 		links: [
 			httpBatchLink({
 				url: `${apiUrl}/api/trpc`,
-				headers: () => (token ? { "x-api-key": token } : {}),
+				// Resolved per request, not captured at client construction: the
+				// picker and `--project` run after the singleton already exists.
+				headers: () => buildRequestHeaders(),
 				fetch: platformFetch,
 			}),
 		],
