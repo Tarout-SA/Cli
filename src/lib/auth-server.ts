@@ -11,8 +11,12 @@ export interface AuthCallbackData {
 	userName?: string;
 	organizationId: string;
 	organizationName: string;
-	projectId: string;
-	projectName: string;
+	// Optional since the account-only auth change: the browser confirms the
+	// account and organization, and the project is chosen from the CLI
+	// afterwards. A pre-change platform still sends these, so they are read
+	// when present.
+	projectId?: string;
+	projectName?: string;
 	projectSlug?: string;
 }
 

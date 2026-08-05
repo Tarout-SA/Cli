@@ -505,9 +505,13 @@ async function authenticateViaBrowser(
 
 		log("");
 		success(`Logged in as ${colors.cyan(profile.userEmail)}`);
+		const activeProjectName = profile.projectName || authData.projectName;
 		box("Account", [
 			`Organization: ${colors.bold(profile.organizationName)}`,
-			`Project: ${colors.bold(profile.projectName || authData.projectName)}`,
+			// Account-only login may leave no project selected yet.
+			...(activeProjectName
+				? [`Project: ${colors.bold(activeProjectName)}`]
+				: []),
 		]);
 		return profile;
 	} catch (err) {
