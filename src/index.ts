@@ -43,8 +43,11 @@ import { registerStorageCommands } from "./commands/storage.js";
 import { registerTicketsCommands } from "./commands/tickets.js";
 import { registerUpCommand } from "./commands/up.js";
 import { registerWalletCommands } from "./commands/wallet.js";
+import { resolveActiveProject } from "./lib/active-project.js";
 import { emitAgentSetupHint } from "./lib/agent-setup.js";
 import { announceProjectCredential } from "./lib/auth-notice.js";
+import { commandRequiresProject } from "./lib/command-gates.js";
+import { getCurrentProfile, isLoggedIn } from "./lib/config.js";
 import { handleError } from "./lib/errors.js";
 import { outputError, setGlobalOptions } from "./lib/output.js";
 import { setGlobalAuthOnly } from "./lib/project-auth.js";
@@ -118,6 +121,10 @@ program
 		"--global-auth",
 		"Ignore this project's .tarout/auth.json and use the machine-wide login",
 	)
+	.option(
+		"--project <slugOrId>",
+		"Act on this project for this invocation (overrides the saved project)",
+	)
 	.hook("preAction", async (thisCommand, actionCommand) => {
 		const opts = thisCommand.opts();
 
@@ -190,6 +197,34 @@ program
 				apiUrl: typeof cmdOpts.apiUrl === "string" ? cmdOpts.apiUrl : undefined,
 				token: typeof cmdOpts.token === "string" ? cmdOpts.token : undefined,
 			});
+		}
+
+		// Resolve the project the command will act on. Login binds the account and
+		// organization only, so this is where a project is chosen — from --project,
+		// the saved profile, or a picker — and the id then rides along in the
+		// x-tarout-project header on every request.
+		//
+		// Gated on isLoggedIn(): up/deploy/init are exempt from the auth hook above
+		// because they authenticate inside their own action, and resolving a
+		// project here needs an API call, which would dead-end a logged-out
+		// invocation on AuthError before its self-auth ever ran.
+		//
+		// Also requires somewhere to resolve FROM. A TAROUT_TOKEN session is
+		// logged in with no profile (config.getCurrentProfile reads only the
+		// stored layers), so resolving would find nothing saved, fall through to
+		// the picker, and in CI emit needs_input + exit 6 on every command — and
+		// updateProfile would be a no-op, so it would repeat forever. With no
+		// profile and no flag, send no header and let the server decide: a legacy
+		// pinned key keeps working on its pin, an account key gets an actionable
+		// "No project selected — pass --project".
+		const projectFlag =
+			typeof opts.project === "string" ? opts.project : undefined;
+		if (
+			commandRequiresProject(actionCommand, thisCommand) &&
+			isLoggedIn() &&
+			(projectFlag || getCurrentProfile())
+		) {
+			await resolveActiveProject({ projectFlag });
 		}
 	});
 

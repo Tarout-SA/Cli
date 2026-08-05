@@ -6,7 +6,11 @@ describe("project-scoped credential switching", () => {
 		const setActive = vi.fn();
 		const client = {
 			project: {
-				getActive: { query: vi.fn().mockResolvedValue({ projectId: "project-a" }) },
+				credentialScope: {
+					query: vi
+						.fn()
+						.mockResolvedValue({ accountScoped: false, projectId: "project-a" }),
+				},
 				setActive: { mutate: setActive },
 			},
 		};
@@ -24,7 +28,11 @@ describe("project-scoped credential switching", () => {
 	it("accepts a target only when the server reports the same effective project", async () => {
 		const client = {
 			project: {
-				getActive: { query: vi.fn().mockResolvedValue({ projectId: "project-b" }) },
+				credentialScope: {
+					query: vi
+						.fn()
+						.mockResolvedValue({ accountScoped: false, projectId: "project-b" }),
+				},
 			},
 		};
 

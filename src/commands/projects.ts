@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { getApiClient } from "../lib/api.js";
+import { getApiClient, setRequestProjectId } from "../lib/api.js";
 import { getCurrentProfile, isLoggedIn, updateProfile } from "../lib/config.js";
 import { AuthError, handleError } from "../lib/errors.js";
 import {
@@ -24,15 +24,18 @@ interface ProjectSummary {
 }
 
 /**
- * Project-scoped API keys cannot be moved by mutating session state. Verify the
- * effective server scope before changing local metadata; a different target
- * requires browser reauthorization so the server can mint a new scoped key.
+ * A legacy project-scoped key has its project baked into the credential, so it
+ * cannot be moved by mutating session state — switching to a different target
+ * needs browser reauthorization. An account-scoped key carries no pinned
+ * project (the active one travels per request), so for it switching is purely a
+ * local change and is always allowed.
  */
 export async function verifyProjectCredentialScope(
 	client: any,
 	target: ProjectSummary,
 ): Promise<ProjectSummary> {
-	const effective = await client.project.getActive.query();
+	const effective = await client.project.credentialScope.query();
+	if (effective?.accountScoped === true) return target;
 	if (effective?.projectId !== target.projectId) {
 		throw new AuthError(
 			`Cannot switch to ${target.name} with the current project-scoped credential. Run \`tarout login\` and select that project in the browser.`,
@@ -177,6 +180,21 @@ export function registerProjectsCommands(program: Command) {
 					succeedSpinner(
 						`Created project ${colors.success(created.name)} (${created.slug})`,
 					);
+
+					// After an account-only login nothing is selected yet, so the
+					// project the user just created is the obvious one to act on —
+					// otherwise the very next command would stop to ask.
+					if (!getCurrentProfile()?.projectId) {
+						updateProfile({
+							projectId: created.projectId,
+							projectName: created.name,
+							projectSlug: created.slug,
+						});
+						setRequestProjectId(created.projectId);
+						if (!isJsonMode()) {
+							log(`Active project set to ${colors.success(created.name)}.`);
+						}
+					}
 
 					if (isJsonMode()) {
 						outputData(created);

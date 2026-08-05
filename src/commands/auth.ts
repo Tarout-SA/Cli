@@ -1,4 +1,5 @@
 import type { Command } from "commander";
+import { resolveActiveProject } from "../lib/active-project.js";
 import { resolveProfileFromCredential } from "../lib/auth-profile.js";
 import { startCliBrowserAuth } from "../lib/auth-server.js";
 import { normalizeApiUrl } from "../lib/api-url.js";
@@ -30,6 +31,7 @@ import {
 	box,
 	colors,
 	isJsonMode,
+	isNonInteractiveMode,
 	isQuietMode,
 	log,
 	outputData,
@@ -565,13 +567,28 @@ export function registerAuthCommands(program: Command) {
 						log("");
 						if (placement.fallbackReason) warn(placement.fallbackReason);
 						success(`CLI authorized as ${colors.cyan(authData.userEmail)}`);
+						// Login binds the account and organization only, so there may be
+						// no project yet — omit the line rather than print "undefined".
+						const activeProjectName =
+							profile.projectName || authData.projectName;
 						box("Account", [
 							`Organization: ${colors.bold(authData.organizationName)}`,
-							`Project: ${colors.bold(profile.projectName || authData.projectName)}`,
+							...(activeProjectName
+								? [`Project: ${colors.bold(activeProjectName)}`]
+								: []),
 							credentialPath
 								? `Credential: ${colors.bold(credentialPath)} ${colors.dim("(this project only)")}`
 								: `Credential: ${colors.bold("machine-wide CLI profile")}`,
 						]);
+
+						// Login binds the account and organization; pick a project now
+						// so the next command doesn't stop to ask. Skippable, and a
+						// failure here must not undo a login that already succeeded.
+						// Interactive only: in a non-TTY the picker would emit
+						// needs_input and exit 6, failing a login that worked.
+						if (!profile.projectId && !isNonInteractiveMode()) {
+							await resolveActiveProject().catch(() => null);
+						}
 					}
 				} catch (err) {
 					failSpinner("Authentication failed");
@@ -710,9 +727,15 @@ export function registerAuthCommands(program: Command) {
 						success(
 							`Account created! Logged in as ${colors.cyan(authData.userEmail)}`,
 						);
+						// Login binds the account and organization only, so there may be
+						// no project yet — omit the line rather than print "undefined".
+						const activeProjectName =
+							profile.projectName || authData.projectName;
 						box("Account", [
 							`Organization: ${colors.bold(authData.organizationName)}`,
-							`Project: ${colors.bold(profile.projectName || authData.projectName)}`,
+							...(activeProjectName
+								? [`Project: ${colors.bold(activeProjectName)}`]
+								: []),
 							credentialPath
 								? `Credential: ${colors.bold(credentialPath)} ${colors.dim("(this project only)")}`
 								: `Credential: ${colors.bold("machine-wide CLI profile")}`,

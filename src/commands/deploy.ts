@@ -13,6 +13,7 @@ import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import type { Command } from "commander";
 import open from "open";
+import { resolveActiveProject } from "../lib/active-project.js";
 import { ensureAgentSetup } from "../lib/agent-setup.js";
 import { getApiClient, resetApiClient } from "../lib/api.js";
 import { selectAuthStrategy } from "../lib/auth-strategy.js";
@@ -505,10 +506,22 @@ async function authenticateViaBrowser(
 
 		log("");
 		success(`Logged in as ${colors.cyan(profile.userEmail)}`);
+		const activeProjectName = profile.projectName || authData.projectName;
 		box("Account", [
 			`Organization: ${colors.bold(profile.organizationName)}`,
-			`Project: ${colors.bold(profile.projectName || authData.projectName)}`,
+			// Account-only login may leave no project selected yet.
+			...(activeProjectName
+				? [`Project: ${colors.bold(activeProjectName)}`]
+				: []),
 		]);
+
+		// up/deploy/init are exempt from the root project gate because they
+		// authenticate here, inside the action. Without this a first-run deploy
+		// would finish the whole browser dance and only then dead-end on the
+		// server's "No project selected".
+		if (!profile.projectId && !isNonInteractiveMode()) {
+			await resolveActiveProject().catch(() => null);
+		}
 		return profile;
 	} catch (err) {
 		failSpinner(
