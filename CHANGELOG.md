@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.8.0]
 
 ### Added
 
@@ -28,6 +28,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exists only in the running container, which is why a build reading
   `DATABASE_URL` sees nothing however correctly it was set. `tarout up` prints
   the runtime-only variables it just injected.
+
+### Changed
+
+- **`tarout whoami` no longer signs you in.** It was covered by the root
+  preAction hook's auto-authentication, so a logged-out `tarout whoami --json`
+  opened a browser and blocked there instead of answering the question. That
+  made it useless as the thing it is supposed to be — the cheap first check that
+  separates "not signed in" from every other failure — and it dragged an agent
+  holding a pasted API key into a browser sign-in before it could store the key
+  it already had. It now reports `AUTH_ERROR` (exit 3) and changes nothing,
+  like `gh auth status` or `vercel whoami`. Sign in with `tarout login`.
+
+- **`tarout agent init` and the `AI.md` identity block lead with that check.**
+  Both now tell an agent to run `tarout whoami --json` first and authenticate
+  only when it fails, and they map the two credential shapes a pasted Tarout
+  prompt can carry: `Key: …` → `tarout login --token`, `Handoff: t1.…` →
+  `tarout agent connect --handoff`. A handoff is single use and expires five
+  minutes after it was copied, so they also say not to retry a dead one.
+
+- **Credentials are now project-scoped by default.** Every authentication path —
+  `tarout login`, `tarout login --token`, `tarout token`, `tarout register`, and
+  the sign-in that `deploy`/`up`/`init` trigger — writes `./.tarout/auth.json`
+  instead of a machine-wide profile. `--local` was the opt-in for this on the
+  token paths only, and browser `login` could not do it at all; `--local` is now
+  the default and stays accepted as a no-op alias.
+
+  A credential handed to an agent is a credential for *one* project. Storing it
+  machine-wide meant connecting project B silently re-pointed project A at
+  another account.
+
+  Machine-wide is still available with `--global` on `login` / `token` /
+  `register` / `logout` / `agent connect`, and `--global-auth` ignores the
+  project layer for a single command. Running `tarout login` somewhere that is
+  not a project (no `.tarout`, `.git`, or package manifest above it) falls back
+  to the machine-wide profile and says so, so a scratch shell does not get a
+  stray `.tarout/`. Every login now prints the path it wrote.
+
+- **`TAROUT_TOKEN` is no longer documented.** It still works, unchanged, as the
+  lowest-precedence fallback — but it was always ignored whenever a stored
+  profile existed, which made it a misleading thing to recommend. Docs, CLI
+  hints, and MCP error messages now point at `tarout login --token <key>`.
 
 ### Fixed
 
@@ -60,35 +101,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The `deploy` MCP tool reported a wait-window timeout as success.** It now
   returns `DEPLOYMENT_TIMEOUT` with `stillRunning: true`, so an agent resumes
   polling instead of treating an unfinished deployment as shipped.
-
-## [1.8.0]
-
-### Changed
-
-- **Credentials are now project-scoped by default.** Every authentication path —
-  `tarout login`, `tarout login --token`, `tarout token`, `tarout register`, and
-  the sign-in that `deploy`/`up`/`init` trigger — writes `./.tarout/auth.json`
-  instead of a machine-wide profile. `--local` was the opt-in for this on the
-  token paths only, and browser `login` could not do it at all; `--local` is now
-  the default and stays accepted as a no-op alias.
-
-  A credential handed to an agent is a credential for *one* project. Storing it
-  machine-wide meant connecting project B silently re-pointed project A at
-  another account.
-
-  Machine-wide is still available with `--global` on `login` / `token` /
-  `register` / `logout` / `agent connect`, and `--global-auth` ignores the
-  project layer for a single command. Running `tarout login` somewhere that is
-  not a project (no `.tarout`, `.git`, or package manifest above it) falls back
-  to the machine-wide profile and says so, so a scratch shell does not get a
-  stray `.tarout/`. Every login now prints the path it wrote.
-
-- **`TAROUT_TOKEN` is no longer documented.** It still works, unchanged, as the
-  lowest-precedence fallback — but it was always ignored whenever a stored
-  profile existed, which made it a misleading thing to recommend. Docs, CLI
-  hints, and MCP error messages now point at `tarout login --token <key>`.
-
-### Fixed
 
 - **`deploy` / `up` / `init` no longer copy a project credential into the
   machine-wide store.** `ensureAuthenticatedForDeploy` re-resolved the active
