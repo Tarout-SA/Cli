@@ -81,8 +81,12 @@ ${location}
 
 ${storage}
 
-Verify or refresh this context at any time with \`tarout whoami --json\` — its
-\`scope\` field tells you which credential is in effect.
+**Start every session with \`tarout whoami --json\`.** This block records what was
+true when it was written; that command reports what is true now, and its \`scope\`
+field tells you which credential is in effect. If it returns \`success: true\`, you
+are connected — do not re-authenticate and do not ask the user for a key. If it
+fails, follow the auth steps in https://tarout.sa/docs/for-ai/start.md before
+diagnosing anything else.
 ${IDENTITY_BLOCK_END}`;
 }
 

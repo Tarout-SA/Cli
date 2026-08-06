@@ -46,7 +46,10 @@ import { registerWalletCommands } from "./commands/wallet.js";
 import { resolveActiveProject } from "./lib/active-project.js";
 import { emitAgentSetupHint } from "./lib/agent-setup.js";
 import { announceProjectCredential } from "./lib/auth-notice.js";
-import { commandRequiresProject } from "./lib/command-gates.js";
+import {
+	commandRequiresAuth,
+	commandRequiresProject,
+} from "./lib/command-gates.js";
 import { getCurrentProfile, isLoggedIn } from "./lib/config.js";
 import { handleError } from "./lib/errors.js";
 import { outputError, setGlobalOptions } from "./lib/output.js";
@@ -55,49 +58,6 @@ import { maybeSelfUpdate } from "./lib/update-check.js";
 import { ExitCode } from "./utils/exit-codes.js";
 
 const program = new Command();
-
-/**
- * Commands that must run WITHOUT first forcing a sign-in. Everything else gets
- * the auto-auth recovery in the preAction hook so a logged-out invocation opens
- * the browser (or offers the arrow menu) instead of dead-ending on an AuthError.
- *
- * - `login`/`register`/`token`/`logout`: the auth flow itself.
- * - `up`/`deploy`/`init`: self-manage auth (browser auto-open + `--token`) via
- *   `ensureAuthenticatedForDeploy`; pre-authing here would double-handle it.
- * - the whole `agent` namespace: project scaffolding that works signed-out.
- */
-const AUTH_EXEMPT_LEAF = new Set([
-	"login",
-	"register",
-	"token",
-	"logout",
-	"up",
-	"deploy",
-	"init",
-]);
-
-/**
- * Whether the about-to-run command should be gated behind authentication.
- * Walks the command ancestry so nested commands (and the `agent` namespace at
- * any depth) are classified correctly, and never gates the bare root program.
- */
-function commandRequiresAuth(
-	actionCommand: Command | undefined,
-	root: Command,
-): boolean {
-	if (!actionCommand || actionCommand === root) return false;
-	const names: string[] = [];
-	for (
-		let cur: Command | null | undefined = actionCommand;
-		cur && cur !== root;
-		cur = cur.parent
-	) {
-		names.push(cur.name());
-	}
-	if (names.includes("agent")) return false;
-	const leaf = names[0];
-	return Boolean(leaf) && !AUTH_EXEMPT_LEAF.has(leaf);
-}
 
 // CLI metadata
 program

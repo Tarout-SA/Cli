@@ -106,14 +106,26 @@ newer \`@tarout/cli\` (throttled) and, if found, installs it and re-runs the com
 on the new version — so you never need to update or reinstall it yourself. A
 \`{ "type": "event", "event": "cli_update" }\` line on stderr just means it upgraded.
 
-**Auth is hands-free — run it yourself, from this directory.** If a command reports
-you're not logged in (\`AUTH_ERROR\` / exit 3), run \`tarout login\` **directly**. It
-opens a browser on the user's machine and waits for sign-in — tell the user to finish
-in the browser, then continue. Do **not** ask the user to run \`tarout login\` for you,
-and don't treat it as interactive. Deploys (\`tarout up\` / \`tarout deploy\`) also
-auto-launch this login when needed, so you can usually just run the deploy directly.
-If the user hands you an API key (a pasted prompt often ends in \`Key: ...\`), use
-\`tarout login --token <key>\` instead — no browser needed. Create one at
+**Check auth before anything else: \`tarout whoami --json\`.** It is the cheapest
+command here, and it separates "not signed in" from every other failure — without it,
+a missing credential reads like a broken deploy and you can burn a whole run
+diagnosing the wrong thing. \`success: true\` means this project is already connected:
+do not re-authenticate, and do not ask for a key you already have.
+
+**Auth is hands-free — run it yourself, from this directory.** Only when the check
+fails (\`AUTH_ERROR\` / exit 3), fix it with whatever the user gave you:
+
+- pasted prompt ends in \`Key: ...\` → \`tarout login --token <key>\` (no browser)
+- pasted prompt ends in \`Handoff: t1...\` → \`tarout agent connect --handoff <handoff>\`
+  (single use, expires 5 minutes after they copied it — if it is expired, say so and
+  ask for a fresh one from https://tarout.sa/dashboard/agent instead of retrying)
+- neither → \`tarout login\` **directly**. It opens a browser on the user's machine and
+  waits for sign-in — tell the user to finish in the browser, then continue.
+
+Do **not** ask the user to run \`tarout login\` for you, and don't treat it as
+interactive. Deploys (\`tarout up\` / \`tarout deploy\`) also auto-launch this login when
+needed, so you can usually just run the deploy directly. Re-run
+\`tarout whoami --json\` to confirm before moving on. Create an API key at
 https://tarout.sa/dashboard/agent/keys.
 
 **Credentials belong to this project.** Every login path writes

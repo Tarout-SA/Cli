@@ -1,6 +1,9 @@
 import { Command } from "commander";
 import { describe, expect, it } from "vitest";
-import { commandRequiresProject } from "../src/lib/command-gates.js";
+import {
+	commandRequiresAuth,
+	commandRequiresProject,
+} from "../src/lib/command-gates.js";
 
 function tree(): { root: Command; leaf: (path: string[]) => Command } {
 	const root = new Command();
@@ -67,5 +70,43 @@ describe("commandRequiresProject", () => {
 		expect(commandRequiresProject(leaf(["agent", "init"]), root)).toBe(false);
 		expect(commandRequiresProject(root, root)).toBe(false);
 		expect(commandRequiresProject(undefined, root)).toBe(false);
+	});
+});
+
+describe("commandRequiresAuth", () => {
+	it("never turns `whoami` into a sign-in", () => {
+		// The agent guides make `tarout whoami --json` the first command of every
+		// session, so it has to REPORT the auth state, not change it. While it was
+		// gated, a logged-out probe opened a browser and blocked there, and an
+		// agent holding a pasted API key was pulled into a browser sign-in before
+		// it could store the key it already had.
+		const { root, leaf } = tree();
+		expect(commandRequiresAuth(leaf(["whoami"]), root)).toBe(false);
+	});
+
+	it("exempts the auth flow, the self-authing deploys, and agent scaffolding", () => {
+		const { root, leaf } = tree();
+		for (const path of [
+			["login"],
+			["register"],
+			["token"],
+			["logout"],
+			["up"],
+			["deploy"],
+			["init"],
+			["agent", "connect"],
+			["agent", "init"],
+		]) {
+			expect(commandRequiresAuth(leaf(path), root)).toBe(false);
+		}
+		expect(commandRequiresAuth(root, root)).toBe(false);
+		expect(commandRequiresAuth(undefined, root)).toBe(false);
+	});
+
+	it("gates every command that actually calls the API", () => {
+		const { root, leaf } = tree();
+		expect(commandRequiresAuth(leaf(["apps", "list"]), root)).toBe(true);
+		expect(commandRequiresAuth(leaf(["db", "list"]), root)).toBe(true);
+		expect(commandRequiresAuth(leaf(["call"]), root)).toBe(true);
 	});
 });
