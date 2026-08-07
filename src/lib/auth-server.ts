@@ -87,12 +87,16 @@ function parseAuthCallbackData(value: unknown): AuthCallbackData {
 export async function exchangeCliAuthorizationCode(
 	apiUrl: string,
 	code: string,
-	codeVerifier: string,
+	/** Only v1 (`t1.`) handoffs carry one; v2 codes exchange on their own. */
+	codeVerifier?: string,
 	options: { timeoutMs?: number } = {},
 ): Promise<AuthCallbackData> {
+	const codeIsValid =
+		/^[A-Za-z0-9_-]{22}$/.test(code) || /^[A-Za-z0-9_-]{43}$/.test(code);
 	if (
-		!/^[A-Za-z0-9_-]{43}$/.test(code) ||
-		!/^[A-Za-z0-9._~-]{43,128}$/.test(codeVerifier)
+		!codeIsValid ||
+		(codeVerifier !== undefined &&
+			!/^[A-Za-z0-9._~-]{43,128}$/.test(codeVerifier))
 	) {
 		throw new Error("Invalid authorization request.");
 	}
@@ -109,11 +113,21 @@ export async function exchangeCliAuthorizationCode(
 		const response = await platformFetch(endpoint, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ code, codeVerifier }),
+			body: JSON.stringify(
+				codeVerifier === undefined ? { code } : { code, codeVerifier },
+			),
 			redirect: "error",
 			signal: controller.signal,
 		});
 		if (!response.ok) {
+			// A v2 handoff carries no expiry for the CLI to pre-check, so this is
+			// where "the user waited too long" surfaces. 410 is the server's
+			// EXPIRED_OR_USED; anything else stays generic.
+			if (response.status === 410) {
+				throw new Error(
+					"This one-time Tarout command has expired or was already used. Refresh the Agent dashboard and copy the new command.",
+				);
+			}
 			throw new Error(
 				`Tarout rejected the authorization-code exchange (HTTP ${response.status}).`,
 			);

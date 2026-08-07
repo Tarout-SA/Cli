@@ -308,24 +308,60 @@ describe("agent handoff credential scope", () => {
 		expect(setProfile).not.toHaveBeenCalled();
 	});
 
-	it("falls back to the global store rather than planting a credential in $HOME", async () => {
+	it("refuses $HOME instead of quietly connecting the whole machine", async () => {
+		// This used to fall back to the global store and print the reason. That
+		// inverts the guarantee the command exists for - connecting project B must
+		// not re-point project A - and it does so on the one path where the user
+		// clearly believed they were binding a single project. It now errors, and
+		// the handoff is left unspent so the corrected run can still use it.
 		const setProfile = vi.fn();
-		const setCurrentProfile = vi.fn();
+		const setProjectCredential = vi.fn();
+		const exchangeCode = vi.fn().mockResolvedValue(AUTH);
+
+		await expect(
+			connectAgentFromHandoff(
+				encode(),
+				homedir(),
+				{ scope: "project" },
+				{
+					now: () => NOW,
+					getConfig: () => ({ currentProfile: "default", profiles: {} }),
+					setProfile,
+					setCurrentProfile: vi.fn(),
+					setProjectCredential,
+					resolveProfile: vi.fn().mockRejectedValue(new Error("offline")),
+					exchangeCode,
+					writeIdentity: vi
+						.fn()
+						.mockReturnValue({ path: "AI.md", action: "created" }),
+				},
+			),
+		).rejects.toThrow(/--global/);
+
+		expect(setProjectCredential).not.toHaveBeenCalled();
+		expect(setProfile).not.toHaveBeenCalled();
+		expect(exchangeCode).not.toHaveBeenCalled();
+	});
+
+	it("still writes machine-wide when --global asks for it", async () => {
+		const setProfile = vi.fn();
 		const setProjectCredential = vi.fn();
 
 		const result = await connectAgentFromHandoff(
 			encode(),
 			homedir(),
-			{ scope: "project" },
+			{ scope: "global" },
 			{
 				now: () => NOW,
 				getConfig: () => ({ currentProfile: "default", profiles: {} }),
 				setProfile,
-				setCurrentProfile,
+				setCurrentProfile: vi.fn(),
 				setProjectCredential,
 				resolveProfile: vi.fn().mockRejectedValue(new Error("offline")),
 				exchangeCode: vi.fn().mockResolvedValue(AUTH),
-				writeIdentity: vi.fn().mockReturnValue({ path: "AI.md", action: "created" }),
+				writeIdentity: vi
+					.fn()
+					.mockReturnValue({ path: "AI.md", action: "created" }),
 			},
 		);
 
@@ -403,5 +439,75 @@ describe("compact handoff", () => {
 	it("rejects a malformed segment count and reports expiry", () => {
 		expect(() => decodeAgentHandoff("t1.a.b", EXP - 1000)).toThrow();
 		expect(() => decodeAgentHandoff(compact(), EXP + 1000)).toThrow(/expired/i);
+	});
+});
+
+describe("v2 handoff", () => {
+	const CODE = "oY8eODyt-8YM4dPkTssd4L";
+
+	it("carries only the code", () => {
+		expect(decodeAgentHandoff(`t2.${CODE}`, NOW)).toEqual({
+			version: 2,
+			code: CODE,
+			apiUrl: "https://tarout.sa",
+		});
+	});
+
+	it("is a fraction of the v1 string a human has to copy", () => {
+		// 25 characters against 176. If this grows back, something the server
+		// already knows has been re-added to the payload.
+		expect(`t2.${CODE}`.length).toBeLessThanOrEqual(30);
+	});
+
+	it("carries a non-default apiUrl in the optional 2nd segment", () => {
+		const staging = Buffer.from("https://staging.tarout.sa", "utf8").toString(
+			"base64url",
+		);
+		expect(decodeAgentHandoff(`t2.${CODE}.${staging}`, NOW).apiUrl).toBe(
+			"https://staging.tarout.sa",
+		);
+	});
+
+	it("rejects an untrusted apiUrl, a wrong-width code, and extra segments", () => {
+		const evil = Buffer.from("https://evil.example", "utf8").toString(
+			"base64url",
+		);
+		expect(() => decodeAgentHandoff(`t2.${CODE}.${evil}`, NOW)).toThrow();
+		// A v1-width code in a v2 envelope is not a v2 code.
+		expect(() => decodeAgentHandoff(`t2.${"c".repeat(43)}`, NOW)).toThrow();
+		expect(() => decodeAgentHandoff(`t2.${CODE}.a.b`, NOW)).toThrow();
+	});
+
+	it("exchanges rather than reusing a saved profile it cannot verify", async () => {
+		// v1 could match a stored credential against the ids in the handoff and
+		// skip the exchange. v2 carries no ids, so there is nothing to match on -
+		// and guessing that the local profile is the intended account would be the
+		// unsafe direction. It exchanges instead; the code was single-use anyway.
+		const exchangeCode = vi.fn().mockResolvedValue(AUTH);
+		const config: Config = {
+			currentProfile: "work",
+			profiles: { work: PROFILE },
+		};
+
+		const result = await connectAgentFromHandoff(
+			`t2.${CODE}`,
+			directory,
+			{ scope: "global" },
+			{
+				now: () => NOW,
+				getConfig: () => config,
+				setProfile: vi.fn(),
+				setCurrentProfile: vi.fn(),
+				resolveProfile: vi.fn().mockResolvedValue(PROFILE),
+				exchangeCode,
+			},
+		);
+
+		expect(result.reusedExistingCredential).toBe(false);
+		expect(exchangeCode).toHaveBeenCalledWith(
+			"https://tarout.sa",
+			CODE,
+			undefined,
+		);
 	});
 });

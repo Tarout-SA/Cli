@@ -909,15 +909,27 @@ export function registerAuthCommands(program: Command) {
 						credentialPath: authScope.path,
 					});
 				} else {
+					// Lead with the account, then say where that answer came from.
+					// With per-project credentials, "who am I" and "why am I that"
+					// are one question: the same directory can resolve to a different
+					// org than the machine-wide login, and the file path is the only
+					// thing that explains it.
 					log("");
-					log(`${colors.bold("Credential")}`);
+					log(
+						`${colors.bold("Signed in as")} ${colors.cyan(profile.userEmail)} ${colors.dim("·")} ${colors.bold(profile.organizationName)}`,
+					);
 					if (authScope.scope === "project") {
-						log(`  Scope: ${colors.cyan("project")} (this directory only)`);
-						log(`  File:  ${colors.dim(authScope.path ?? "")}`);
+						log(
+							`  ${colors.dim("from")} ${authScope.path ?? ""} ${colors.dim("(this directory only)")}`,
+						);
 					} else if (authScope.scope === "global") {
-						log(`  Scope: ${colors.cyan("machine-wide")}`);
+						log(
+							`  ${colors.dim("from the machine-wide login — every directory without its own .tarout/auth.json")}`,
+						);
 					} else {
-						log(`  Scope: ${colors.cyan("TAROUT_TOKEN")} (environment)`);
+						log(
+							`  ${colors.dim("from the TAROUT_TOKEN environment variable (lowest precedence)")}`,
+						);
 					}
 					log("");
 					log(`${colors.bold("User")}`);

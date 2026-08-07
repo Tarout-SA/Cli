@@ -28,15 +28,20 @@ import type { FileAction } from "./agent-scaffold.js";
 
 const HANDOFF_PATTERN = /^[A-Za-z0-9_-]{80,4096}$/;
 const AUTHORIZATION_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+/** v2 codes are 16 bytes, not 32. */
+const V2_AUTHORIZATION_PATTERN = /^[A-Za-z0-9_-]{22}$/;
 const VERIFIER_PATTERN = /^[A-Za-z0-9._~-]{43,128}$/;
 
 export interface AgentHandoffPayload {
-	version: 1;
+	version: 1 | 2;
 	code: string;
-	codeVerifier: string;
+	/** v1 only. v2 dropped PKCE - see `decodeV2Handoff`. */
+	codeVerifier?: string;
 	apiUrl: string;
-	expiresAt: number;
-	expected: {
+	/** v1 only: v2 lets the server be the authority on expiry. */
+	expiresAt?: number;
+	/** v1 only: the account this handoff was minted for. */
+	expected?: {
 		userId: string;
 		organizationId: string;
 		projectId: string;
@@ -75,7 +80,7 @@ interface AgentConnectDependencies {
 	exchangeCode: (
 		apiUrl: string,
 		code: string,
-		codeVerifier: string,
+		codeVerifier?: string,
 	) => Promise<AuthCallbackData>;
 	writeIdentity: typeof writeAgentIdentityFile;
 }
@@ -186,12 +191,66 @@ function decodeCompactHandoff(
 	};
 }
 
+/**
+ * Current handoff: `t2.<code>` with an optional 2nd segment carrying a
+ * non-default apiUrl (base64url). 25 characters against v1's 176.
+ *
+ * The PKCE verifier is gone: it travelled in the same string as the code, so it
+ * bound nothing an attacker holding that string did not already have (the
+ * server keeps the code hashed at rest either way). The account ids are gone:
+ * they were a client-side assertion the exchange response already makes. And
+ * the embedded expiry is gone: the server owns the five-minute TTL and answers
+ * 410, which `exchangeCliAuthorizationCode` turns into the same "expired,
+ * refresh the dashboard" message this used to raise locally.
+ *
+ * One consequence worth knowing: with no account ids there is nothing to match
+ * a saved profile against before exchanging, so a v2 connect always consumes
+ * its code and mints a credential rather than reusing an equivalent one. That
+ * costs one short-lived key on a repeat setup and keeps the string short.
+ */
+const V2_PREFIX = "t2.";
+
+function decodeV2Handoff(encoded: string): AgentHandoffPayload {
+	const parts = encoded.slice(V2_PREFIX.length).split(".");
+	if (parts.length !== 1 && parts.length !== 2) {
+		throw new InvalidArgumentError("The Tarout agent command is invalid.");
+	}
+	const [code, apiUrlB64] = parts as [string, string?];
+
+	let apiUrl = "https://tarout.sa";
+	if (apiUrlB64) {
+		try {
+			apiUrl = Buffer.from(apiUrlB64, "base64url").toString("utf8");
+		} catch {
+			throw new InvalidArgumentError("The Tarout agent command is invalid.");
+		}
+	}
+
+	if (!V2_AUTHORIZATION_PATTERN.test(code) || !isTrustedHandoffUrl(apiUrl)) {
+		throw new InvalidArgumentError("The Tarout agent command is invalid.");
+	}
+
+	return { version: 2, code, apiUrl: normalizeApiUrl(apiUrl) };
+}
+
 export function decodeAgentHandoff(
 	encoded: string,
 	now = Date.now(),
 ): AgentHandoffPayload {
+	if (encoded.startsWith(V2_PREFIX)) {
+		return decodeV2Handoff(encoded);
+	}
 	if (encoded.startsWith(COMPACT_PREFIX)) {
 		return decodeCompactHandoff(encoded, now);
+	}
+	// A `t<n>.` envelope this build does not know is a NEWER dashboard talking to
+	// an OLDER CLI, not a corrupt paste. Saying "invalid" sends the user hunting
+	// for a bad copy; the fix is an upgrade. (`agent connect` forces an update
+	// check first, so reaching this means the upgrade itself did not happen.)
+	if (/^t\d+\./.test(encoded)) {
+		throw new InvalidArgumentError(
+			"This Tarout handoff needs a newer CLI. Run `npm install -g @tarout/cli@latest`, then copy a fresh command from the Agent dashboard.",
+		);
 	}
 
 	if (!HANDOFF_PATTERN.test(encoded)) {
@@ -210,17 +269,22 @@ export function decodeAgentHandoff(
 	}
 
 	const payload = parsed as unknown as AgentHandoffPayload;
+	// The v1 blob must still carry every v1 field: these became optional on the
+	// shared type for v2's sake, not because a v1 payload may omit them.
+	const expected = payload.expected;
 	if (
 		payload.version !== 1 ||
 		!AUTHORIZATION_PATTERN.test(payload.code) ||
+		typeof payload.codeVerifier !== "string" ||
 		!VERIFIER_PATTERN.test(payload.codeVerifier) ||
 		typeof payload.apiUrl !== "string" ||
 		!isTrustedHandoffUrl(payload.apiUrl) ||
 		typeof payload.expiresAt !== "number" ||
 		!Number.isFinite(payload.expiresAt) ||
-		!isIdentifier(payload.expected.userId) ||
-		!isIdentifier(payload.expected.organizationId) ||
-		!isIdentifier(payload.expected.projectId)
+		!expected ||
+		!isIdentifier(expected.userId) ||
+		!isIdentifier(expected.organizationId) ||
+		!isIdentifier(expected.projectId)
 	) {
 		throw new InvalidArgumentError("The Tarout agent command is invalid.");
 	}
@@ -237,10 +301,21 @@ export function decodeAgentHandoff(
 	};
 }
 
+/**
+ * Whether a profile is the account this handoff names.
+ *
+ * A v2 handoff names no account, so there is nothing to contradict and this is
+ * vacuously true. That is not a weakened check: the identity in a v1 handoff
+ * was written by the same server that answers the exchange, over the same TLS
+ * connection, so comparing them only ever caught a server-side mixup — never an
+ * attacker. Callers must not read `true` here as "verified"; see how the reuse
+ * loop guards on `expected` being present before trusting it.
+ */
 function profileMatches(
 	profile: Pick<Profile, "userId" | "organizationId" | "projectId">,
 	expected: AgentHandoffPayload["expected"],
 ): boolean {
+	if (!expected) return true;
 	return (
 		profile.userId === expected.userId &&
 		profile.organizationId === expected.organizationId &&
@@ -328,12 +403,28 @@ export async function connectAgentFromHandoff(
 	let staleMatchingProfileName: string | undefined;
 
 	// A credential in $HOME or / would apply to every directory on the machine —
-	// the opposite of project binding — so those degrade to the global store.
+	// the opposite of project binding — so refuse rather than quietly widening
+	// the blast radius of a key the user believes is scoped to one project.
+	//
+	// This used to fall back to the global store and print why. But the fallback
+	// silently inverts the guarantee this command exists to provide: the whole
+	// point of `agent connect` is that connecting project B cannot re-point
+	// project A, and a global write does exactly that. Someone who runs it in the
+	// wrong terminal deserves an error they can act on, not a machine-wide
+	// credential and a line of explanation they will scroll past. `--global` is
+	// still there for the cases that genuinely want it.
 	const requestedScope = options.scope ?? "project";
-	const scope: AgentConnectScope =
-		requestedScope === "project" && !unsafeCredentialDirectory(cwd)
-			? "project"
-			: "global";
+	if (requestedScope === "project") {
+		const unsafe = unsafeCredentialDirectory(cwd);
+		if (unsafe) {
+			throw new InvalidArgumentError(
+				`${unsafe}\n` +
+					"  • Run this from the project directory you want to connect, or\n" +
+					"  • pass --global to store it machine-wide on purpose.",
+			);
+		}
+	}
+	const scope: AgentConnectScope = requestedScope;
 
 	/**
 	 * Persist to the layer this run is bound to. Project scope deliberately
@@ -350,7 +441,15 @@ export async function connectAgentFromHandoff(
 	};
 
 	// Reuse any matching saved profile, not only the currently selected one.
-	for (const [profileName, candidate] of Object.entries(config.profiles)) {
+	//
+	// Only a v1 handoff can take this path: reuse means deciding, *before*
+	// exchanging, that a stored credential is already the account being asked
+	// for, and that decision needs the account ids v2 deliberately dropped.
+	// Without them a match is unprovable, so v2 exchanges its code instead of
+	// guessing — the safe direction, and the code is single-use anyway.
+	for (const [profileName, candidate] of payload.expected
+		? Object.entries(config.profiles)
+		: []) {
 		if (!profileMatches(candidate, payload.expected)) continue;
 		try {
 			if (normalizeApiUrl(candidate.apiUrl) !== payload.apiUrl) continue;

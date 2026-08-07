@@ -53,9 +53,11 @@ import {
 	inferSuggestedPlan,
 	inspectCurrentProject,
 	isEntitlementError,
+	isGitSourced,
 	type ProjectInspection,
 	promptEntitlementRemedy,
 	streamDeploymentWithLogs,
+	tryConnectGitHubSource,
 	uploadCurrentDirectorySource,
 } from "./deploy.js";
 
@@ -251,8 +253,19 @@ export function registerUpCommand(program: Command): void {
 			"--no-agent-setup",
 			"Don't auto-write the agent permission allowlist (CLAUDE.md / .claude/settings.local.json) on first run",
 		)
-		.action(async (cwdArg: string | undefined, options: UpOptions) => {
+		.action(async (
+			cwdArg: string | undefined,
+			options: UpOptions,
+			command: Command,
+		) => {
 			try {
+				// `--source upload` is also the DEFAULT, so the flag's value alone
+				// cannot say whether the user asked for an upload or simply did not
+				// choose. That difference decides whether we may bind a Git remote,
+				// and whether overwriting an app's configured Git source is an
+				// instruction or an accident, so read where the value came from.
+				const explicitSource =
+					command.getOptionValueSource?.("source") === "cli";
 				const cwd = cwdArg ? resolve(cwdArg) : process.cwd();
 				// `up` archives this whole tree and writes the agent allowlist into
 				// it, so refuse home/root/credential dirs BEFORE chdir'ing or touching
@@ -616,13 +629,41 @@ export function registerUpCommand(program: Command): void {
 						repository: `${owner}/${repository}`,
 					});
 				} else {
-					emitEvent({ event: "upload_started" });
-					await uploadCurrentDirectorySource(
-						client,
-						app.applicationId,
-						app.name,
-					);
-					emitEvent({ event: "upload_done" });
+					// An app already sourced from Git must not be silently converted
+					// back to an uploaded zip. `up` uploads by default, so reusing an
+					// app that deploys on push - via `--app`, a linked directory, or
+					// the picker - used to drop the connection with no warning: the
+					// app kept deploying, pushes just stopped doing anything, and the
+					// person who noticed was whoever pushed a fix that never shipped.
+					// An explicit `--source upload` still wins; this only refuses to
+					// infer the destructive option from a default.
+					if (!explicitSource && isGitSourced(app.sourceType)) {
+						throw new InvalidArgumentError(
+							`${app.name} deploys from its connected ${app.sourceType} repository, and \`tarout up\` would replace that with an upload of this folder, stopping push-to-deploy.\n` +
+								`  • Redeploy it as-is:        tarout deploy ${app.name} --wait\n` +
+								`  • Or push to the branch it is connected to.\n` +
+								`  • Really replace the source: tarout up --source upload`,
+						);
+					}
+
+					// Prefer binding the GitHub remote over uploading a zip, exactly as
+					// `tarout deploy` does - a Git-sourced app redeploys on every push,
+					// an uploaded one only when someone reruns the CLI. Opportunistic:
+					// no remote, no GitHub App, or several installations all fall
+					// through to the upload below.
+					const connectedGit = explicitSource
+						? false
+						: await tryConnectGitHubSource(client, app, inspection);
+
+					if (!connectedGit) {
+						emitEvent({ event: "upload_started" });
+						await uploadCurrentDirectorySource(
+							client,
+							app.applicationId,
+							app.name,
+						);
+						emitEvent({ event: "upload_done" });
+					}
 				}
 
 				// Apply the manifest's declared build/health/release settings before

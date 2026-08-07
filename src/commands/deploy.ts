@@ -4379,6 +4379,24 @@ function hasConfiguredSource(app: any): boolean {
 }
 
 /**
+ * Whether an app redeploys from a connected repository rather than from an
+ * uploaded folder.
+ *
+ * Listed positively from the platform's `sourceType` enum (`git`, `github`,
+ * `gitea`, `drop`, `gitlab`, `bitbucket`, `dockerfileUpload`, `dockerhub`) so a
+ * value this CLI has never heard of is treated as "not Git" and nothing is
+ * blocked on a guess. `bitbucket` and `gitea` are retired for new connections
+ * but still exist on older apps, and those apps still deploy on push - so they
+ * belong here.
+ */
+export function isGitSourced(sourceType: string | null | undefined): boolean {
+	if (!sourceType) return false;
+	return ["git", "github", "gitlab", "bitbucket", "gitea"].includes(
+		sourceType.trim().toLowerCase(),
+	);
+}
+
+/**
  * Bind this project's GitHub remote to `app` so pushes auto-deploy, instead of
  * uploading a source zip.
  *

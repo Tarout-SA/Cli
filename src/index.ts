@@ -130,10 +130,18 @@ program
 		// (still runs on every command, at most once per few hours). The regular
 		// opt-outs (--no-update-check / TAROUT_NO_UPDATE_CHECK) are unchanged.
 		const machineMode = opts.json === true || !stdinIsTTY;
+		// `agent connect` forces the check in EVERY mode, machine included. It is
+		// the one command handed a payload minted by a newer dashboard than the
+		// CLI reading it - a handoff format this version may not parse yet - and it
+		// is a once-per-project action, so the round-trip costs nothing in a loop.
+		// Without this, a CLI whose throttle window has not elapsed reports a
+		// perfectly valid handoff as invalid.
+		const isAgentConnect =
+			sub === "connect" && actionCommand?.parent?.name() === "agent";
 		await maybeSelfUpdate({
 			currentVersion: packageJson.version,
 			disabled: opts.updateCheck === false,
-			force: (sub === "up" || sub === "deploy") && !machineMode,
+			force: isAgentConnect || ((sub === "up" || sub === "deploy") && !machineMode),
 		});
 
 		// In agent mode, nudge the agent to run `tarout agent init` first when the

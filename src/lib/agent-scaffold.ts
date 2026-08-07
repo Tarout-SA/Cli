@@ -116,8 +116,8 @@ do not re-authenticate, and do not ask for a key you already have.
 fails (\`AUTH_ERROR\` / exit 3), fix it with whatever the user gave you:
 
 - pasted prompt ends in \`Key: ...\` → \`tarout login --token <key>\` (no browser)
-- pasted prompt ends in \`Handoff: t1...\` → \`tarout agent connect --handoff <handoff>\`
-  (single use, expires 5 minutes after they copied it — if it is expired, say so and
+- pasted prompt ends in \`Handoff: t2...\` → \`tarout agent connect --handoff <handoff>\`
+  (single use, expires 15 minutes after they copied it — if it is expired, say so and
   ask for a fresh one from https://tarout.sa/dashboard/agent instead of retrying)
 - neither → \`tarout login\` **directly**. It opens a browser on the user's machine and
   waits for sign-in — tell the user to finish in the browser, then continue.
@@ -137,9 +137,10 @@ project at a different account. Check with \`tarout whoami --json\` and read \`s
 
 - **Never paste a key into a file yourself, and never echo one back.** Let
   \`tarout login --token <key>\` store it.
-- Run login from the **project root**. In a directory that isn't a project (no
-  \`.tarout\`, \`.git\`, or package manifest above it) the CLI falls back to a
-  machine-wide credential and says so.
+- Run it from the **project root**. In a directory that isn't a project (no
+  \`.tarout\`, \`.git\`, or package manifest above it) \`login\` falls back to a
+  machine-wide credential and says so, and \`agent connect\` refuses outright
+  rather than connecting the whole machine to one project's account.
 - Machine-wide is opt-in: \`--global\` on \`login\`/\`logout\`/\`register\`/\`agent connect\`,
   or \`--global-auth\` to ignore the project credential for a single command.
 
@@ -163,19 +164,23 @@ or pass \`--new-app\`, so it doesn't stop to ask which app) and read the JSON re
 \`success\` / \`data.url\`. This hands-free rule is about a deploy the user **asked
 for** — it does not override the "say deploy" check below.
 
-**Prefer connecting Git over uploading.** If this project has a \`.git\` remote on
-GitHub, connect it once so updates ship on push:
-\`tarout apps git github <id|name> --repo <owner/repo> --branch <branch>\`. That needs
-the Tarout GitHub App installed on the org; if the command reports no GitHub
-connection, tell the user to complete the one-time browser setup
-(\`tarout providers github connect\`) and keep using \`tarout deploy\` until they do.
+**Git connection happens by itself — don't wire it by hand.** If this project has a
+GitHub remote and the org has the Tarout GitHub App installed, \`up\` and \`deploy\`
+bind the repo for you so updates ship on push; otherwise they upload this folder.
+Use \`tarout apps git github <id|name> --repo <owner/repo> --branch <branch>\` only to
+re-point an app that already exists, or when the org has several GitHub
+installations and the automatic bind declines rather than guess. If no App is
+installed, the CLI says so once and uploads — relay the one-time browser setup
+(\`tarout providers github connect\`) as a follow-up and keep deploying meanwhile.
 **You cannot install the App for them** — that step is browser-only.
 
-**Once an app is Git-connected, never run \`tarout up\` on it.** \`up\` defaults to
-\`--source upload\`, and uploading **silently wipes the Git connection** (the app flips
-to \`sourceType: "drop"\` and push-to-deploy stops working, with no warning). Use
-\`tarout deploy <id|name>\`, which respects whatever source the app already has. Only
-pass \`--source upload\` when you actually intend to abandon the Git connection.
+**\`up\` will not overwrite a Git connection by accident.** Run it on an app that
+deploys from a connected repo and it stops with an error naming
+\`tarout deploy <id|name>\` instead — uploading over a Git source would silently end
+push-to-deploy, so it is no longer something a default can do. Pass
+\`--source upload\` when you genuinely mean to replace the source. Both \`up\` and
+\`deploy\` also bind this project's GitHub remote themselves when the org has the
+GitHub App installed, so prefer letting them do it over connecting by hand.
 
 **After you change code, check whether it ships by itself.** Tarout does not watch the
 filesystem. Read the app's source once with \`tarout apps info <id|name> --json\`

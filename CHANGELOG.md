@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.1]
+
+### Fixed
+
+- **`tarout up` silently ended push-to-deploy.** `deploy` binds a project's
+  GitHub remote when it can; `up` never did — it always uploaded. So reusing a
+  Git-connected app through `up` (via `--app`, a linked directory, or the
+  picker) replaced the connection with a folder upload. The app kept deploying,
+  pushes just stopped shipping, and the person who found out was whoever pushed
+  a fix that never went live. `up` now binds the remote exactly as `deploy`
+  does, and **refuses** to upload over an app that deploys from a repo, naming
+  `tarout deploy <app> --wait` instead. `--source upload` still forces it; the
+  guard only stops a *default* from doing something destructive. Because the
+  flag's default is also `upload`, the two are told apart by where the value
+  came from, not by its value.
+
+- **`agent connect` connected the whole machine when run in the wrong place.**
+  In `$HOME` or a filesystem root it fell back to the machine-wide store and
+  printed why — inverting the one guarantee the command exists for, that
+  connecting project B cannot re-point project A. It now stops with an error
+  naming `--global`, and leaves the handoff unspent for the corrected run.
+
+### Changed
+
+- **The dashboard handoff went from 176 characters to 25.** The setup prompt now
+  carries `Handoff: t2.<22 chars>` instead of
+  `t1.<code>.<verifier>.<userId>.<orgId>.<projectId>.<expiry>`. Two thirds of
+  the old string did no work:
+
+  - The **PKCE verifier** bound nothing. PKCE ties a code to the client that
+    requested it across a channel where the code is exposed and the verifier is
+    not — an OAuth browser redirect. This flow has no redirect: the dashboard
+    minted both halves and put them in the one string the user copies, so
+    anyone holding it held both. The property it looked like it was providing —
+    a dump of the authorization store cannot yield a usable code — comes from
+    storing the code as its SHA-256, which is unchanged.
+  - The **user, org and project ids** were a client-side assertion that the
+    exchange returned the expected account. That response is authoritative under
+    TLS, and the CLI prints the account it connected to.
+  - The **code** is 16 random bytes rather than 32. It is single-use, expires
+    in minutes, and is guessed only through a rate-limited endpoint.
+
+  `t1.` handoffs are still parsed and still accepted by the server, so a command
+  copied before the change keeps working until it expires. One behaviour
+  follows from the smaller payload: with no ids to match a stored credential
+  against, `agent connect` can no longer skip the exchange by recognising an
+  equivalent local profile, so a repeat setup mints a fresh key instead of
+  reusing one.
+
+- **`agent connect` always checks for a CLI update first**, in machine mode too.
+  It is the one command handed a payload minted by a newer dashboard than the
+  CLI reading it, and it runs once per project — so the throttled check that
+  suits every other command is exactly wrong here. An unrecognised `t<n>.`
+  envelope now also says "this handoff needs a newer CLI" instead of reporting a
+  valid handoff as invalid.
+
+- **New API keys are 38 characters, not 70** (`agent_` plus 32 base62, ~190
+  bits). Keys are pasted into chat prompts, agent config files and terminal
+  commands, where the other 32 characters bought nothing. Existing keys are
+  untouched and keep working.
+
+- **`tarout whoami` leads with the account and says where it came from.** With
+  per-project credentials, "who am I" and "why am I that" are the same question:
+  the same directory can resolve to a different org than the machine-wide login,
+  and the path of the `.tarout/auth.json` in effect is the only thing that
+  explains it. It was a `Scope:` line below the fold; it is now the first line.
+
 ## [1.8.0]
 
 ### Added
