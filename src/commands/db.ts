@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import type { Command } from "commander";
 import { getApiClient } from "../lib/api.js";
+import { toAppNameSlug } from "../lib/app-name.js";
 import { getCurrentProfile, isLoggedIn } from "../lib/config.js";
 import {
 	AuthError,
@@ -310,7 +311,7 @@ export function registerDbCommands(program: Command) {
 				}
 
 				// Generate appName (URL-safe slug)
-				const slug = generateSlug(dbName);
+				const slug = toAppNameSlug(dbName);
 
 				const client = getApiClient();
 
@@ -1686,14 +1687,6 @@ function findDatabase(
 			db.id.startsWith(identifier) ||
 			db.name.toLowerCase() === lowerIdentifier,
 	);
-}
-
-function generateSlug(name: string): string {
-	return name
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "")
-		.slice(0, 63);
 }
 
 function formatDate(date: Date | string): string {

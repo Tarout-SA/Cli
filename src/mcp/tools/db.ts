@@ -61,6 +61,7 @@
 import { readFileSync } from "node:fs";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { toAppNameSlug } from "../../lib/app-name.js";
 import { getCurrentProfile } from "../../lib/config.js";
 import { NotFoundError } from "../../lib/errors.js";
 import { errorResult, type TrpcClient, withAuth } from "../runtime.js";
@@ -74,16 +75,6 @@ const DEFAULT_DOCKER_IMAGE = {
 	postgres: "postgres:17",
 	mysql: "mysql:8",
 } as const;
-
-// URL-safe slug, mirroring generateSlug() in commands/db.ts. The platform
-// create schemas require an `appName` slug alongside the display `name`.
-function generateSlug(name: string): string {
-	return name
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "")
-		.slice(0, 63);
-}
 
 /**
  * Resolves a name-or-id reference to the database's `{id, name}` pair by
@@ -176,7 +167,7 @@ export function registerDbTools(server: McpServer): void {
 				const router = type === "postgres" ? client.postgres : client.mysql;
 				const created = (await router.create.mutate({
 					name,
-					appName: generateSlug(name),
+					appName: toAppNameSlug(name),
 					dockerImage: DEFAULT_DOCKER_IMAGE[type],
 					organizationId: profile.organizationId,
 					description,

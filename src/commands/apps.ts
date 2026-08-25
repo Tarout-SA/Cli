@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import open from "open";
 import { getApiClient } from "../lib/api.js";
+import { toAppNameSlug } from "../lib/app-name.js";
 import { getCurrentProfile, isLoggedIn } from "../lib/config.js";
 import {
 	AuthError,
@@ -173,7 +174,7 @@ export function registerAppsCommands(program: Command) {
 				}
 
 				// Generate appName (URL-safe slug)
-				const slug = generateSlug(appName);
+				const slug = toAppNameSlug(appName);
 
 				const client = getApiClient();
 				const _spinner = startSpinner("Creating application...");
@@ -2115,14 +2116,6 @@ function formatDomain(domain: AppSummary["domain"]): string {
 	if (typeof domain === "string") return domain;
 	if (Array.isArray(domain)) return domain[0]?.host ?? colors.dim("-");
 	return colors.dim("-");
-}
-
-function generateSlug(name: string): string {
-	return name
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "")
-		.slice(0, 63);
 }
 
 function formatDate(date: Date | string): string {

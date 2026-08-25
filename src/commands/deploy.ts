@@ -16,6 +16,7 @@ import open from "open";
 import { resolveActiveProject } from "../lib/active-project.js";
 import { ensureAgentSetup } from "../lib/agent-setup.js";
 import { getApiClient, resetApiClient } from "../lib/api.js";
+import { toAppNameSlug } from "../lib/app-name.js";
 import { selectAuthStrategy } from "../lib/auth-strategy.js";
 import {
 	canLaunchBrowser,
@@ -1310,7 +1311,7 @@ export async function createAppFromCurrentDirectory(
 		);
 	}
 
-	const slug = generateSlug(appName);
+	const slug = toAppNameSlug(appName);
 	const plan = await resolveAppPlanForCreate(client, options);
 	const buildConfig = buildConfigFromOptions(options);
 	const _spinner = startSpinner("Creating application...");
@@ -4291,7 +4292,7 @@ function formatResourceName(
 }
 
 function generateResourceSlug(appName: string, suffix: string): string {
-	return generateSlug(
+	return toAppNameSlug(
 		`${appName}-${suffix}-${Date.now().toString(36).slice(-6)}`,
 	);
 }
@@ -4510,7 +4511,7 @@ export async function uploadCurrentDirectorySource(
 
 	try {
 		const { size } = statSync(archivePath);
-		const fileName = `${generateSlug(appName)}.zip`;
+		const fileName = `${toAppNameSlug(appName)}.zip`;
 
 		const _uploadUrlSpinner = startSpinner("Preparing source upload...");
 		const upload = await client.application.getDropUploadUrl.mutate({
@@ -4610,17 +4611,6 @@ export async function createSourceArchive(
 
 		throw err;
 	}
-}
-
-function generateSlug(name: string): string {
-	const slug = name
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "")
-		.replace(/-+/g, "-");
-
-	if (/^[a-z][a-z0-9-]*[a-z0-9]$/.test(slug)) return slug;
-	return `app-${slug || "tarout-app"}`.replace(/-+$/g, "");
 }
 
 function formatBytes(bytes: number): string {
