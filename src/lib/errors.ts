@@ -7,7 +7,7 @@
 
 import { ExitCode, exit } from "../utils/exit-codes.js";
 import { jsonError, outputJson } from "../utils/json.js";
-import { isLoggedIn } from "./config.js";
+import { getAuthScope, isLoggedIn, type AuthScope } from "./config.js";
 import { error, isJsonMode } from "./output.js";
 
 /**
@@ -76,9 +76,9 @@ export const AGENT_LOGIN_HINT =
  * rejected it. The no-token AuthError already covers "never logged in"; without
  * this, a stale token surfaces as a bare "UNAUTHORIZED" with no way forward.
  *
- * It deliberately does NOT say "expired". Agent API keys have no expiry, so an
- * agent told the key "expired" concludes the credential simply aged out,
- * reports that to the user, and stops.
+ * It deliberately does not guess the credential type. Browser-issued CLI
+ * credentials, project API keys, machine-wide profiles, and TAROUT_TOKEN all
+ * reach this path, and they do not share one lifetime policy.
  *
  * It also does not hand out an exhaustive list of causes. The earlier wording
  * asserted the rejection was "revoked or paused in the dashboard, or it belongs
@@ -96,7 +96,38 @@ export const AGENT_LOGIN_HINT =
  * it will not authenticate, the run stops.
  */
 export const STALE_CREDENTIAL_HINT =
-	"the stored credential was rejected by the server. Agent keys do not expire, so this is not a timeout — run `tarout whoami --json` to see which account the CLI is actually using, and check the key is still active at https://tarout.sa/dashboard/agent/keys. Do NOT switch to a different credential to get past this: if a key was supplied for this task it names the intended account, and project-scoped credentials in the working directory take precedence over the global login, so falling back can deploy into the wrong organization. Report the rejection instead.";
+	"the active credential was rejected by the server. The CLI cannot infer the cause or credential type from a generic UNAUTHORIZED response. Do NOT switch to a different credential to get past this: if a key was supplied for this task it names the intended account, and project-scoped credentials in the working directory take precedence over the global login, so falling back can deploy into the wrong organization. Re-authenticate this same account or report the rejection.";
+
+interface CredentialDiagnostic {
+	scope: Exclude<AuthScope, "none">;
+	path?: string;
+	userEmail?: string;
+}
+
+function activeCredentialDiagnostic(): CredentialDiagnostic | undefined {
+	try {
+		const scope = getAuthScope();
+		if (scope.scope === "none") return undefined;
+		return {
+			scope: scope.scope,
+			...(scope.path ? { path: scope.path } : {}),
+			...(scope.userEmail ? { userEmail: scope.userEmail } : {}),
+		};
+	} catch {
+		// Diagnostics must never replace the original authentication error.
+		return undefined;
+	}
+}
+
+function describeCredential(credential: CredentialDiagnostic): string {
+	const location = credential.path
+		? ` at ${JSON.stringify(credential.path)}`
+		: "";
+	const account = credential.userEmail
+		? ` for ${JSON.stringify(credential.userEmail)}`
+		: "";
+	return `Active credential source: ${credential.scope}${location}${account}.`;
+}
 
 /**
  * Specific guidance, keyed on the reason the SERVER reported.
@@ -150,23 +181,35 @@ export function staleCredentialGuidance(
 	reason?: string | null,
 ): {
 	hint: string;
-	details: { hint: string; nextCommand: string; reason?: string };
+	details: {
+		hint: string;
+		nextCommand: string;
+		reason?: string;
+		credential?: CredentialDiagnostic;
+	};
 } | null {
 	const reasonHint = reason ? REASON_HINTS[reason] : undefined;
+	const credential = activeCredentialDiagnostic();
+	const credentialSuffix = credential ? ` ${describeCredential(credential)}` : "";
 	if (reasonHint && reason) {
 		return {
-			hint: reasonHint,
+			hint: `${reasonHint}${credentialSuffix}`,
 			details: {
 				hint: AGENT_LOGIN_HINT,
 				nextCommand: "tarout login",
 				reason,
+				...(credential ? { credential } : {}),
 			},
 		};
 	}
 	if (code !== "UNAUTHORIZED" || !isLoggedIn()) return null;
 	return {
-		hint: STALE_CREDENTIAL_HINT,
-		details: { hint: AGENT_LOGIN_HINT, nextCommand: "tarout login" },
+		hint: `${STALE_CREDENTIAL_HINT}${credentialSuffix}`,
+		details: {
+			hint: AGENT_LOGIN_HINT,
+			nextCommand: "tarout login",
+			...(credential ? { credential } : {}),
+		},
 	};
 }
 

@@ -42,6 +42,7 @@ import { registerSettingsCommands } from "./commands/settings.js";
 import { registerStorageCommands } from "./commands/storage.js";
 import { registerTicketsCommands } from "./commands/tickets.js";
 import { registerUpCommand } from "./commands/up.js";
+import { registerUpgradeCommand } from "./commands/upgrade.js";
 import { registerWalletCommands } from "./commands/wallet.js";
 import { resolveActiveProject } from "./lib/active-project.js";
 import { emitAgentSetupHint } from "./lib/agent-setup.js";
@@ -138,18 +139,28 @@ program
 		// perfectly valid handoff as invalid.
 		const isAgentConnect =
 			sub === "connect" && actionCommand?.parent?.name() === "agent";
-		await maybeSelfUpdate({
-			currentVersion: packageJson.version,
-			disabled: opts.updateCheck === false,
-			force: isAgentConnect || ((sub === "up" || sub === "deploy") && !machineMode),
-		});
+		// The explicit command owns its output and failure status. Running the
+		// fail-open background updater first could consume the update and leave
+		// `tarout upgrade --json` with no deterministic result of its own.
+		if (sub !== "upgrade") {
+			await maybeSelfUpdate({
+				currentVersion: packageJson.version,
+				disabled: opts.updateCheck === false,
+				force:
+					isAgentConnect ||
+					((sub === "up" || sub === "deploy") && !machineMode),
+			});
+		}
 
 		// In agent mode, nudge the agent to run `tarout agent init` first when the
 		// project isn't allowlisted yet. Skipped for the `agent` namespace itself
 		// and for up/deploy/init, which auto-scaffold the allowlist in their action.
+		// `upgrade` is local package maintenance and should not emit project setup
+		// advice unrelated to the command the user asked for.
 		const isAgentNamespace = actionCommand?.parent?.name() === "agent";
-		const autoRunsSetup = !!sub && ["up", "deploy", "init"].includes(sub);
-		if (!isAgentNamespace && !autoRunsSetup) {
+		const skipsAgentSetup =
+			!!sub && ["up", "deploy", "init", "upgrade"].includes(sub);
+		if (!isAgentNamespace && !skipsAgentSetup) {
 			emitAgentSetupHint(process.cwd());
 		}
 
@@ -203,6 +214,7 @@ registerDeployCommands(program);
 registerInitCommand(program);
 registerAgentCommands(program);
 registerUpCommand(program);
+registerUpgradeCommand(program);
 registerLogsCommand(program);
 registerEnvCommands(program);
 registerDbCommands(program);

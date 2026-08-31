@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.2]
+
+### Added
+
+- **`tarout upgrade` explicitly upgrades the CLI.** It bypasses the background
+  check throttle, needs no authentication or linked project, reports an
+  already-current installation clearly, and returns structured JSON plus a
+  non-zero exit code when the registry check or npm installation fails.
+
+### Fixed
+
+- **Protocol-v2 browser login and Agent handoffs now complete.** The platform
+  correctly issues 22-character v2 authorization codes, but the localhost
+  browser callback still accepted only the legacy 43-character width. The API
+  also correctly returns an account-scoped profile with no project, while the
+  CLI's runtime response validator still required project fields that its type
+  already marked optional. Both validation boundaries now accept the v2
+  contract while retaining legacy v1 compatibility. A malformed callback with
+  the correct state rejects the waiting command immediately instead of hanging
+  until the five-minute timeout.
+
+- **Rejected-credential diagnostics no longer guess the credential type or
+  recurse into `whoami`.** A generic `UNAUTHORIZED` can describe a browser CLI
+  credential, Agent key, project file, machine profile, or environment token.
+  The error now stays neutral and reports the active scope, non-secret account,
+  and credential path when available.
+
 ## [1.9.1]
 
 ### Fixed

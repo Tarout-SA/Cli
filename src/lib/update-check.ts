@@ -35,6 +35,40 @@ const REGISTRY_LATEST_URL = "https://registry.npmjs.org/@tarout/cli/latest";
 const FETCH_TIMEOUT_MS = 2500;
 const DEFAULT_THROTTLE_MS = 3 * 60 * 60 * 1000; // check npm at most once per 3h
 
+export type CliInstallResult =
+	| { ok: true }
+	| { ok: false; error: string };
+
+export type CliUpgradeResult =
+	| {
+			status: "upgraded";
+			previousVersion: string;
+			currentVersion: string;
+	  }
+	| {
+			status: "up_to_date";
+			currentVersion: string;
+			latestVersion: string;
+			currentIsNewer: boolean;
+	  }
+	| { status: "check_failed"; currentVersion: string }
+	| {
+			status: "install_failed";
+			currentVersion: string;
+			latestVersion: string;
+			error: string;
+	  };
+
+export interface UpgradeCliOptions {
+	currentVersion: string;
+	onUpdateAvailable?: (currentVersion: string, latestVersion: string) => void;
+}
+
+export interface UpgradeCliDependencies {
+	fetchLatestVersion: () => Promise<string | null>;
+	installVersion: (version: string) => CliInstallResult;
+}
+
 /**
  * Throttle window in ms. `TAROUT_UPDATE_CHECK_INTERVAL_SECONDS` overrides the
  * 3h default; set it to 0 to check on literally every command.
@@ -88,6 +122,78 @@ export async function fetchLatestVersion(
 	}
 }
 
+/** Install one exact published CLI version through npm's global package path. */
+export function installCliVersion(version: string): CliInstallResult {
+	const install = spawnSync(
+		"npm",
+		["install", "-g", `@tarout/cli@${version}`, "--quiet", "--no-fund"],
+		{
+			stdio: ["ignore", "pipe", "pipe"],
+			encoding: "utf8",
+			shell: process.platform === "win32",
+			timeout: 120_000,
+		},
+	);
+	if (install.error || install.status !== 0) {
+		const stderr = typeof install.stderr === "string" ? install.stderr.trim() : "";
+		return {
+			ok: false,
+			error:
+				install.error?.message ||
+				stderr ||
+				`npm exited ${install.status ?? "without a status"}`,
+		};
+	}
+	return { ok: true };
+}
+
+/**
+ * Check the registry and install a newer CLI when one exists.
+ *
+ * Unlike the background updater, this seam never decides whether a failure is
+ * fatal and never exits/re-executes the process. Callers get a complete result:
+ * the automatic path can fail open, while `tarout upgrade` can report the same
+ * failure and exit non-zero.
+ */
+export async function upgradeCli(
+	options: UpgradeCliOptions,
+	dependencies: Partial<UpgradeCliDependencies> = {},
+): Promise<CliUpgradeResult> {
+	const getLatest = dependencies.fetchLatestVersion ?? fetchLatestVersion;
+	const installVersion = dependencies.installVersion ?? installCliVersion;
+	const latestVersion = await getLatest();
+
+	if (!latestVersion) {
+		return { status: "check_failed", currentVersion: options.currentVersion };
+	}
+
+	if (!isNewerVersion(options.currentVersion, latestVersion)) {
+		return {
+			status: "up_to_date",
+			currentVersion: options.currentVersion,
+			latestVersion,
+			currentIsNewer: isNewerVersion(latestVersion, options.currentVersion),
+		};
+	}
+
+	options.onUpdateAvailable?.(options.currentVersion, latestVersion);
+	const installed = installVersion(latestVersion);
+	if (!installed.ok) {
+		return {
+			status: "install_failed",
+			currentVersion: options.currentVersion,
+			latestVersion,
+			error: installed.error,
+		};
+	}
+
+	return {
+		status: "upgraded",
+		previousVersion: options.currentVersion,
+		currentVersion: latestVersion,
+	};
+}
+
 function announceUpdate(from: string, to: string): void {
 	if (isQuietMode()) return;
 	if (isJsonMode()) {
@@ -138,30 +244,21 @@ export async function maybeSelfUpdate(options: {
 		// A read-only/unwritable config must not break the command — fail open.
 	}
 
-	const latest = await fetchLatestVersion();
-	if (!latest || !isNewerVersion(options.currentVersion, latest)) return;
-
-	announceUpdate(options.currentVersion, latest);
-
-	const install = spawnSync(
-		"npm",
-		["install", "-g", `@tarout/cli@${latest}`, "--quiet", "--no-fund"],
-		{
-			stdio: ["ignore", "pipe", "pipe"],
-			encoding: "utf8",
-			shell: process.platform === "win32",
-			timeout: 120_000,
-		},
-	);
-	if (install.error || install.status !== 0) {
+	const result = await upgradeCli({
+		currentVersion: options.currentVersion,
+		onUpdateAvailable: announceUpdate,
+	});
+	if (result.status === "check_failed" || result.status === "up_to_date") return;
+	if (result.status === "install_failed") {
 		if (!isQuietMode() && !isJsonMode()) {
 			warn(
-				`Could not auto-update (${install.error?.message ?? `npm exited ${install.status}`}). ` +
-					`Run: npm install -g @tarout/cli@${latest}`,
+				`Could not auto-update (${result.error}). ` +
+					`Run: npm install -g @tarout/cli@${result.latestVersion}`,
 			);
 		}
 		return;
 	}
+	const latest = result.currentVersion;
 
 	// The global bin path is unchanged; re-running the same entry now loads the
 	// freshly installed package. Inherit stdio so the deploy behaves exactly as

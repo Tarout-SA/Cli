@@ -16,6 +16,7 @@ import type { Command } from "commander";
  * - `login`/`register`/`token`/`logout`: the auth flow itself.
  * - `up`/`deploy`/`init`: self-manage auth (browser auto-open + `--token`) via
  *   `ensureAuthenticatedForDeploy`; pre-authing here would double-handle it.
+ * - `upgrade`: updates the local CLI package and never calls the Tarout API.
  * - the whole `agent` namespace: project scaffolding that works signed-out.
  * - `whoami`: it is the *question*, not a command that needs an answer. The
  *   agent docs make it the first command of every session precisely because it
@@ -35,6 +36,7 @@ export const AUTH_EXEMPT_LEAF = new Set([
 	"deploy",
 	"init",
 	"whoami",
+	"upgrade",
 ]);
 
 /**
@@ -69,6 +71,7 @@ export function commandRequiresAuth(
  * the preAction hook, so a resource command never acts on an unexpected
  * project. These are organization-level surfaces, or they manage the selection
  * itself and would deadlock if they needed a project to choose one.
+ * `upgrade` is local package maintenance and needs neither account nor project.
  */
 export const PROJECT_EXEMPT_LEAF = new Set([
 	"login",
@@ -76,6 +79,7 @@ export const PROJECT_EXEMPT_LEAF = new Set([
 	"token",
 	"logout",
 	"whoami",
+	"upgrade",
 	"projects",
 	"orgs",
 	"billing",

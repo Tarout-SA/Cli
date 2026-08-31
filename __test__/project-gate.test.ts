@@ -50,6 +50,7 @@ describe("commandRequiresProject", () => {
 			["login"],
 			["logout"],
 			["whoami"],
+			["upgrade"],
 		]) {
 			expect(commandRequiresProject(leaf(path), root)).toBe(false);
 		}
@@ -94,6 +95,7 @@ describe("commandRequiresAuth", () => {
 			["up"],
 			["deploy"],
 			["init"],
+			["upgrade"],
 			["agent", "connect"],
 			["agent", "init"],
 		]) {

@@ -23,6 +23,7 @@ import {
 	fetchLatestVersion,
 	isNewerVersion,
 	maybeSelfUpdate,
+	upgradeCli,
 } from "../src/lib/update-check.js";
 
 beforeEach(() => {
@@ -182,5 +183,106 @@ describe("maybeSelfUpdate throttle", () => {
 		vi.stubGlobal("fetch", fetchSpy);
 		await maybeSelfUpdate({ currentVersion: "1.2.0" });
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("upgradeCli", () => {
+	it("installs the exact newer registry version", async () => {
+		const installVersion = vi.fn(() => ({ ok: true as const }));
+		const onUpdateAvailable = vi.fn();
+
+		await expect(
+			upgradeCli(
+				{ currentVersion: "1.2.0", onUpdateAvailable },
+				{
+					fetchLatestVersion: vi.fn(async () => "1.3.0"),
+					installVersion,
+				},
+			),
+		).resolves.toEqual({
+			status: "upgraded",
+			previousVersion: "1.2.0",
+			currentVersion: "1.3.0",
+		});
+		expect(onUpdateAvailable).toHaveBeenCalledWith("1.2.0", "1.3.0");
+		expect(installVersion).toHaveBeenCalledWith("1.3.0");
+	});
+
+	it("reports an up-to-date installation without invoking npm", async () => {
+		const installVersion = vi.fn();
+
+		await expect(
+			upgradeCli(
+				{ currentVersion: "1.2.0" },
+				{
+					fetchLatestVersion: vi.fn(async () => "1.2.0"),
+					installVersion,
+				},
+			),
+		).resolves.toEqual({
+			status: "up_to_date",
+			currentVersion: "1.2.0",
+			latestVersion: "1.2.0",
+			currentIsNewer: false,
+		});
+		expect(installVersion).not.toHaveBeenCalled();
+	});
+
+	it("distinguishes a local build newer than the published release", async () => {
+		const installVersion = vi.fn();
+
+		await expect(
+			upgradeCli(
+				{ currentVersion: "1.3.0" },
+				{
+					fetchLatestVersion: vi.fn(async () => "1.2.0"),
+					installVersion,
+				},
+			),
+		).resolves.toEqual({
+			status: "up_to_date",
+			currentVersion: "1.3.0",
+			latestVersion: "1.2.0",
+			currentIsNewer: true,
+		});
+		expect(installVersion).not.toHaveBeenCalled();
+	});
+
+	it("returns a registry failure instead of pretending the CLI is current", async () => {
+		const installVersion = vi.fn();
+
+		await expect(
+			upgradeCli(
+				{ currentVersion: "1.2.0" },
+				{
+					fetchLatestVersion: vi.fn(async () => null),
+					installVersion,
+				},
+			),
+		).resolves.toEqual({
+			status: "check_failed",
+			currentVersion: "1.2.0",
+		});
+		expect(installVersion).not.toHaveBeenCalled();
+	});
+
+	it("returns the npm failure without claiming the upgrade succeeded", async () => {
+		await expect(
+			upgradeCli(
+				{ currentVersion: "1.2.0" },
+				{
+					fetchLatestVersion: vi.fn(async () => "1.3.0"),
+					installVersion: vi.fn(() => ({
+						ok: false as const,
+						error: "npm exited 1",
+					})),
+				},
+			),
+		).resolves.toEqual({
+			status: "install_failed",
+			currentVersion: "1.2.0",
+			latestVersion: "1.3.0",
+			error: "npm exited 1",
+		});
 	});
 });

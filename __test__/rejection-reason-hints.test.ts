@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/lib/config.js", () => ({
 	isLoggedIn: () => true,
+	getAuthScope: () => ({
+		scope: "global",
+		userEmail: "owner@example.com",
+	}),
 }));
 
 const { STALE_CREDENTIAL_HINT, staleCredentialGuidance } = await import(
@@ -26,7 +30,11 @@ const { STALE_CREDENTIAL_HINT, staleCredentialGuidance } = await import(
 describe("staleCredentialGuidance", () => {
 	it("stays neutral when the server names no reason", () => {
 		const guidance = staleCredentialGuidance("UNAUTHORIZED");
-		expect(guidance?.hint).toBe(STALE_CREDENTIAL_HINT);
+		expect(guidance?.hint).toContain(STALE_CREDENTIAL_HINT);
+		expect(guidance?.details.credential).toEqual({
+			scope: "global",
+			userEmail: "owner@example.com",
+		});
 	});
 
 	it("never claims a cause it wasn't told", () => {
@@ -36,9 +44,10 @@ describe("staleCredentialGuidance", () => {
 		expect(hint).not.toMatch(/different Tarout host/i);
 	});
 
-	it("still refuses to blame expiry, which agent keys do not have", () => {
+	it("does not assume the rejected credential is a non-expiring agent key", () => {
 		const hint = staleCredentialGuidance("UNAUTHORIZED")?.hint ?? "";
-		expect(hint).toMatch(/do not expire/i);
+		expect(hint).not.toMatch(/do not expire/i);
+		expect(hint).toMatch(/credential type/i);
 	});
 
 	it("names the cause when the server does", () => {
@@ -74,7 +83,7 @@ describe("staleCredentialGuidance", () => {
 			"UNAUTHORIZED",
 			"some_future_reason",
 		);
-		expect(guidance?.hint).toBe(STALE_CREDENTIAL_HINT);
+		expect(guidance?.hint).toContain(STALE_CREDENTIAL_HINT);
 	});
 
 	it("returns nothing for an unrelated error with no reason", () => {

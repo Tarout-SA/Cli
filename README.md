@@ -393,6 +393,7 @@ with `--help` for its subcommands and flags):
 | `tarout dev` | Run local dev server with cloud environment variables |
 | `tarout build` | Build locally with cloud environment variables |
 | `tarout settings` | Platform settings and information |
+| `tarout upgrade` | Upgrade the CLI to the latest published version |
 | `tarout queues` | Background job queues (platform operators only) |
 | `tarout call` | Call any platform procedure directly (see above) |
 
@@ -423,6 +424,16 @@ version). Opt out per-invocation with `--no-update-check` or permanently with
 `TAROUT_UPDATE_CHECK_INTERVAL_SECONDS` (set `0` to check on every command).
 Under `--json` the update is announced as a
 `{ "type": "event", "event": "cli_update" }` line on stderr.
+
+To bypass the throttle and request an upgrade explicitly, run:
+
+```bash
+tarout upgrade
+```
+
+This command does not require authentication or a linked project. In JSON mode
+it returns `upgraded` or `up_to_date`; registry and installation failures return
+a structured error and a non-zero exit code.
 
 ## AI & Automation Usage
 

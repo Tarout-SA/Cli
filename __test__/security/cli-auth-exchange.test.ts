@@ -63,6 +63,25 @@ async function listenRaw(
 }
 
 describe("CLI authorization-code exchange", () => {
+	it("accepts the account-scoped response returned by the v2 exchange API", async () => {
+		const accountProfile = {
+			token: "cli_account_token",
+			userId: "user_1",
+			userEmail: "user@example.com",
+			userName: "Example User",
+			organizationId: "org_1",
+			organizationName: "Example Org",
+		};
+		const apiUrl = await listenRaw((_request, response) => {
+			response.writeHead(200, { "content-type": "application/json" });
+			response.end(JSON.stringify(accountProfile));
+		});
+
+		await expect(
+			exchangeCliAuthorizationCode(apiUrl, "c".repeat(22)),
+		).resolves.toEqual(accountProfile);
+	});
+
 	it("sends the one-time code and PKCE verifier in a POST body", async () => {
 		let captured:
 			| { method?: string; url?: string; contentType?: string; body: string }

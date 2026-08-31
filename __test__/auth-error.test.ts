@@ -2,8 +2,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 // errors.ts reads config.isLoggedIn to tell "stored-but-rejected" (stale) from
 // "never logged in". Mock it so both branches are deterministic.
-const h = vi.hoisted(() => ({ isLoggedIn: vi.fn() }));
-vi.mock("../src/lib/config.js", () => ({ isLoggedIn: h.isLoggedIn }));
+const h = vi.hoisted(() => ({
+	isLoggedIn: vi.fn(),
+	getAuthScope: vi.fn(),
+}));
+vi.mock("../src/lib/config.js", () => ({
+	isLoggedIn: h.isLoggedIn,
+	getAuthScope: h.getAuthScope,
+}));
 
 import {
 	AGENT_LOGIN_HINT,
@@ -36,23 +42,36 @@ describe("AuthError", () => {
 describe("staleCredentialGuidance", () => {
 	afterEach(() => {
 		h.isLoggedIn.mockReset();
+		h.getAuthScope.mockReset();
 	});
 
 	it("returns re-auth guidance for a server UNAUTHORIZED while a token is stored", () => {
 		h.isLoggedIn.mockReturnValue(true);
+		h.getAuthScope.mockReturnValue({
+			scope: "project",
+			path: "/work/qultm/.tarout/auth.json",
+			userEmail: "owner@example.com",
+		});
 		const guidance = staleCredentialGuidance("UNAUTHORIZED");
 		expect(guidance).not.toBeNull();
-		expect(guidance?.hint).toBe(STALE_CREDENTIAL_HINT);
+		expect(guidance?.hint).toContain(STALE_CREDENTIAL_HINT);
 		// Mirrors the no-token AuthError so an agent gets the same structured cue.
-		expect(guidance?.details).toEqual({
+		expect(guidance?.details).toMatchObject({
 			hint: AGENT_LOGIN_HINT,
 			nextCommand: "tarout login",
+			credential: {
+				scope: "project",
+				path: "/work/qultm/.tarout/auth.json",
+				userEmail: "owner@example.com",
+			},
 		});
-		// `nextCommand` carries the fix; the hint itself must not claim the key
-		// timed out, because agent keys have no expiry and an agent told
-		// "expired" reports that to the user and stops instead of checking scope.
-		expect(STALE_CREDENTIAL_HINT).toMatch(/whoami/);
-		expect(STALE_CREDENTIAL_HINT).not.toMatch(/expired/i);
+		// The failing command may already be `whoami`, and the CLI cannot infer the
+		// credential type from a stored profile. Do not recurse or claim that a
+		// browser-issued CLI credential has the lifetime of an Agent key.
+		expect(STALE_CREDENTIAL_HINT).not.toMatch(/whoami/i);
+		expect(STALE_CREDENTIAL_HINT).not.toMatch(/agent keys do not expire/i);
+		expect(guidance?.hint).toContain("project");
+		expect(guidance?.hint).toContain("/work/qultm/.tarout/auth.json");
 		// Must not assert a cause it cannot know. A rejection has server-side
 		// explanations the CLI cannot see, and a confident wrong diagnosis sends
 		// an agent chasing a problem that isn't there.
@@ -66,11 +85,13 @@ describe("staleCredentialGuidance", () => {
 
 	it("stays silent when nothing is stored (the AuthError path owns that case)", () => {
 		h.isLoggedIn.mockReturnValue(false);
+		h.getAuthScope.mockReturnValue({ scope: "none" });
 		expect(staleCredentialGuidance("UNAUTHORIZED")).toBeNull();
 	});
 
 	it("does not fire for non-auth error codes even with a stored token", () => {
 		h.isLoggedIn.mockReturnValue(true);
+		h.getAuthScope.mockReturnValue({ scope: "global" });
 		expect(staleCredentialGuidance("FORBIDDEN")).toBeNull();
 		expect(staleCredentialGuidance("NOT_FOUND")).toBeNull();
 	});

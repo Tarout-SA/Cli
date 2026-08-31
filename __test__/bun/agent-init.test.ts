@@ -98,27 +98,27 @@ describe("scaffoldAgentConfig — claude", () => {
 		expect(md).toContain("This hands-free rule is about a deploy the user **asked");
 	});
 
-	it("tells the agent to connect a GitHub remote instead of uploading", () => {
+	it("explains automatic GitHub binding and the manual fallback", () => {
 		scaffoldAgentConfig({ cwd: dir, agent: "claude" });
 		const md = readFileSync(join(dir, "CLAUDE.md"), "utf-8");
 
-		expect(md).toContain("Prefer connecting Git over uploading");
+		expect(md).toContain("Git connection happens by itself");
+		expect(md).toContain("bind the repo for you");
 		expect(md).toContain("tarout apps git github <id|name> --repo <owner/repo>");
 		// Installing the GitHub App is browser-only — the agent must hand off.
 		expect(md).toContain("browser-only");
 	});
 
-	it("warns that `tarout up` silently severs a Git connection", () => {
+	it("explains that `tarout up` refuses to sever a Git connection", () => {
 		scaffoldAgentConfig({ cwd: dir, agent: "claude" });
 		const md = readFileSync(join(dir, "CLAUDE.md"), "utf-8");
 
-		// `tarout up` defaults to `--source upload`, and completeDropUpload spreads
-		// CLEAR_ALL_SOURCE_FIELDS — so running `up` on a github app nulls
-		// owner/repository/branch/githubId and push-to-deploy stops, with no
-		// warning. The scaffold's headline deploy command is `tarout up`, so this
-		// footgun is one step away for every agent.
-		expect(md).toContain("never run `tarout up` on it");
-		expect(md).toContain("silently wipes the Git connection");
+		// Since 1.9.1, the default path fails closed instead of clearing the source.
+		// An explicit `--source upload` remains the intentional escape hatch.
+		expect(md).toContain("`up` will not overwrite a Git connection by accident");
+		expect(md).toContain("stops with an error");
+		expect(md).toContain("`--source upload`");
+		expect(md).not.toContain("silently wipes the Git connection");
 	});
 
 	it("runs deploys hands-free (no ask rule) but gates paid/destructive commands", () => {

@@ -38,6 +38,8 @@ export interface StartCliBrowserAuthOptions
 	exchangeCode?: ExchangeAuthorizationCode;
 }
 
+const AUTHORIZATION_CODE_PATTERN = /^(?:[A-Za-z0-9_-]{22}|[A-Za-z0-9_-]{43})$/;
+
 function createAuthState(): string {
 	return randomBytes(32).toString("base64url");
 }
@@ -64,10 +66,13 @@ function parseAuthCallbackData(value: unknown): AuthCallbackData {
 		"userEmail",
 		"organizationId",
 		"organizationName",
+	] as const;
+	const optional = [
+		"userName",
 		"projectId",
 		"projectName",
+		"projectSlug",
 	] as const;
-	const optional = ["userName", "projectSlug"] as const;
 	const valid =
 		required.every(
 			(key) => typeof record[key] === "string" && record[key].length > 0,
@@ -91,8 +96,7 @@ export async function exchangeCliAuthorizationCode(
 	codeVerifier?: string,
 	options: { timeoutMs?: number } = {},
 ): Promise<AuthCallbackData> {
-	const codeIsValid =
-		/^[A-Za-z0-9_-]{22}$/.test(code) || /^[A-Za-z0-9_-]{43}$/.test(code);
+	const codeIsValid = AUTHORIZATION_CODE_PATTERN.test(code);
 	if (
 		!codeIsValid ||
 		(codeVerifier !== undefined &&
@@ -413,6 +417,10 @@ export function startAuthServer(options: StartAuthServerOptions): Promise<{
 			callbackResolver = res;
 			callbackRejecter = rej;
 		});
+		// The browser can return before openInBrowser() resolves and before the
+		// command calls waitForCallback(). Mark early failures as observed now;
+		// awaiting the original promise still receives the same rejection later.
+		void callbackPromise.catch(() => undefined);
 
 		let callbackStarted = false;
 
@@ -427,8 +435,13 @@ export function startAuthServer(options: StartAuthServerOptions): Promise<{
 				res.status(400).send("Invalid authentication state");
 				return;
 			}
+			if (callbackStarted) {
+				res.status(409).send("Authentication callback already received");
+				return;
+			}
 
 			if (error) {
+				callbackStarted = true;
 				res.send(
 					renderCliAuthPage({
 						status: "error",
@@ -441,18 +454,18 @@ export function startAuthServer(options: StartAuthServerOptions): Promise<{
 			}
 
 			if (!code || Array.isArray(code)) {
+				callbackStarted = true;
 				res.status(400).send("Missing required authorization code");
+				callbackRejecter(new Error("Missing required authorization code."));
 				return;
 			}
-			if (!/^[A-Za-z0-9_-]{43}$/.test(String(code))) {
+			if (!AUTHORIZATION_CODE_PATTERN.test(String(code))) {
+				callbackStarted = true;
 				res.status(400).send("Invalid authorization code");
+				callbackRejecter(new Error("Invalid authorization code."));
 				return;
 			}
 
-			if (callbackStarted) {
-				res.status(409).send("Authentication callback already received");
-				return;
-			}
 			callbackStarted = true;
 
 			let authData: AuthCallbackData;

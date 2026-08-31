@@ -25,6 +25,36 @@ const EXCHANGED_PROFILE = {
 };
 
 describe("CLI auth callback server", () => {
+	it("accepts a protocol-v2 22-character authorization code", async () => {
+		const authorizationCode = "c".repeat(22);
+		const exchanges: Array<{ code: string; verifier: string }> = [];
+		const server = await startAuthServer({
+			state: AUTH_STATE,
+			codeVerifier: "v".repeat(43),
+			exchangeCode: async (code, verifier) => {
+				exchanges.push({ code, verifier });
+				return EXCHANGED_PROFILE;
+			},
+		});
+		try {
+			const wait = server.waitForCallback();
+			const response = await fetch(
+				callbackUrl(server.port, {
+					state: AUTH_STATE,
+					code: authorizationCode,
+				}),
+			);
+
+			expect(response.status).toBe(200);
+			expect(exchanges).toEqual([
+				{ code: authorizationCode, verifier: "v".repeat(43) },
+			]);
+			await expect(wait).resolves.toMatchObject(EXCHANGED_PROFILE);
+		} finally {
+			server.close();
+		}
+	});
+
 	it("requires the expected state before exchanging a one-time code", async () => {
 		const authorizationCode = "c".repeat(43);
 		const exchanges: Array<{ code: string; verifier: string }> = [];
@@ -81,7 +111,7 @@ describe("CLI auth callback server", () => {
 			},
 		});
 		try {
-			const wait = server.waitForCallback();
+			const wait = server.waitForCallback().catch((error) => error);
 			const rejected = await fetch(
 				callbackUrl(server.port, {
 					state: AUTH_STATE,
@@ -90,14 +120,9 @@ describe("CLI auth callback server", () => {
 			);
 			expect(rejected.status).toBe(400);
 			expect(exchanges).toEqual([]);
-
-			await fetch(
-				callbackUrl(server.port, {
-					state: AUTH_STATE,
-					code: "c".repeat(43),
-				}),
-			);
-			await expect(wait).resolves.toMatchObject(EXCHANGED_PROFILE);
+			await expect(wait).resolves.toMatchObject({
+				message: "Invalid authorization code.",
+			});
 		} finally {
 			server.close();
 		}
@@ -114,7 +139,7 @@ describe("CLI auth callback server", () => {
 			},
 		});
 		try {
-			const wait = server.waitForCallback();
+			const wait = server.waitForCallback().catch((error) => error);
 			const response = await fetch(
 				callbackUrl(server.port, {
 					state: AUTH_STATE,
@@ -128,14 +153,9 @@ describe("CLI auth callback server", () => {
 			expect(response.status).toBe(400);
 			expect(await response.text()).toContain("code");
 			expect(exchanges).toBe(0);
-
-			await fetch(
-				callbackUrl(server.port, {
-					state: AUTH_STATE,
-					code: "c".repeat(43),
-				}),
-			);
-			await expect(wait).resolves.toMatchObject(EXCHANGED_PROFILE);
+			await expect(wait).resolves.toMatchObject({
+				message: "Missing required authorization code.",
+			});
 		} finally {
 			server.close();
 		}
