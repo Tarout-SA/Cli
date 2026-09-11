@@ -4,6 +4,11 @@ Date: 2026-07-10
 Branch: `feat/mcp-local-server`
 Worktree: `/home/stanoid/tarout/cli-mcp-local`
 Status: approved design, pre-implementation
+Superseded: the counts below are the 2026-07-10 design targets, not current
+state. The curated catalog has since grown from ~36 to 73 tools (authoritative
+list: `__test__/mcp/integration-catalog.test.ts`), and the hosted `/api/mcp`
+surface is ~465 procedures, which now serves a curated ~42-tool profile to OAuth
+connectors (see `cloud/docs/MCP.md`).
 
 ## Context
 

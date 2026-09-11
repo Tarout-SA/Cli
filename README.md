@@ -56,9 +56,30 @@ tarout call deployment.all --input '{"applicationId":"app_123"}'
 Cursor, Claude Desktop) the CLI's capabilities as first-class tools:
 deploy from the current directory, sync `.env`, run SQL against Postgres,
 schedule cron tasks (`job_*`), switch org/project/env, upgrade billing, and
-more — with a `call` escape hatch covering the entire platform API.
+more, with a `call` escape hatch covering the entire platform API.
 
-### Setup
+### No install: the hosted connector
+
+If you just want an agent talking to Tarout, you do not need this package at
+all. The platform hosts an MCP server that authenticates with OAuth, so the URL
+is the whole setup:
+
+```
+https://tarout.sa/api/mcp
+```
+
+- **claude.ai / ChatGPT / Claude Desktop**: Settings, Connectors, add a custom
+  connector, paste the URL. Leave client ID and secret empty.
+- **Claude Code**: `claude mcp add --transport http tarout https://tarout.sa/api/mcp`
+- **Codex**: `codex mcp add tarout --url https://tarout.sa/api/mcp` then `codex mcp login tarout`
+- **Cursor** (`~/.cursor/mcp.json`): `"tarout": { "url": "https://tarout.sa/api/mcp" }`
+
+That path offers a curated tool set plus a `tarout_call` escape hatch. Install
+the CLI below when you want the local toolset, deploys from the current folder,
+and per-project credentials. Full guide:
+<https://tarout.sa/docs/getting-started/connect-your-ai>
+
+### Setup (local stdio server)
 
 **Claude Code**
 
@@ -89,7 +110,7 @@ claude mcp add tarout -- tarout-mcp
 
 ### Auth
 
-The server reuses the credential `tarout login` wrote — the project's
+The server reuses the credential `tarout login` wrote: the project's
 `.tarout/auth.json` first, then the machine-wide profile. **Launch it from the
 project directory**, or pass a `path` argument on the tools that accept one, so
 it resolves the right project. If nothing resolves, tool calls return a
