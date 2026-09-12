@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`tarout ai keys create` no longer asks for a model.** AI Gateway keys are
+  no longer pinned to one model: one key calls every model in the catalog, and
+  each request picks its model with the `model` field. `-m, --model` and
+  `-p, --provider` are still accepted so existing scripts keep running, but
+  they print a one-line deprecation warning and are not sent. The success box
+  now shows the monthly credit limit (when `--monthly-cap` is set) and points
+  at `tarout ai models` instead of printing a model and provider.
+
+- **`tarout ai keys list` drops the MODEL column.** `tarout ai keys info`
+  prints Model and Provider only for older keys that still carry a value,
+  marked as legacy and not enforced, and shows a key's monthly credit limit
+  when it has one.
+
+- **Key management now points at `https://tarout.sa/dashboard/ai-models/keys`.**
+  An empty `tarout ai keys list` also suggests `tarout ai keys create`, which
+  works over API-key sessions.
+
 ## [1.9.2]
 
 ### Added

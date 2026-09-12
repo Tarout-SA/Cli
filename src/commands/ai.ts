@@ -11,6 +11,7 @@ import {
 	quietOutput,
 	shouldSkipConfirmation,
 	table,
+	warn,
 } from "../lib/output.js";
 import { ExitCode } from "../utils/exit-codes.js";
 import { confirm, input } from "../utils/prompts.js";
@@ -22,16 +23,22 @@ import { startSpinner, succeedSpinner } from "../utils/spinner.js";
  * These four commands used to be permanent stubs: `aiGateway.generateKey` /
  * `updateKey` / `revokeKey` / `deleteKey` refused every `x-api-key` session, and
  * the CLI has no other transport, so they could never succeed. That refusal is
- * gone — API-key sessions now have the same authority as an interactive session
+ * gone: API-key sessions now have the same authority as an interactive session
  * over the organization's own resources (cloud/src/server/lib/session-custody.ts),
  * and a gateway key is a resource, not an auth credential.
  *
  * `aiGateway.generateKey` remains in the platform's EXCLUDED_PROCEDURES, which
  * keeps a one-time secret off the generic `tarout call` / MCP / REST surfaces.
  * That is response hygiene, not an authorization rule, and it does not affect
- * these curated commands — they speak native tRPC.
+ * these curated commands; they speak native tRPC.
+ *
+ * Gateway keys are not tied to a model. One key calls every model in the
+ * catalog and each request picks one with its `model` field, so `keys create`
+ * takes no model. Keys created while keys were pinned may still report a
+ * `modelId`; it is informational and no longer restricts what the key calls.
  */
-const KEY_MANAGEMENT_DASHBOARD_URL = "https://tarout.sa/dashboard/ai-models";
+const KEY_MANAGEMENT_DASHBOARD_URL =
+	"https://tarout.sa/dashboard/ai-models/keys";
 
 export function registerAiCommands(program: Command) {
 	const ai = program
@@ -156,19 +163,20 @@ export function registerAiCommands(program: Command) {
 					log("");
 					log("No AI Gateway keys found.");
 					log("");
-					// Not `tarout ai keys create` — that command cannot work over an
-					// API-key session (see the guard note at the top of this file).
-					log(`Create one at: ${colors.dim(KEY_MANAGEMENT_DASHBOARD_URL)}`);
+					log(
+						`Create one with: ${colors.cyan("tarout ai keys create --name <name>")}`,
+					);
+					log(`Or in the dashboard: ${colors.dim(KEY_MANAGEMENT_DASHBOARD_URL)}`);
 					return;
 				}
 
 				log("");
+				// No MODEL column: a key is not tied to a model.
 				table(
-					["ID", "NAME", "MODEL", "ENABLED", "CREATED"],
+					["ID", "NAME", "ENABLED", "CREATED"],
 					items.map((k: any) => [
 						colors.cyan((k.keyId || k.id || "").slice(0, 8)),
 						k.keyName || k.name || "",
-						k.modelId || k.model || "",
 						k.isEnabled || k.enabled
 							? colors.success("yes")
 							: colors.error("no"),
@@ -185,13 +193,22 @@ export function registerAiCommands(program: Command) {
 	// Create key
 	keys
 		.command("create")
-		.description("Create an AI Gateway API key")
+		.description("Create an AI Gateway API key that works with every model")
 		.option("-n, --name <name>", "Key name")
-		.option("-m, --model <modelId>", "Model ID")
-		.option("-p, --provider <provider>", "Model provider (global|saudi)", "global")
+		// Deprecated: keys used to be pinned to one model. Both flags still parse
+		// so older scripts keep running, but they only warn and are never sent.
+		// --provider has no default, or the warning would fire on every run.
+		.option(
+			"-m, --model <modelId>",
+			"Deprecated and ignored: keys work with every model; set model per request",
+		)
+		.option(
+			"-p, --provider <provider>",
+			"Deprecated and ignored: keys work with every model; set model per request",
+		)
 		.option(
 			"--monthly-cap <sar>",
-			"Monthly spend ceiling in SAR (0 or omitted = no cap)",
+			"Monthly credit limit in SAR (0 or omitted = no limit)",
 		)
 		.action(
 			async (options: {
@@ -203,18 +220,14 @@ export function registerAiCommands(program: Command) {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
 
-					const keyName =
-						options.name ?? (await input("Key name (e.g., production):"));
-					const modelId =
-						options.model ?? (await input("Model ID (e.g., gpt-4o):"));
-
-					const provider = (options.provider ?? "global").toLowerCase();
-					if (provider !== "global" && provider !== "saudi") {
-						throw new CliError(
-							`Invalid provider "${options.provider}". Use "global" or "saudi".`,
-							ExitCode.INVALID_ARGUMENTS,
+					if (options.model !== undefined || options.provider !== undefined) {
+						warn(
+							"--model and --provider are deprecated and ignored: AI Gateway keys now work with every model. Pass `model` in each request instead.",
 						);
 					}
+
+					const keyName =
+						options.name ?? (await input("Key name (e.g., production):"));
 
 					// The API takes halalas (1 SAR = 100 halalas); the flag takes SAR
 					// because that is what the dashboard and invoices show.
@@ -235,8 +248,6 @@ export function registerAiCommands(program: Command) {
 
 					const result = await client.aiGateway.generateKey.mutate({
 						keyName,
-						modelId,
-						modelProvider: provider,
 						...(monthlySpendCapHalalas === undefined
 							? {}
 							: { monthlySpendCapHalalas }),
@@ -255,12 +266,14 @@ export function registerAiCommands(program: Command) {
 					log("");
 					box("AI Gateway key created", [
 						`Name: ${colors.bold(keyName)}`,
-						`Model: ${colors.bold(modelId)}`,
-						`Provider: ${colors.bold(provider)}`,
+						...(monthlySpendCapHalalas
+							? [`Monthly credit limit: ${colors.bold(`${(monthlySpendCapHalalas / 100).toFixed(2)} SAR`)}`]
+							: []),
 						...(secret ? [`Key: ${colors.cyan(secret)}`] : []),
+						`Models: every model in the catalog (see ${colors.cyan("tarout ai models")})`,
 					]);
 					if (secret) {
-						log(colors.warn("Save this key — it will not be shown again."));
+						log(colors.warn("Save this key now. It will not be shown again."));
 					}
 					log("");
 				} catch (err) {
@@ -296,11 +309,24 @@ export function registerAiCommands(program: Command) {
 				log(colors.bold((key as any).keyName || (key as any).name || keyId));
 				log(colors.dim((key as any).keyId || keyId));
 				log("");
-				log(`  Model: ${(key as any).modelId || "-"}`);
-				log(`  Provider: ${(key as any).modelProvider || "-"}`);
+				// Only keys created while keys were pinned still carry a model. It is shown
+				// for reference and no longer limits what the key can call.
+				if ((key as any).modelId) {
+					log(
+						`  Model: ${(key as any).modelId} ${colors.dim("(legacy, not enforced)")}`,
+					);
+					if ((key as any).modelProvider) {
+						log(`  Provider: ${(key as any).modelProvider}`);
+					}
+				}
 				log(
 					`  Status: ${(key as any).isEnabled !== false ? colors.success("enabled") : colors.error("disabled")}`,
 				);
+				if ((key as any).monthlySpendCapHalalas) {
+					log(
+						`  Monthly credit limit: ${(Number((key as any).monthlySpendCapHalalas) / 100).toFixed(2)} SAR`,
+					);
+				}
 				if ((key as any).expiresAt) {
 					log(`  Expires: ${formatDate((key as any).expiresAt)}`);
 				}
@@ -337,7 +363,7 @@ export function registerAiCommands(program: Command) {
 				}
 
 				log("");
-				log(colors.bold(`Key Usage — last ${options.days} days`));
+				log(colors.bold(`Key Usage: last ${options.days} days`));
 				log("");
 
 				const agg = (data as any).aggregated;
@@ -549,7 +575,7 @@ export function registerAiCommands(program: Command) {
 				}
 
 				log("");
-				log(colors.bold(`Organization AI Usage — last ${options.days} days`));
+				log(colors.bold(`Organization AI Usage: last ${options.days} days`));
 				log("");
 
 				const d = data as any;
@@ -750,7 +776,7 @@ export function registerAiCommands(program: Command) {
 						flag: "--key",
 						sensitive: true,
 					}));
-				// apiCreateAi requires `model` — prompt when not supplied.
+				// apiCreateAi requires `model`, so prompt when not supplied.
 				const model =
 					options.model ||
 					(await input("Default model (e.g. gpt-4o):", undefined, {
@@ -794,7 +820,7 @@ export function registerAiCommands(program: Command) {
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
 				const _spinner = startSpinner("Updating AI provider...");
-				// apiUpdateAi expects apiUrl/apiKey (not url/key) — map the flags so
+				// apiUpdateAi expects apiUrl/apiKey (not url/key); map the flags so
 				// they aren't silently dropped by Zod.
 				const payload: Record<string, unknown> = { aiId };
 				if (options.name !== undefined) payload.name = options.name;
