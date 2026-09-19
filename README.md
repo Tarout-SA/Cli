@@ -39,6 +39,13 @@ tarout deploy --wait --source upload
 # The first deploy prompts to create or link an app, and to create detected resources.
 ```
 
+**Cloned a repo that already deploys to Tarout?** Its `.tarout/` folder arrives
+with only a `.gitignore`, because your login is not committed. Run `tarout login`
+(or straight `tarout deploy`, which signs you in and asks which app to deploy
+to). In CI, set `TAROUT_TOKEN` to a key from
+<https://tarout.sa/dashboard/agent/keys>. To commit the login instead, see
+[Sharing one login through git](#sharing-one-login-through-git).
+
 ## Call any API (`tarout call`)
 
 Beyond the curated commands, `tarout call` reaches **every** platform procedure
@@ -128,7 +135,8 @@ install the CLI + register the server in one shot.
 | Command | Description |
 |---------|-------------|
 | `tarout login` | Authenticate via browser; writes this project's `.tarout/auth.json` |
-| `tarout login --token <key>` | Same, headless — no browser |
+| `tarout login --token <key>` | Same, headless, with no browser |
+| `tarout login --commit-token` | Commit this project's `.tarout/auth.json` with the repo ([details](#sharing-one-login-through-git)); `--no-commit-token` undoes it |
 | `tarout register` | Create a new account via browser |
 | `tarout token <key>` | Alias for `login --token` |
 | `tarout token:create` | Mint a new API key for the current account |
@@ -556,15 +564,41 @@ at a different account.
 ```
 your-project/
   .tarout/
-    auth.json      # the credential — mode 0600, in a 0700 directory (never committed)
+    auth.json      # the credential: mode 0600, in a 0700 directory (git-ignored by default)
     project.json   # which Tarout app this directory deploys to (never committed)
-    config.json    # your deploy contract — COMMIT THIS
-    .gitignore     # written automatically: ignores everything but itself and config.json
+    config.json    # your deploy contract: COMMIT THIS
+    .gitignore     # written automatically: ignores everything but itself and config.json,
+                   # and tells whoever clones the repo how to sign in
 ```
 
-`auth.json` and `project.json` are git-ignored on creation and excluded from
-deploy archives, so the key never ships anywhere. You normally never edit those
-two by hand.
+`auth.json` and `project.json` are git-ignored on creation and always excluded
+from deploy archives. You normally never edit those two by hand.
+
+### Sharing one login through git
+
+By default every person who clones the repo signs in for themselves with
+`tarout login`. If you would rather the whole team (or a private CI runner)
+share one login that comes with the clone, commit the credential:
+
+```bash
+# Use a dashboard key: it does not expire. A browser-login token expires after
+# 30 days, which would sign everyone out at once.
+tarout login --token <key> --commit-token   # key from https://tarout.sa/dashboard/agent/keys
+git add .tarout/.gitignore .tarout/auth.json
+
+# Already signed in? The flag works on its own, no new sign-in:
+tarout login --commit-token
+```
+
+This adds `!auth.json` to `.tarout/.gitignore`. Only do it in a **private**
+repository: anyone who can read the repo can deploy and manage resources as the
+key's account, and so can anything that builds from it (a Git-connected app
+build included). The CLI warns if a `.gitignore` higher up still hides
+`.tarout/`, which would keep the file out of git anyway.
+
+To go back, run `tarout login --no-commit-token`, then
+`git rm --cached .tarout/auth.json`. A key that was ever pushed stays in the git
+history, so revoke it in the dashboard as well.
 
 ### `.tarout/config.json` — the deploy contract
 

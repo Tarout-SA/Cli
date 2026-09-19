@@ -7,7 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0]
+
+### Added
+
+- **`tarout login --commit-token` shares a project's login through git.** It
+  adds `!auth.json` to `.tarout/.gitignore`, so everyone who clones the repo is
+  signed in as that account; `--no-commit-token` undoes it. Both flags also work
+  on `tarout token <key>` and on a project that is already signed in, with no new
+  sign-in. The CLI warns that anyone with the repo can act as the account, that
+  a browser-login token expires after 30 days (use a dashboard key instead), when
+  a `.gitignore` higher up still hides `.tarout/`, and when git keeps tracking
+  `auth.json` after opting out (`git rm --cached`, then revoke the key). Refused
+  with `--global`, since only a project credential lives in the repo.
+
 ### Changed
+
+- **`.tarout/.gitignore` now tells a fresh clone how to sign in.** It is the only
+  file in `.tarout/` that reaches a clone, and it used to say only "Ignore local
+  tarout config". It now explains `tarout login`, `tarout deploy`, `TAROUT_TOKEN`
+  for CI, and the `--commit-token` option. An existing file that still has the
+  old first line is upgraded in place with every other line kept; a file you
+  wrote yourself is never rewritten. Login and link now write the same file, so
+  a login-created one no longer misses `!config.json`.
+
+- **Project sign-in says whether the token is committed.** The Account box reads
+  "kept out of git" or "committed with the repo", followed by one line on what a
+  teammate who clones the repo gets. `--json` output carries `tokenCommitted`.
 
 - **`tarout ai keys create` no longer asks for a model.** AI Gateway keys are
   no longer pinned to one model: one key calls every model in the catalog, and

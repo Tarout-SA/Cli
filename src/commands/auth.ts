@@ -21,8 +21,11 @@ import {
 import {
 	type CredentialPlacement,
 	getProjectCredential,
+	isProjectTokenCommitted,
+	probeCredentialInGit,
 	removeProjectCredential,
 	resolveCredentialPlacement,
+	setProjectTokenCommitted,
 } from "../lib/project-auth.js";
 import { persistProfile } from "../lib/credential-store.js";
 import type { Profile } from "../lib/config.js";
@@ -268,18 +271,157 @@ export async function performLogout(
 	}
 }
 
+/**
+ * Credential sources minted by a browser sign-in. Those CLI keys expire after
+ * 30 days (the platform's `/api/cli/exchange`), so a committed copy signs the
+ * whole team out at once. Dashboard keys never expire unless asked to.
+ */
+const EXPIRING_CREDENTIAL_SOURCES = new Set(["login", "register"]);
+
+/** The "Credential:" line of the account box. */
+function credentialLine(
+	credentialPath: string | undefined,
+	tokenCommitted: boolean | undefined,
+): string {
+	if (!credentialPath) {
+		return `Credential: ${colors.bold("machine-wide CLI profile")}`;
+	}
+	const note = tokenCommitted
+		? "(this project only, committed with the repo)"
+		: "(this project only, kept out of git)";
+	return `Credential: ${colors.bold(credentialPath)} ${colors.dim(note)}`;
+}
+
+/**
+ * Say what a teammate who clones the repo gets, and how to change it. `.tarout/`
+ * arrives nearly empty in a clone, so the choice is offered where the login
+ * happens rather than left for someone to discover.
+ */
+function logTokenGitHint(tokenCommitted: boolean | undefined): void {
+	log(
+		colors.dim(
+			tokenCommitted
+				? "Anyone who clones this repo is signed in as this account. Undo: tarout login --no-commit-token"
+				: "Teammates who clone this repo sign in with `tarout login`. To share this login through git instead (private repos only): tarout login --commit-token",
+		),
+	);
+}
+
+/**
+ * `--commit-token` is a rule in `.tarout/.gitignore`, so it only means
+ * something when the credential lands in a project.
+ */
+function assertCommitTokenPlacement(
+	commitToken: boolean | undefined,
+	placement: CredentialPlacement,
+): void {
+	if (commitToken === undefined || placement.scope === "project") return;
+	throw new CliError(
+		"--commit-token and --no-commit-token only apply to a project credential (.tarout/auth.json). Run this inside the project, without --global.",
+		ExitCode.INVALID_ARGUMENTS,
+	);
+}
+
+/** Result of applying `--commit-token` / `--no-commit-token`. */
+export interface TokenCommitOutcome {
+	tokenCommitted: boolean;
+	/** False when `.tarout/.gitignore` already said so. */
+	changed: boolean;
+	/** What the user still has to know or do by hand. */
+	warnings: string[];
+}
+
+/**
+ * Apply `--commit-token` / `--no-commit-token` to a project. Only the ignore
+ * rule changes: staging, committing, and un-tracking stay with the user, and
+ * git is only asked read-only questions.
+ *
+ * @param {string} projectDir - The project that owns the credential.
+ * @param {boolean} commit - True to commit `auth.json`, false to ignore it.
+ * @param {{ userEmail: string; apiUrl: string; source?: string }} credential
+ * @returns {TokenCommitOutcome}
+ */
+export function applyTokenCommitChoice(
+	projectDir: string,
+	commit: boolean,
+	credential: { userEmail: string; apiUrl: string; source?: string },
+): TokenCommitOutcome {
+	const changed = setProjectTokenCommitted(projectDir, commit);
+	const git = probeCredentialInGit(projectDir);
+	const keysUrl = new URL("/dashboard/agent/keys", credential.apiUrl).toString();
+	const warnings: string[] = [];
+
+	if (commit) {
+		if (changed) {
+			warnings.push(
+				`Anyone who can read this repository can deploy and manage resources as ${credential.userEmail}, and so can anything that builds from it. Only commit the token to a private repo.`,
+			);
+		}
+		if (credential.source && EXPIRING_CREDENTIAL_SOURCES.has(credential.source)) {
+			warnings.push(
+				`This token came from a browser login and expires after 30 days, which signs everyone out at once. For a shared login, create a key at ${keysUrl} and run: tarout login --token <key> --commit-token`,
+			);
+		}
+		if (git.ignored === true) {
+			warnings.push(
+				"Git still ignores .tarout/auth.json, most likely because a .gitignore higher up ignores .tarout/. Remove that rule or the token will not be committed.",
+			);
+		}
+	} else if (git.tracked === true) {
+		warnings.push(
+			`Git is still tracking .tarout/auth.json from an earlier commit. Stop tracking it with \`git rm --cached .tarout/auth.json\`. If it was ever pushed it stays in the git history, so revoke the key at ${keysUrl}.`,
+		);
+	}
+
+	return { tokenCommitted: commit, changed, warnings };
+}
+
+/** Human output for {@link applyTokenCommitChoice}. */
+function reportTokenCommitChoice(outcome: TokenCommitOutcome): void {
+	if (outcome.tokenCommitted) {
+		success(
+			outcome.changed
+				? "This project's token will now be committed with the repo."
+				: "This project's token is already committed with the repo.",
+		);
+	} else {
+		success(
+			outcome.changed
+				? "This project's token is kept out of git again."
+				: "This project's token is already kept out of git.",
+		);
+	}
+	for (const message of outcome.warnings) warn(message);
+	if (outcome.changed) {
+		log(
+			colors.dim(
+				outcome.tokenCommitted
+					? "Stage it with: git add .tarout/.gitignore .tarout/auth.json"
+					: "Stage the change with: git add .tarout/.gitignore",
+			),
+		);
+	}
+}
+
 /** Shared success reporting for every authentication path. */
 function reportAuthenticated(
 	profile: Profile,
 	placement: CredentialPlacement,
 	credentialPath: string | undefined,
 	replacedEmail: string | undefined,
+	commitOutcome?: TokenCommitOutcome,
 ): void {
+	const tokenCommitted =
+		placement.scope === "project" && placement.projectDir
+			? isProjectTokenCommitted(placement.projectDir)
+			: undefined;
 	if (isJsonMode()) {
 		outputData({
 			success: true,
 			scope: placement.scope,
 			credentialPath,
+			tokenCommitted,
+			...(commitOutcome ? { warnings: commitOutcome.warnings } : {}),
 			scopeFallbackReason: placement.fallbackReason,
 			replacedProfile: replacedEmail ? { userEmail: replacedEmail } : undefined,
 			user: {
@@ -313,10 +455,10 @@ function reportAuthenticated(
 		`Project: ${colors.bold(profile.projectName || "None")}`,
 		// Always print the real path: the whole point of project scope is that the
 		// user can see, move, and delete the credential.
-		credentialPath
-			? `Credential: ${colors.bold(credentialPath)} ${colors.dim("(this project only)")}`
-			: `Credential: ${colors.bold("machine-wide CLI profile")}`,
+		credentialLine(credentialPath, tokenCommitted),
 	]);
+	if (commitOutcome) reportTokenCommitChoice(commitOutcome);
+	else if (placement.scope === "project") logTokenGitHint(tokenCommitted);
 }
 
 /**
@@ -335,6 +477,8 @@ export async function authenticateWithToken(
 		scope?: "project" | "global" | "auto";
 		cwd?: string;
 		source?: string;
+		/** `--commit-token` (true) / `--no-commit-token` (false); unset leaves it. */
+		commitToken?: boolean;
 	} = {},
 ): Promise<void> {
 	const normalizedApiUrl = normalizeApiUrl(apiUrl);
@@ -344,6 +488,7 @@ export async function authenticateWithToken(
 		options.scope ?? "auto",
 		options.cwd,
 	);
+	assertCommitTokenPlacement(options.commitToken, placement);
 	const previous = isLoggedIn() ? getCurrentProfile() : null;
 
 	const _spinner = startSpinner("Verifying token...");
@@ -359,11 +504,15 @@ export async function authenticateWithToken(
 	}
 	succeedSpinner("Token verified!");
 
-	const credentialPath = persistProfile(
-		profile,
-		placement,
-		options.source ?? "login --token",
-	);
+	const source = options.source ?? "login --token";
+	const credentialPath = persistProfile(profile, placement, source);
+	const commitOutcome =
+		options.commitToken !== undefined && placement.projectDir
+			? applyTokenCommitChoice(placement.projectDir, options.commitToken, {
+					...profile,
+					source,
+				})
+			: undefined;
 
 	// A project-scoped key does not replace anything — the machine-wide login is
 	// untouched and still applies everywhere else — so the "replaced" notice is
@@ -376,7 +525,13 @@ export async function authenticateWithToken(
 			? previous.userEmail
 			: undefined;
 
-	reportAuthenticated(profile, placement, credentialPath, replacedEmail);
+	reportAuthenticated(
+		profile,
+		placement,
+		credentialPath,
+		replacedEmail,
+		commitOutcome,
+	);
 }
 
 /**
@@ -424,6 +579,14 @@ export function registerAuthCommands(program: Command) {
 			"--local",
 			"Force this project's .tarout/auth.json (the default when run inside a project)",
 		)
+		.option(
+			"--commit-token",
+			"Stop git-ignoring this project's .tarout/auth.json, so everyone who clones the repo shares this login (private repos only)",
+		)
+		.option(
+			"--no-commit-token",
+			"Git-ignore this project's .tarout/auth.json again (the default)",
+		)
 		.action(async (options) => {
 			try {
 				if (options.local && options.global) {
@@ -437,6 +600,8 @@ export function registerAuthCommands(program: Command) {
 					: options.local
 						? "project"
 						: "auto";
+				// Unset unless one of the two flags was passed.
+				const commitToken: boolean | undefined = options.commitToken;
 
 				// Headless path: a pasted API key skips the browser entirely and is an
 				// explicit re-auth, so it overwrites any current session.
@@ -444,23 +609,41 @@ export function registerAuthCommands(program: Command) {
 				if (options.token) {
 					await authenticateWithToken(options.token, options.apiUrl, {
 						scope: requestedScope,
+						commitToken,
 					});
 					return;
 				}
 
 				// "Already logged in" must be judged against the destination this
 				// invocation would write to. A machine-wide profile is not a reason to
-				// skip signing this project in — that is exactly the case project
+				// skip signing this project in; that is exactly the case project
 				// scope exists for.
 				const placement = resolveCredentialPlacement(requestedScope);
+				assertCommitTokenPlacement(commitToken, placement);
 				if (placement.scope === "project") {
 					const existing = getProjectCredential();
 					if (existing && existing.projectDir === placement.projectDir) {
+						// Committing or un-committing the token needs no new sign-in.
+						const commitOutcome =
+							commitToken === undefined
+								? undefined
+								: applyTokenCommitChoice(
+										existing.projectDir,
+										commitToken,
+										existing.credential,
+									);
 						if (isJsonMode()) {
 							outputData({
 								alreadyLoggedIn: true,
 								scope: "project",
 								credentialPath: existing.path,
+								tokenCommitted: isProjectTokenCommitted(existing.projectDir),
+								...(commitOutcome
+									? {
+											tokenCommitChanged: commitOutcome.changed,
+											warnings: commitOutcome.warnings,
+										}
+									: {}),
 								userEmail: existing.credential.userEmail,
 								organizationName: existing.credential.organizationName,
 							});
@@ -471,6 +654,10 @@ export function registerAuthCommands(program: Command) {
 						);
 						log(colors.dim(`Credential: ${existing.path}`));
 						log("");
+						if (commitOutcome) {
+							reportTokenCommitChoice(commitOutcome);
+							return;
+						}
 						log(`Run ${colors.dim("tarout logout")} to sign this project out.`);
 						return;
 					}
@@ -541,12 +728,24 @@ export function registerAuthCommands(program: Command) {
 					// project, unless the user asked for machine-wide or the working
 					// directory is not a project at all.
 					const credentialPath = persistProfile(profile, placement, "login");
+					const commitOutcome =
+						commitToken !== undefined && placement.projectDir
+							? applyTokenCommitChoice(placement.projectDir, commitToken, {
+									...profile,
+									source: "login",
+								})
+							: undefined;
+					const tokenCommitted = placement.projectDir
+						? isProjectTokenCommitted(placement.projectDir)
+						: undefined;
 
 					if (isJsonMode()) {
 						outputData({
 							success: true,
 							scope: placement.scope,
 							credentialPath,
+							tokenCommitted,
+							...(commitOutcome ? { warnings: commitOutcome.warnings } : {}),
 							scopeFallbackReason: placement.fallbackReason,
 							user: {
 								id: authData.userId,
@@ -576,10 +775,12 @@ export function registerAuthCommands(program: Command) {
 							...(activeProjectName
 								? [`Project: ${colors.bold(activeProjectName)}`]
 								: []),
-							credentialPath
-								? `Credential: ${colors.bold(credentialPath)} ${colors.dim("(this project only)")}`
-								: `Credential: ${colors.bold("machine-wide CLI profile")}`,
+							credentialLine(credentialPath, tokenCommitted),
 						]);
+						if (commitOutcome) reportTokenCommitChoice(commitOutcome);
+						else if (placement.scope === "project") {
+							logTokenGitHint(tokenCommitted);
+						}
 
 						// Login binds the account and organization; pick a project now
 						// so the next command doesn't stop to ask. Skippable, and a
@@ -765,6 +966,14 @@ export function registerAuthCommands(program: Command) {
 			"--local",
 			"Force this project's .tarout/auth.json (the default when run inside a project)",
 		)
+		.option(
+			"--commit-token",
+			"Stop git-ignoring this project's .tarout/auth.json, so everyone who clones the repo shares this key (private repos only)",
+		)
+		.option(
+			"--no-commit-token",
+			"Git-ignore this project's .tarout/auth.json again (the default)",
+		)
 		.action(async (apiToken, options) => {
 			try {
 				if (options.local && options.global) {
@@ -780,6 +989,7 @@ export function registerAuthCommands(program: Command) {
 							? "project"
 							: "auto",
 					source: "token",
+					commitToken: options.commitToken,
 				});
 			} catch (err) {
 				handleError(err);

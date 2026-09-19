@@ -35,6 +35,12 @@ const m = vi.hoisted(() => ({
 	getProjectCredential: vi.fn(() => null),
 	setProjectCredential: vi.fn(() => "/tmp/project/.tarout/auth.json"),
 	removeProjectCredential: vi.fn(() => "/tmp/project/.tarout/auth.json"),
+	isProjectTokenCommitted: vi.fn(() => false),
+	setProjectTokenCommitted: vi.fn(() => true),
+	probeCredentialInGit: vi.fn(() => ({
+		ignored: null as boolean | null,
+		tracked: null as boolean | null,
+	})),
 	// Mirrors the real resolver's contract without touching the filesystem:
 	// `auto` prefers the project, which is the shipped default.
 	resolveCredentialPlacement: vi.fn(
@@ -75,6 +81,9 @@ vi.mock("../src/lib/project-auth.js", () => ({
 	setProjectCredential: m.setProjectCredential,
 	removeProjectCredential: m.removeProjectCredential,
 	resolveCredentialPlacement: m.resolveCredentialPlacement,
+	isProjectTokenCommitted: m.isProjectTokenCommitted,
+	setProjectTokenCommitted: m.setProjectTokenCommitted,
+	probeCredentialInGit: m.probeCredentialInGit,
 }));
 
 vi.mock("../src/lib/api.js", () => ({
@@ -93,6 +102,7 @@ vi.mock("../src/utils/spinner.js", () => ({
 }));
 
 import {
+	applyTokenCommitChoice,
 	authenticateWithToken,
 	buildProjectKeyMetadata,
 	performLogout,
@@ -463,6 +473,99 @@ describe("authenticateWithToken --local", () => {
 
 		const success = jsonEvents().find((e) => e.success === true);
 		expect(success?.data?.replacedProfile).toBeUndefined();
+	});
+});
+
+/**
+ * `--commit-token` / `--no-commit-token`: the opt-in that lets a project's
+ * `.tarout/auth.json` travel with the repo. The file mechanics are pinned in
+ * project-auth.test.ts; these pin the command-level contract, above all that
+ * the risks are always spelled out in the output an agent actually reads.
+ */
+describe("--commit-token", () => {
+	function successPayload(): Record<string, any> | undefined {
+		const events = logs
+			.map((l) => {
+				try {
+					return JSON.parse(l);
+				} catch {
+					return null;
+				}
+			})
+			.filter(Boolean) as Array<Record<string, any>>;
+		return events.find((e) => e.success === true)?.data;
+	}
+
+	it("commits the project's token and reports the risk in the JSON payload", async () => {
+		resolveProfileFromCredential.mockResolvedValueOnce(RESOLVED);
+		m.isProjectTokenCommitted.mockReturnValueOnce(true);
+
+		await authenticateWithToken("tk_123", "https://tarout.sa", {
+			cwd: "/tmp/project",
+			commitToken: true,
+		});
+
+		expect(m.setProjectTokenCommitted).toHaveBeenCalledWith("/tmp/project", true);
+		const data = successPayload();
+		expect(data?.tokenCommitted).toBe(true);
+		expect(data?.warnings.join(" ")).toMatch(/private repo/);
+		// A pasted dashboard key does not expire, so no 30-day warning for it.
+		expect(data?.warnings.join(" ")).not.toMatch(/30 days/);
+	});
+
+	it("refuses --commit-token for a machine-wide login before saving anything", async () => {
+		await expect(
+			authenticateWithToken("tk_123", "https://tarout.sa", {
+				scope: "global",
+				commitToken: true,
+			}),
+		).rejects.toThrow(/only apply to a project credential/);
+		expect(resolveProfileFromCredential).not.toHaveBeenCalled();
+		expect(setProfile).not.toHaveBeenCalled();
+		expect(m.setProjectTokenCommitted).not.toHaveBeenCalled();
+	});
+
+	it("leaves the ignore rule alone when neither flag is passed", async () => {
+		resolveProfileFromCredential.mockResolvedValueOnce(RESOLVED);
+
+		await authenticateWithToken("tk_123", "https://tarout.sa");
+
+		expect(m.setProjectTokenCommitted).not.toHaveBeenCalled();
+		expect(successPayload()?.tokenCommitted).toBe(false);
+	});
+
+	it("warns that a browser-login token expires for the whole team", () => {
+		const outcome = applyTokenCommitChoice("/tmp/project", true, {
+			userEmail: "owner@example.com",
+			apiUrl: "https://tarout.sa",
+			source: "login",
+		});
+		const text = outcome.warnings.join(" ");
+		expect(text).toMatch(/30 days/);
+		expect(text).toContain("https://tarout.sa/dashboard/agent/keys");
+		expect(text).toContain("tarout login --token <key> --commit-token");
+	});
+
+	it("warns when a parent .gitignore still hides the token", () => {
+		m.probeCredentialInGit.mockReturnValueOnce({ ignored: true, tracked: false });
+		const outcome = applyTokenCommitChoice("/tmp/project", true, {
+			userEmail: "owner@example.com",
+			apiUrl: "https://tarout.sa",
+			source: "token",
+		});
+		expect(outcome.warnings.join(" ")).toMatch(/higher up ignores \.tarout/);
+	});
+
+	it("tells the user to untrack and revoke a token that git still tracks", () => {
+		m.probeCredentialInGit.mockReturnValueOnce({ ignored: false, tracked: true });
+		const outcome = applyTokenCommitChoice("/tmp/project", false, {
+			userEmail: "owner@example.com",
+			apiUrl: "https://tarout.sa",
+		});
+		expect(m.setProjectTokenCommitted).toHaveBeenCalledWith("/tmp/project", false);
+		expect(outcome.tokenCommitted).toBe(false);
+		expect(outcome.warnings.join(" ")).toContain("git rm --cached .tarout/auth.json");
+		expect(outcome.warnings.join(" ")).toMatch(/revoke the key/);
 	});
 });
 

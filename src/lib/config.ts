@@ -11,7 +11,11 @@
  */
 
 import Conf from "conf";
-import { getProjectCredential, setProjectCredential } from "./project-auth.js";
+import {
+	ensureProjectGitignore,
+	getProjectCredential,
+	setProjectCredential,
+} from "./project-auth.js";
 
 /**
  * User profile containing authentication and context information.
@@ -433,37 +437,12 @@ export function setProjectConfig(
 	});
 	chmodIfSupported(configPath, 0o600);
 
-	// Create .gitignore in .tarout directory to ignore sensitive files.
-	//
 	// `auth.json` is a credential and `project.json` is machine-local link
 	// state, so the default is ignore-everything. `config.json` is the opposite:
 	// it is the project's declared deploy contract, and it is only useful if it
-	// travels with the repo — a manifest that a teammate or CI doesn't get is
-	// just a local override with extra steps.
-	const gitignorePath = join(configDir, ".gitignore");
-	if (!existsSync(gitignorePath)) {
-		writeFileSync(
-			gitignorePath,
-			"# Ignore local tarout config\n*\n!.gitignore\n!config.json\n",
-			{ encoding: "utf-8", mode: 0o600 },
-		);
-		chmodIfSupported(gitignorePath, 0o600);
-	} else {
-		// An existing .gitignore predates config.json and would hide it. Add the
-		// negation rather than rewriting a file the user may have edited.
-		try {
-			const current = readFileSync(gitignorePath, "utf-8");
-			if (!current.includes("!config.json")) {
-				writeFileSync(
-					gitignorePath,
-					`${current.replace(/\n*$/, "\n")}!config.json\n`,
-					{ encoding: "utf-8", mode: 0o600 },
-				);
-			}
-		} catch {
-			// Best-effort: failing to update .gitignore must not fail a link.
-		}
-	}
+	// travels with the repo. One writer owns the file so a link and a login can
+	// never leave two different versions of it behind.
+	ensureProjectGitignore(basePath || process.cwd());
 }
 
 /**

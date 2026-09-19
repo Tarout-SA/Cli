@@ -9,8 +9,9 @@
  * account.
  *
  * A project credential lives beside the existing link metadata in `.tarout/`
- * (directory 0700, file 0600, covered by the `.tarout/.gitignore` this module
- * writes). Resolution walks UP from the working directory, so running the CLI
+ * (directory 0700, file 0600, kept out of git by the `.tarout/.gitignore` this
+ * module writes unless the user opts in with `--commit-token`). Resolution
+ * walks UP from the working directory, so running the CLI
  * from a subdirectory of the project still finds it, and stops at $HOME so a
  * stray `~/.tarout/auth.json` can never become an accidental machine-wide
  * default.
@@ -26,6 +27,7 @@
  * @module lib/project-auth
  */
 
+import { spawnSync } from "node:child_process";
 import {
 	chmodSync,
 	existsSync,
@@ -473,21 +475,180 @@ export function setProjectCredential(
 }
 
 /**
- * Write `.tarout/.gitignore` if absent. The pattern ignores everything in the
- * directory (including the credential) while keeping the ignore file itself
- * tracked, so the protection survives a fresh clone.
+ * First line of every `.tarout/.gitignore` written before the file carried
+ * sign-in instructions. A file that still starts with it is ours, so its header
+ * can be upgraded in place without touching rules the user added below it.
+ */
+const LEGACY_GITIGNORE_HEADER = "# Ignore local tarout config";
+
+/**
+ * Header of `.tarout/.gitignore`. This file is the ONLY part of `.tarout/` that
+ * reaches a fresh clone, so it is where a teammate learns why the folder is
+ * empty and what to run. Keep it short and keep every command in it real.
+ */
+const GITIGNORE_HEADER = [
+	"# Tarout CLI files for this project.",
+	"#",
+	"# Just cloned this repo? Your Tarout login (auth.json) is not in git unless",
+	"# `!auth.json` appears at the bottom of this file, so sign in with",
+	"#   tarout login",
+	"# or run `tarout deploy`, which signs you in and asks which app to use.",
+	"# In CI, set TAROUT_TOKEN to a key from https://tarout.sa/dashboard/agent/keys",
+	"#",
+	"# auth.json     your login token. Kept out of git by default; to commit it",
+	"#               so everyone with the repo shares one login, run",
+	"#               `tarout login --commit-token` (private repos only).",
+	"# project.json  which app this folder deploys to. Per machine, not committed.",
+	"# config.json   the deploy contract. Committed.",
+].join("\n");
+
+/** Ignore everything except this file and the committed deploy contract. */
+const GITIGNORE_RULES = ["*", "!.gitignore", "!config.json"].join("\n");
+
+/** The rule that un-ignores the credential, and the comment written above it. */
+const COMMIT_TOKEN_RULE = "!auth.json";
+const COMMIT_TOKEN_COMMENT =
+	"# auth.json is committed on purpose (tarout login --commit-token). Undo: tarout login --no-commit-token";
+
+function projectGitignorePath(baseDir: string): string {
+	return join(getProjectAuthDir(baseDir), ".gitignore");
+}
+
+function writeGitignore(path: string, content: string): void {
+	writeFileSync(path, content, { encoding: "utf-8", mode: 0o600 });
+	chmodIfSupported(path, 0o600);
+}
+
+/**
+ * Write `.tarout/.gitignore` if absent, or bring an existing one up to date.
+ *
+ * The rules ignore everything in the directory (the credential and the machine
+ * link) while keeping the ignore file itself and `config.json` tracked, so the
+ * protection and the instructions both survive a fresh clone.
+ *
+ * An existing file is only amended, never rewritten: a legacy header is swapped
+ * for the current one, and a missing `!config.json` is appended. Anything else
+ * the user put there, including an opted-in `!auth.json`, is kept.
+ *
  * @param {string} baseDir - The project directory.
  */
 export function ensureProjectGitignore(baseDir: string): void {
 	const dir = getProjectAuthDir(baseDir);
 	if (!existsSync(dir)) return;
-	const gitignorePath = join(dir, ".gitignore");
-	if (existsSync(gitignorePath)) return;
-	writeFileSync(gitignorePath, "# Ignore local tarout config\n*\n!.gitignore\n", {
-		encoding: "utf-8",
-		mode: 0o600,
-	});
-	chmodIfSupported(gitignorePath, 0o600);
+	const path = projectGitignorePath(baseDir);
+	if (!existsSync(path)) {
+		writeGitignore(path, `${GITIGNORE_HEADER}\n${GITIGNORE_RULES}\n`);
+		return;
+	}
+
+	// Best-effort: a stale header or a missing rule must never fail the login or
+	// link that triggered this.
+	try {
+		const current = readFileSync(path, "utf-8");
+		let next = current;
+		const lines = next.split("\n");
+		if (lines[0]?.trim() === LEGACY_GITIGNORE_HEADER) {
+			next = [GITIGNORE_HEADER, ...lines.slice(1)].join("\n");
+		}
+		if (!hasGitignoreLine(next, "!config.json")) {
+			next = `${next.replace(/\n*$/, "\n")}!config.json\n`;
+		}
+		if (next !== current) writeGitignore(path, next);
+	} catch {
+		// Leave the file as it is.
+	}
+}
+
+function hasGitignoreLine(content: string, line: string): boolean {
+	return content.split("\n").some((entry) => entry.trim() === line);
+}
+
+/**
+ * Whether this project's `.tarout/.gitignore` lets git commit `auth.json`.
+ * @param {string} baseDir - The project directory.
+ */
+export function isProjectTokenCommitted(baseDir: string): boolean {
+	try {
+		return hasGitignoreLine(
+			readFileSync(projectGitignorePath(baseDir), "utf-8"),
+			COMMIT_TOKEN_RULE,
+		);
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Opt this project's credential in to (or back out of) version control by
+ * adding or removing `!auth.json` in `.tarout/.gitignore`. The default is
+ * ignored; committing is an explicit choice because anyone who can read the
+ * repository can then act as the account that owns the key.
+ *
+ * Only the ignore rule changes. Un-committing does not remove a copy git is
+ * already tracking; see {@link probeCredentialInGit}.
+ *
+ * @param {string} baseDir - The project directory (must already have `.tarout/`).
+ * @param {boolean} commit - True to commit the credential, false to ignore it.
+ * @returns {boolean} True when the file changed, false when it already matched.
+ */
+export function setProjectTokenCommitted(
+	baseDir: string,
+	commit: boolean,
+): boolean {
+	ensureProjectGitignore(baseDir);
+	const path = projectGitignorePath(baseDir);
+	const current = readFileSync(path, "utf-8");
+	if (hasGitignoreLine(current, COMMIT_TOKEN_RULE) === commit) return false;
+
+	const next = commit
+		? `${current.replace(/\n*$/, "\n")}${COMMIT_TOKEN_COMMENT}\n${COMMIT_TOKEN_RULE}\n`
+		: current
+				.split("\n")
+				.filter((line) => {
+					const trimmed = line.trim();
+					return trimmed !== COMMIT_TOKEN_RULE && trimmed !== COMMIT_TOKEN_COMMENT;
+				})
+				.join("\n");
+	writeGitignore(path, next);
+	return true;
+}
+
+/** What git currently thinks of a project's `.tarout/auth.json`. */
+export interface CredentialGitState {
+	/** Git would skip the file on `git add` (null when git could not answer). */
+	ignored: boolean | null;
+	/** The file is already in the index (null when git could not answer). */
+	tracked: boolean | null;
+}
+
+/**
+ * Ask git (read-only) whether the credential is ignored and whether it is
+ * already tracked. Used to catch the two ways the `.gitignore` rule alone
+ * misleads: a parent `.gitignore` that hides `.tarout/` entirely, so `!auth.json`
+ * never takes effect, and a copy that is still tracked after opting back out.
+ *
+ * Returns nulls outside a git work tree or when git is not installed.
+ *
+ * @param {string} baseDir - The project directory.
+ */
+export function probeCredentialInGit(baseDir: string): CredentialGitState {
+	const target = join(PROJECT_DIR, AUTH_FILE);
+	const run = (args: string[]): number | null => {
+		const result = spawnSync("git", args, {
+			cwd: baseDir,
+			stdio: "ignore",
+			timeout: 5_000,
+		});
+		return result.error ? null : result.status;
+	};
+	const tracked = run(["ls-files", "--error-unmatch", target]);
+	const ignored = run(["check-ignore", "-q", "--no-index", target]);
+	return {
+		// check-ignore: 0 ignored, 1 not ignored, 128 not a repo / fatal.
+		ignored: ignored === 0 ? true : ignored === 1 ? false : null,
+		// ls-files --error-unmatch: 0 tracked, 1 not tracked, 128 not a repo.
+		tracked: tracked === 0 ? true : tracked === 1 ? false : null,
+	};
 }
 
 /**
