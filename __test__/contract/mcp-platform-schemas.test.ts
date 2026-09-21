@@ -20,7 +20,13 @@
  * platform's TS by hand from here would break on those aliases.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -103,22 +109,19 @@ const h = vi.hoisted(() => {
 		return path.endsWith("allByOrganization") ? APPS : {};
 	}
 	function node(path: string[]): unknown {
-		return new Proxy(
-			() => {},
-			{
-				get(_t, prop) {
-					if (typeof prop !== "string") return undefined;
-					if (prop === "then") return undefined; // never a thenable
-					if (prop === "query" || prop === "mutate") {
-						return (payload: unknown = {}) => {
-							calls.push({ procedure: path.join("."), payload });
-							return Promise.resolve(benign(path.join(".")));
-						};
-					}
-					return node([...path, prop]);
-				},
+		return new Proxy(() => {}, {
+			get(_t, prop) {
+				if (typeof prop !== "string") return undefined;
+				if (prop === "then") return undefined; // never a thenable
+				if (prop === "query" || prop === "mutate") {
+					return (payload: unknown = {}) => {
+						calls.push({ procedure: path.join("."), payload });
+						return Promise.resolve(benign(path.join(".")));
+					};
+				}
+				return node([...path, prop]);
 			},
-		);
+		});
 	}
 	return { calls, client: node([]) };
 });
@@ -142,7 +145,12 @@ import { registerDbTools } from "../../src/mcp/tools/db";
 import { registerEnvTools } from "../../src/mcp/tools/env";
 
 interface ValidatorResult {
-	results: Array<{ id: string; schema: string; valid: boolean; errors: string[] }>;
+	results: Array<{
+		id: string;
+		schema: string;
+		valid: boolean;
+		errors: string[];
+	}>;
 	missingProcedures: string[];
 	procedureCount: number;
 }
@@ -174,7 +182,9 @@ const [appMod, pgMod, myMod, envMod, subMod] = await Promise.all([
 	import(SRC + "/server/validations/env-variable"),
 	import(SRC + "/server/validations/subscription"),
 ]);
+const { appRouter } = await import(SRC + "/server/api/root");
 const registry = {
+	applicationLogsInput: appRouter._def.procedures["application.getApplicationLogs"]._def.inputs[0],
 	apiCreateApplication: appMod.apiCreateApplication,
 	apiCreatePostgres: pgMod.apiCreatePostgres,
 	apiCreateMySql: myMod.apiCreateMySql,
@@ -197,7 +207,6 @@ const results = input.payloads.map((p) => {
 		errors: r.success ? [] : r.error.issues.map((i) => (i.path.join(".") || "(root)") + ": " + i.message),
 	};
 });
-const { appRouter } = await import(SRC + "/server/api/root");
 const procs = new Set(Object.keys(appRouter._def.procedures));
 const missingProcedures = [...new Set(input.procedures)].filter((pr) => !procs.has(pr));
 process.stdout.write(JSON.stringify({ results, missingProcedures, procedureCount: procs.size }));
@@ -253,6 +262,16 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 
 		const captured: CapturedPayload[] = [
 			{
+				id: "app_logs",
+				schema: "applicationLogsInput",
+				payload: await capture(
+					"app_logs",
+					{ app: "web", lines: 500, level: "ERROR", timeRange: "24h" },
+					"application.getApplicationLogs",
+				),
+				expectValid: true,
+			},
+			{
 				id: "app_create",
 				schema: "apiCreateApplication",
 				payload: await capture(
@@ -267,7 +286,12 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 				schema: "apiCreatePostgres",
 				payload: await capture(
 					"db_create",
-					{ type: "postgres", name: "My DB", plan: "STARTER", description: "d" },
+					{
+						type: "postgres",
+						name: "My DB",
+						plan: "STARTER",
+						description: "d",
+					},
 					"postgres.create",
 				),
 				expectValid: true,
@@ -297,7 +321,13 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 				schema: "apiImportEnvVariables",
 				payload: await capture(
 					"env_push",
-					{ app: "web", path: scratch, file: ".env.contract", merge: true, restart: false },
+					{
+						app: "web",
+						path: scratch,
+						file: ".env.contract",
+						merge: true,
+						restart: false,
+					},
 					"envVariable.import",
 				),
 				expectValid: true,
@@ -408,25 +438,27 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 		);
 		writeFileSync(scriptPath, VALIDATOR_SCRIPT);
 
-		const run = spawnSync("bun", ["run", scriptPath, inputPath], {
-			cwd: PLATFORM_ROOT,
-			encoding: "utf8",
-			timeout: 120_000,
-			env: {
-				...process.env,
-				SKIP_ENV_VALIDATION: "1",
-				NODE_ENV: "test",
-				DATABASE_URL:
-					process.env.DATABASE_URL ??
-					"postgresql://test:test@localhost:5432/tarout_test",
-				REDIS_URL: process.env.REDIS_URL ?? "redis://localhost:6379",
-				BETTER_AUTH_SECRET:
-					process.env.BETTER_AUTH_SECRET ?? "test-secret-not-real",
-				NEXT_PUBLIC_APP_URL:
-					process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:8000",
-				BETTER_AUTH_URL: process.env.BETTER_AUTH_URL ?? "http://localhost:8000",
+		const run = spawnSync(
+			"bun",
+			["--no-env-file", "run", scriptPath, inputPath],
+			{
+				cwd: PLATFORM_ROOT,
+				encoding: "utf8",
+				timeout: 120_000,
+				env: {
+					PATH: process.env.PATH,
+					DOTENV_CONFIG_PATH: "/dev/null",
+					SKIP_ENV_VALIDATION: "1",
+					NODE_ENV: "test",
+					DATABASE_URL: "postgresql://test:test@127.0.0.1:1/tarout_test",
+					DATABASE_DIRECT_URL: "postgresql://test:test@127.0.0.1:1/tarout_test",
+					REDIS_URL: "redis://127.0.0.1:1",
+					BETTER_AUTH_SECRET: "test-secret-not-real",
+					NEXT_PUBLIC_APP_URL: "http://localhost:8000",
+					BETTER_AUTH_URL: "http://localhost:8000",
+				},
 			},
-		});
+		);
 
 		if (run.status !== 0 || !run.stdout) {
 			throw new Error(
@@ -440,6 +472,7 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 		const ids = payloads.map((p) => p.id).sort();
 		expect(ids).toEqual(
 			[
+				"app_logs",
 				"app_create",
 				"billing_upgrade.plan+quantity",
 				"billing_upgrade.planQuantity",
@@ -464,6 +497,7 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 	// actual schema. A failure here IS the drift bug, reported with the exact
 	// Zod issue.
 	for (const expected of [
+		"app_logs",
 		"app_create",
 		"db_create.postgres",
 		"db_create.mysql",

@@ -7,7 +7,6 @@
 import type { Command } from "commander";
 import { getApiClient } from "../lib/api.js";
 import {
-	getCurrentProfile,
 	getProjectConfig,
 	isLoggedIn,
 	isProjectLinked,
@@ -44,9 +43,6 @@ export function registerDevCommand(program: Command) {
 		.action(async (options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-
-				const profile = getCurrentProfile();
-				if (!profile) throw new AuthError();
 
 				const client = getApiClient();
 

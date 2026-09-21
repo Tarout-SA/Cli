@@ -41,6 +41,7 @@ import { homedir } from "node:os";
 import { dirname, join, parse, resolve } from "node:path";
 import { normalizeApiUrl } from "./api-url.js";
 import type { Profile } from "./config.js";
+import { getInvocationContext } from "./invocation-context.js";
 
 /** Directory holding per-project Tarout state (shared with `project.json`). */
 const PROJECT_DIR = ".tarout";
@@ -112,12 +113,19 @@ export function isGlobalAuthOnly(): boolean {
  * @param {string | null} dir - Directory to resolve from.
  */
 export function setCredentialResolutionDir(dir: string | null): void {
+	const invocation = getInvocationContext();
+	if (invocation) {
+		invocation.credentialDir = dir ? resolve(dir) : process.cwd();
+		return;
+	}
 	resolutionDir = dir ? resolve(dir) : null;
 }
 
 /** The directory unqualified lookups currently resolve from. */
 export function getCredentialResolutionDir(): string {
-	return resolutionDir ?? process.cwd();
+	return (
+		getInvocationContext()?.credentialDir ?? resolutionDir ?? process.cwd()
+	);
 }
 
 /**
@@ -423,7 +431,10 @@ export function resolveCredentialPlacement(
 	if (requested === "project") {
 		// Explicit --local: honour the working directory itself, and let
 		// setProjectCredential throw if it is $HOME or the root.
-		return { scope: "project", projectDir: findProjectDir(startDir) ?? startDir };
+		return {
+			scope: "project",
+			projectDir: findProjectDir(startDir) ?? startDir,
+		};
 	}
 
 	const projectDir = findProjectDir(startDir);
@@ -606,7 +617,9 @@ export function setProjectTokenCommitted(
 				.split("\n")
 				.filter((line) => {
 					const trimmed = line.trim();
-					return trimmed !== COMMIT_TOKEN_RULE && trimmed !== COMMIT_TOKEN_COMMENT;
+					return (
+						trimmed !== COMMIT_TOKEN_RULE && trimmed !== COMMIT_TOKEN_COMMENT
+					);
 				})
 				.join("\n");
 	writeGitignore(path, next);
@@ -688,9 +701,7 @@ export function removeProjectCredential(baseDir?: string): string | null {
 export function describeProjectCredentialSwitch(
 	globalEmail: string | undefined,
 	startDir?: string,
-):
-	| { projectEmail: string; globalEmail: string; path: string }
-	| undefined {
+): { projectEmail: string; globalEmail: string; path: string } | undefined {
 	const resolved = getProjectCredential(startDir);
 	if (!resolved || !globalEmail) return undefined;
 	const projectEmail = resolved.credential.userEmail;

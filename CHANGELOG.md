@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.1]
+
+### Fixed
+
+- Isolate MCP credentials, API clients, and project selection for concurrent tool calls.
+- Persist MCP project switches and respect organization- and project-bound API keys.
+- Accept environment-only authentication in `build` and `dev`.
+- Align MCP application-log filters and line limits with the cloud API contract.
+- Update vulnerable dependencies and verify the locked release package.
+
 ## [1.10.0]
 
 ### Added

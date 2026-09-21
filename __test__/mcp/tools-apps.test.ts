@@ -24,7 +24,9 @@ const fakeClient = {
 			query: vi.fn().mockResolvedValue({ applicationId: "app_1", name: "web" }),
 		},
 		create: {
-			mutate: vi.fn().mockResolvedValue({ applicationId: "app_2", name: "api" }),
+			mutate: vi
+				.fn()
+				.mockResolvedValue({ applicationId: "app_2", name: "api" }),
 		},
 		getApplicationLogs: {
 			query: vi.fn().mockResolvedValue({ logs: [{ line: "hi" }] }),
@@ -44,13 +46,19 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerAppsTools } from "../../src/mcp/tools/apps";
 
 async function invoke(name: string, args: unknown) {
-	const server = new McpServer({ name: "t", version: "0" }, { capabilities: { tools: {} } });
+	const server = new McpServer(
+		{ name: "t", version: "0" },
+		{ capabilities: { tools: {} } },
+	);
 	registerAppsTools(server);
 	// biome-ignore lint/suspicious/noExplicitAny: RegisteredTool.handler is private-ish.
 	// The SDK renamed the field from `callback` to `handler` in 1.29.x; the
 	// stored value is the callback function itself, invoked with (args, extra).
 	const reg = (server as any)._registeredTools[name];
-	return (await reg.handler(args)) as { content: [{ text: string }]; isError?: boolean };
+	return (await reg.handler(args)) as {
+		content: [{ text: string }];
+		isError?: boolean;
+	};
 }
 
 beforeEach(() => {
@@ -64,12 +72,53 @@ beforeEach(() => {
 });
 
 describe("apps tools", () => {
+	it("app_logs validates the cloud's defaults, bounds, and filter vocabulary", () => {
+		const server = new McpServer(
+			{ name: "t", version: "0" },
+			{ capabilities: { tools: {} } },
+		);
+		registerAppsTools(server);
+		// biome-ignore lint/suspicious/noExplicitAny: inspect the registered protocol schema.
+		const schema = (server as any)._registeredTools.app_logs.inputSchema;
+		expect(schema.parse({ app: "web" })).toMatchObject({
+			lines: 500,
+			level: "ALL",
+			timeRange: "all",
+		});
+		for (const args of [
+			{ lines: 9 },
+			{ lines: 5001 },
+			{ lines: 10.5 },
+			{ level: "error" },
+			{ timeRange: "15m" },
+		]) {
+			expect(schema.safeParse({ app: "web", ...args }).success).toBe(false);
+		}
+		for (const level of [
+			"ALL",
+			"ERROR",
+			"WARN",
+			"INFO",
+			"DEBUG",
+			"TRACE",
+			"UNKNOWN",
+		]) {
+			expect(schema.safeParse({ app: "web", level }).success).toBe(true);
+		}
+	});
+
 	it("app_list trims to essentials", async () => {
 		const r = await invoke("app_list", {});
 		expect(r.isError).toBeUndefined();
 		const body = JSON.parse(r.content[0].text) as {
 			count: number;
-			apps: Array<{ id: string; name: string; status: string; plan: string; url: string | null }>;
+			apps: Array<{
+				id: string;
+				name: string;
+				status: string;
+				plan: string;
+				url: string | null;
+			}>;
 		};
 		expect(body.count).toBe(1);
 		expect(body.apps).toHaveLength(1);
@@ -108,7 +157,9 @@ describe("apps tools", () => {
 			organizationId: "org_1",
 			plan: "SHARED",
 		});
-		const body = JSON.parse(r.content[0].text) as { created: { applicationId: string } };
+		const body = JSON.parse(r.content[0].text) as {
+			created: { applicationId: string };
+		};
 		expect(body.created.applicationId).toBe("app_2");
 	});
 
@@ -116,14 +167,16 @@ describe("apps tools", () => {
 		const r = await invoke("app_logs", {
 			app: "web",
 			lines: 100,
-			level: "error",
+			level: "ERROR",
 			timeRange: "1h",
 		});
 		expect(r.isError).toBeUndefined();
-		expect(fakeClient.application.getApplicationLogs.query).toHaveBeenCalledWith({
+		expect(
+			fakeClient.application.getApplicationLogs.query,
+		).toHaveBeenCalledWith({
 			applicationId: "app_1",
 			lines: 100,
-			level: "error",
+			level: "ERROR",
 			timeRange: "1h",
 		});
 	});

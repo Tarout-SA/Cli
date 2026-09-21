@@ -10,11 +10,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * as `error.details.childExitCode`. The success path stays a jsonSuccess wrapper.
  */
 
-const m = vi.hoisted(() => ({ childExitCode: 3 }));
+const m = vi.hoisted(() => ({
+	childExitCode: 3,
+	profile: { organizationId: "org_1" } as { organizationId: string } | null,
+	runs: 0,
+}));
 
 vi.mock("../src/lib/config.js", () => ({
 	isLoggedIn: () => true,
-	getCurrentProfile: () => ({ organizationId: "org_1" }),
+	getCurrentProfile: () => m.profile,
 	isProjectLinked: () => false,
 	getProjectConfig: () => null,
 }));
@@ -36,9 +40,14 @@ vi.mock("../src/lib/process.js", () => ({
 	readPackageJson: () => ({ name: "my-app", scripts: { build: "tsc" } }),
 	detectPackageManager: () => "npm",
 	getBuildCommand: () => "npm run build",
+	getDevCommand: () => "npm run dev",
+	getDefaultPort: () => 3000,
 	detectFramework: () => null,
 	envVarsToObject: () => ({}),
-	runCommand: async () => ({ exitCode: m.childExitCode }),
+	runCommand: async () => {
+		m.runs += 1;
+		return { exitCode: m.childExitCode };
+	},
 }));
 
 vi.mock("../src/utils/spinner.js", () => ({
@@ -51,6 +60,7 @@ vi.mock("../src/utils/spinner.js", () => ({
 
 import { Command } from "commander";
 import { registerBuildCommand } from "../src/commands/build";
+import { registerDevCommand } from "../src/commands/dev";
 import { setGlobalOptions } from "../src/lib/output";
 
 const RESET = {
@@ -66,6 +76,8 @@ let exitCodes: number[];
 let logs: string[];
 
 beforeEach(() => {
+	m.profile = { organizationId: "org_1" };
+	m.runs = 0;
 	exitCodes = [];
 	logs = [];
 	vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
@@ -83,6 +95,28 @@ afterEach(() => {
 });
 
 describe("tarout build --json — failed build", () => {
+	it.each(["build", "dev"])(
+		"accepts environment-only authentication for %s",
+		async (command) => {
+			m.profile = null;
+			m.childExitCode = 0;
+			setGlobalOptions({ ...RESET, json: true });
+			const program = new Command();
+			registerBuildCommand(program);
+			registerDevCommand(program);
+			await program.parseAsync([
+				"node",
+				"tarout",
+				command,
+				"--app",
+				"my-app",
+				"--command",
+				"npm run check",
+			]);
+			expect(m.runs).toBe(1);
+			expect(exitCodes).toEqual([]);
+		},
+	);
 	it("exits BUILD_FAILED (12) and preserves the child code in the envelope", async () => {
 		m.childExitCode = 3; // collides with AUTH_ERROR if leaked raw
 		setGlobalOptions({ ...RESET, json: true });

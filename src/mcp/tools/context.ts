@@ -15,12 +15,20 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
+	getCurrentProfile,
+	updateProfile,
 	getProjectConfig,
 	isProjectLinked,
 	removeProjectConfig,
 	setProjectConfig,
 } from "../../lib/config.js";
 import { resolveAppRef } from "../../lib/env-core.js";
+import { rememberRequestProjectId } from "../../lib/api.js";
+import { AuthError } from "../../lib/errors.js";
+import {
+	type ProjectSummary,
+	verifyProjectCredentialScope,
+} from "../../lib/project-context.js";
 import { withAuth } from "../runtime.js";
 
 const path = z.string().optional().describe("Directory (defaults to cwd).");
@@ -39,16 +47,18 @@ export function registerContextTools(server: McpServer): void {
 			const cwd = dir ?? process.cwd();
 			return withAuth(
 				async (client) => {
-				const [user, project] = await Promise.all([
-					client.user.get.query(),
-					// getActive throws when nothing is set — treat as null so status can
-					// still report identity + link info.
-					client.project.getActive.query().catch(() => null),
-				]);
-				const link = isProjectLinked(cwd)
-					? { linked: true, ...getProjectConfig(cwd) }
-					: { linked: false };
-				return { user, project, link, cwd };
+					const [user, project] = await Promise.all([
+						client.user.get.query(),
+						// getActive throws when nothing is set — treat as null so status can
+						// still report identity + link info.
+						client.project.getActive
+							.query()
+							.catch(() => null),
+					]);
+					const link = isProjectLinked(cwd)
+						? { linked: true, ...getProjectConfig(cwd) }
+						: { linked: false };
+					return { user, project, link, cwd };
 				},
 				undefined,
 				{ cwd },
@@ -61,46 +71,64 @@ export function registerContextTools(server: McpServer): void {
 		{
 			title: "Switch active organization / project",
 			description:
-				"Either or both can be provided (id, slug, or name). Only the fields you supply are changed.",
+				"Select a project by id, slug, or name for the directory's credential. Organization changes require a new API key; selecting the current organization is a no-op.",
 			inputSchema: {
+				path,
 				organization: z.string().optional(),
 				project: z.string().optional(),
 			},
 		},
-		async ({ organization, project }) =>
-			withAuth(async (client) => {
-				const changes: Record<string, unknown> = {};
-				if (organization) {
-					const orgs = (await client.organization.all.query()) as Array<{
-						organizationId: string;
-						name: string;
-					}>;
-					const match = orgs.find(
-						(o) =>
-							o.organizationId === organization || o.name === organization,
-					);
-					if (!match) throw new Error(`Unknown organization: ${organization}`);
-					await client.organization.setActive.mutate({
-						organizationId: match.organizationId,
-					});
-					changes.organization = match;
-				}
-				if (project) {
-					const projs = (await client.project.all.query()) as Array<{
-						id: string;
-						slug?: string;
-						name?: string;
-					}>;
-					const match = projs.find(
-						(p) =>
-							p.id === project || p.slug === project || p.name === project,
-					);
-					if (!match) throw new Error(`Unknown project: ${project}`);
-					await client.project.setActive.mutate({ projectId: match.id });
-					changes.project = match;
-				}
-				return changes;
-			}),
+		async ({ organization, project, path: dir }) =>
+			withAuth(
+				async (client) => {
+					const changes: Record<string, unknown> = {};
+					if (organization) {
+						const orgs = (await client.organization.all.query()) as Array<{
+							id: string;
+							slug?: string;
+							name: string;
+						}>;
+						const match = orgs.find(
+							(o) =>
+								o.id === organization ||
+								o.slug === organization ||
+								o.name === organization,
+						);
+						if (
+							!match ||
+							(orgs.length !== 1 &&
+								match.id !== getCurrentProfile()?.organizationId)
+						) {
+							throw new AuthError(
+								`Unknown organization or different credential scope: ${organization}. Run \`tarout login\` with an API key for that organization.`,
+							);
+						}
+						changes.organization = match;
+					}
+					if (project) {
+						const projs =
+							(await client.project.all.query()) as ProjectSummary[];
+						const match = projs.find(
+							(p) =>
+								p.projectId === project ||
+								p.slug === project ||
+								p.name === project,
+						);
+						if (!match) throw new Error(`Unknown project: ${project}`);
+						await verifyProjectCredentialScope(client, match);
+						updateProfile({
+							projectId: match.projectId,
+							projectName: match.name,
+							projectSlug: match.slug,
+						});
+						rememberRequestProjectId(match.projectId);
+						changes.project = match;
+					}
+					return changes;
+				},
+				undefined,
+				{ cwd: dir ?? process.cwd() },
+			),
 	);
 
 	server.registerTool(
@@ -115,25 +143,26 @@ export function registerContextTools(server: McpServer): void {
 			const cwd = dir ?? process.cwd();
 			return withAuth(
 				async (client) => {
-				const { applicationId, name } = await resolveAppRef(client, appRef);
-				// resolveAppRef only surfaces { applicationId, name }; re-query to pick
-				// up organizationId, which ProjectConfig requires.
-				const apps = (await client.application.allByOrganization.query()) as Array<{
-					applicationId: string;
-					name: string;
-					organizationId?: string;
-				}>;
-				const full = apps.find((a) => a.applicationId === applicationId);
-				setProjectConfig(
-					{
-						applicationId,
-						name,
-						organizationId: full?.organizationId ?? "",
-						linkedAt: new Date().toISOString(),
-					},
-					cwd,
-				);
-				return { linked: true, applicationId, name, cwd };
+					const { applicationId, name } = await resolveAppRef(client, appRef);
+					// resolveAppRef only surfaces { applicationId, name }; re-query to pick
+					// up organizationId, which ProjectConfig requires.
+					const apps =
+						(await client.application.allByOrganization.query()) as Array<{
+							applicationId: string;
+							name: string;
+							organizationId?: string;
+						}>;
+					const full = apps.find((a) => a.applicationId === applicationId);
+					setProjectConfig(
+						{
+							applicationId,
+							name,
+							organizationId: full?.organizationId ?? "",
+							linkedAt: new Date().toISOString(),
+						},
+						cwd,
+					);
+					return { linked: true, applicationId, name, cwd };
 				},
 				undefined,
 				{ cwd },

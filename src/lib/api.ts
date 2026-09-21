@@ -15,6 +15,7 @@ import {
 } from "./config.js";
 import { AuthError } from "./errors.js";
 import { platformFetch } from "./password-gate.js";
+import { getInvocationContext } from "./invocation-context.js";
 
 // The API client uses 'any' type since we can't easily import types
 // from the parent platform package. This is fine for a CLI that
@@ -32,7 +33,30 @@ let client: TaroutApiClient | null = null;
  */
 let requestProjectId: string | null = null;
 
+// Environment-only MCP credentials have no profile to update. Keep their
+// selection for this server session, partitioned by directory AND credential.
+const sessionProjects = new Map<string, string>();
+function sessionProjectKey(): string {
+	return JSON.stringify([
+		getInvocationContext()?.credentialDir,
+		getApiUrl(),
+		getToken(),
+	]);
+}
+
+export function rememberRequestProjectId(projectId: string): void {
+	setRequestProjectId(projectId);
+	if (getInvocationContext() && !getCurrentProfile()) {
+		sessionProjects.set(sessionProjectKey(), projectId);
+	}
+}
+
 export function setRequestProjectId(projectId: string | null): void {
+	const invocation = getInvocationContext();
+	if (invocation) {
+		invocation.requestProjectId = projectId;
+		return;
+	}
 	requestProjectId = projectId;
 }
 
@@ -42,12 +66,19 @@ export function setRequestProjectId(projectId: string | null): void {
  * keeps its own active project).
  */
 export function getRequestProjectId(): string | null {
-	return requestProjectId ?? getCurrentProfile()?.projectId ?? null;
+	const invocation = getInvocationContext();
+	return (
+		(invocation ? invocation.requestProjectId : requestProjectId) ??
+		getCurrentProfile()?.projectId ??
+		(invocation ? sessionProjects.get(sessionProjectKey()) : undefined) ??
+		null
+	);
 }
 
-export function buildRequestHeaders(): Record<string, string> {
+export function buildRequestHeaders(
+	token: string | null = getToken(),
+): Record<string, string> {
 	const headers: Record<string, string> = {};
-	const token = getToken();
 	if (token) headers["x-api-key"] = token;
 	const projectId = getRequestProjectId();
 	if (projectId) headers["x-tarout-project"] = projectId;
@@ -68,6 +99,7 @@ export function createApiClient(): TaroutApiClient {
 	}
 
 	const apiUrl = normalizeApiUrl(getApiUrl());
+	const token = getToken();
 
 	return createTRPCProxyClient({
 		transformer: superjson,
@@ -76,7 +108,7 @@ export function createApiClient(): TaroutApiClient {
 				url: `${apiUrl}/api/trpc`,
 				// Resolved per request, not captured at client construction: the
 				// picker and `--project` run after the singleton already exists.
-				headers: () => buildRequestHeaders(),
+				headers: () => buildRequestHeaders(token),
 				fetch: platformFetch,
 			}),
 		],
@@ -93,6 +125,11 @@ export function createApiClient(): TaroutApiClient {
  * const user = await client.user.get.query();
  */
 export function getApiClient(): TaroutApiClient {
+	const invocation = getInvocationContext();
+	if (invocation) {
+		invocation.apiClient ??= createApiClient();
+		return invocation.apiClient;
+	}
 	if (!client) {
 		client = createApiClient();
 	}
@@ -106,5 +143,10 @@ export function getApiClient(): TaroutApiClient {
  * resetApiClient();
  */
 export function resetApiClient(): void {
+	const invocation = getInvocationContext();
+	if (invocation) {
+		invocation.apiClient = undefined;
+		return;
+	}
 	client = null;
 }

@@ -29,15 +29,17 @@ export function registerAppsTools(server: McpServer): void {
 		"app_list",
 		{
 			title: "List applications in the active organization",
-			description: "Wraps application.allByOrganization; returns trimmed fields.",
+			description:
+				"Wraps application.allByOrganization; returns trimmed fields.",
 			inputSchema: {},
 			annotations: { readOnlyHint: true },
 		},
 		async () =>
 			withAuth(async (client) => {
-				const all = (await client.application.allByOrganization.query()) as Array<
-					Record<string, unknown>
-				>;
+				const all =
+					(await client.application.allByOrganization.query()) as Array<
+						Record<string, unknown>
+					>;
 				return {
 					count: all.length,
 					apps: all.map((a) => ({
@@ -62,7 +64,9 @@ export function registerAppsTools(server: McpServer): void {
 		async ({ app: appRef }) =>
 			withAuth(async (client) => {
 				const { applicationId } = await resolveAppRef(client, appRef);
-				const one = (await client.application.one.query({ applicationId })) as unknown;
+				const one = (await client.application.one.query({
+					applicationId,
+				})) as unknown;
 				return { app: one };
 			}),
 	);
@@ -112,9 +116,15 @@ export function registerAppsTools(server: McpServer): void {
 			description: "Wraps application.getApplicationLogs.",
 			inputSchema: {
 				app,
-				lines: z.number().int().positive().max(1000).optional().default(200),
-				level: z.enum(["debug", "info", "warn", "error"]).optional(),
-				timeRange: z.enum(["5m", "15m", "1h", "24h"]).optional(),
+				lines: z.number().int().min(10).max(5000).optional().default(500),
+				level: z
+					.enum(["ALL", "ERROR", "WARN", "INFO", "DEBUG", "TRACE", "UNKNOWN"])
+					.optional()
+					.default("ALL"),
+				timeRange: z
+					.enum(["1h", "6h", "24h", "7d", "all"])
+					.optional()
+					.default("all"),
 			},
 			annotations: { readOnlyHint: true },
 		},
@@ -141,7 +151,9 @@ export function registerAppsTools(server: McpServer): void {
 		async ({ app: appRef }) =>
 			withAuth(async (client) => {
 				const { applicationId } = await resolveAppRef(client, appRef);
-				const result = (await client.application.restart.mutate({ applicationId })) as unknown;
+				const result = (await client.application.restart.mutate({
+					applicationId,
+				})) as unknown;
 				return { restarted: true, result };
 			}),
 	);
@@ -157,7 +169,9 @@ export function registerAppsTools(server: McpServer): void {
 		async ({ app: appRef }) =>
 			withAuth(async (client) => {
 				const { applicationId } = await resolveAppRef(client, appRef);
-				const result = (await client.application.stop.mutate({ applicationId })) as unknown;
+				const result = (await client.application.stop.mutate({
+					applicationId,
+				})) as unknown;
 				return { stopped: true, result };
 			}),
 	);
@@ -173,7 +187,9 @@ export function registerAppsTools(server: McpServer): void {
 		async ({ app: appRef }) =>
 			withAuth(async (client) => {
 				const { applicationId, name } = await resolveAppRef(client, appRef);
-				const result = (await client.application.delete.mutate({ applicationId })) as unknown;
+				const result = (await client.application.delete.mutate({
+					applicationId,
+				})) as unknown;
 				return { deleted: true, applicationId, name, result };
 			}),
 	);

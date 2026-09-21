@@ -15,34 +15,11 @@ import {
 import { confirm, input } from "../utils/prompts.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
 
-interface ProjectSummary {
-	description?: string | null;
-	isDefault?: boolean;
-	name: string;
-	projectId: string;
-	slug: string;
-}
-
-/**
- * A legacy project-scoped key has its project baked into the credential, so it
- * cannot be moved by mutating session state — switching to a different target
- * needs browser reauthorization. An account-scoped key carries no pinned
- * project (the active one travels per request), so for it switching is purely a
- * local change and is always allowed.
- */
-export async function verifyProjectCredentialScope(
-	client: any,
-	target: ProjectSummary,
-): Promise<ProjectSummary> {
-	const effective = await client.project.credentialScope.query();
-	if (effective?.accountScoped === true) return target;
-	if (effective?.projectId !== target.projectId) {
-		throw new AuthError(
-			`Cannot switch to ${target.name} with the current project-scoped credential. Run \`tarout login\` and select that project in the browser.`,
-		);
-	}
-	return target;
-}
+import {
+	type ProjectSummary,
+	verifyProjectCredentialScope,
+} from "../lib/project-context.js";
+export { verifyProjectCredentialScope } from "../lib/project-context.js";
 
 /**
  * `tarout projects ...` commands.
@@ -129,6 +106,7 @@ export function registerProjectsCommands(program: Command) {
 				}
 
 				await verifyProjectCredentialScope(client, target);
+				setRequestProjectId(target.projectId);
 
 				updateProfile({
 					projectId: target.projectId,

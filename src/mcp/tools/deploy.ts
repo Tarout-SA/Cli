@@ -194,202 +194,202 @@ export function registerDeployTools(server: McpServer): void {
 			// it has to point credential resolution at the directory being deployed
 			// itself — otherwise an MCP server started outside the project would
 			// miss its .tarout/auth.json.
-			const {
-				getCredentialResolutionDir,
-				resetProjectAuthCache,
-				setCredentialResolutionDir,
-			} = await import("../../lib/project-auth.js");
-			const { resetApiClient } = await import("../../lib/api.js");
-			const previousDir = getCredentialResolutionDir();
-			setCredentialResolutionDir(cwd);
-			resetProjectAuthCache();
-			resetApiClient();
-			try {
-				const { isLoggedIn } = await import("../../lib/config.js");
-				if (!isLoggedIn()) {
-					return errorResult({
-						error: "Not authenticated.",
-						code: "AUTH_ERROR",
-						remediation:
-							"Run `tarout login --token <api-key>` from the project directory on the machine running this MCP server, then restart it from that directory so it picks up ./.tarout/auth.json.",
-					});
-				}
-				const { getApiClient } = await import("../../lib/api.js");
-				const client = getApiClient();
-
-				// 1) Inspect the project.
-				const inspection = inspectCurrentProject(cwd);
-
-				// 2) Resolve target: linked > name > create.
-				let applicationId: string | undefined;
-				let appName: string | undefined;
-				const linked = getProjectConfig(cwd);
-				if (linked) {
-					applicationId = linked.applicationId;
-					appName = linked.name;
-				} else if (name) {
-					const apps = (await client.application.allByOrganization.query()) as Array<{
-						applicationId: string;
-						name: string;
-					}>;
-					const match = apps.find(
-						(a) => a.name === name || a.applicationId === name,
-					);
-					if (match) {
-						applicationId = match.applicationId;
-						appName = match.name;
-					}
-				}
-				if (!applicationId) {
-					if (!doCreate) {
-						return errorResult({
-							error: `No linked or matching app for ${cwd}. Pass createIfMissing=true to create one.`,
-							code: "NOT_FOUND",
-						});
-					}
-					try {
-						const { getCurrentProfile } = await import("../../lib/config.js");
-						const profile = getCurrentProfile();
-						if (!profile) {
-							return errorResult({
-								error: "No CLI profile — cannot create an app without one.",
-								code: "AUTH_ERROR",
-								remediation: "Run `tarout login` on the machine running this MCP server.",
-							});
-						}
-						// biome-ignore lint/suspicious/noExplicitAny: DeployOptions is untyped at the tool boundary.
-						const options: any = {
-							name: name ?? undefined,
-							yes: true,
-							nonInteractive: true,
-							json: true,
-						};
-						if (plan) options.plan = plan;
-						const created = (await createAppFromCurrentDirectory(
-							client,
-							profile,
-							options,
-							cwd,
-						)) as { applicationId: string; name: string; organizationId?: string };
-						applicationId = created.applicationId;
-						appName = created.name;
-					} catch (err) {
-						if (isEntitlementError(err)) {
-							// biome-ignore lint/suspicious/noExplicitAny: catalog shape narrows via optional chaining.
-							const catalog: any = await client.subscription.getCatalog
-								.query()
-								.catch(() => ({ plans: [], addons: [] }));
-							const failedKey = extractEntitlementKeyFromError(err);
-							const remedy = failedKey
-								? resolveEntitlementRemedy(failedKey, catalog, {})
-								: null;
-							return errorResult({
-								error: err instanceof Error ? err.message : String(err),
-								code: "PERMISSION_DENIED",
-								remediation:
-									"Upgrade or add an addon: call `billing_upgrade` with the remedy below.",
-								details: { remedy, entitlementKey: failedKey },
-							});
-						}
-						throw err;
-					}
-				}
-
-				// 3) Upload source archive.
-				await uploadCurrentDirectorySource(
-					client,
-					applicationId,
-					appName ?? "app",
-					cwd,
-				);
-
-				// 4) Trigger deploy.
-				const started = (await client.application.deployToCloud.mutate({
-					applicationId,
-				})) as { deploymentId: string };
-				const deploymentId = started.deploymentId;
-
-				// 5) wait=false: return the id.
-				if (!doWait) {
-					return okResult({ status: "started", deploymentId, applicationId });
-				}
-
-				// 6) Poll with progress notifications.
-				const deadline = Date.now() + timeoutS * 1000;
-				let last: Record<string, unknown> | undefined;
-				let progressToken = 0;
-				while (Date.now() < deadline) {
-					last = (await client.deployment.one.query({ deploymentId })) as Record<
-						string,
-						unknown
-					>;
-					const status = String(last.status ?? "").toLowerCase();
-					const progress = extra?.sendNotification;
-					if (typeof progress === "function") {
-						progressToken += 1;
-						void progress({
-							method: "notifications/progress",
-							params: {
-								progressToken,
-								message: `deployment ${deploymentId}: ${status}`,
-							},
-						});
-					}
-					if (status === "done" || status === "success") {
-						const logs = (await client.deployment.getDeploymentLogs
-							.query({ deploymentId, limit: 200 })
-							.catch(() => ({ logs: [] }))) as {
-							logs?: Array<Record<string, unknown>>;
-						};
-						return okResult({
-							status: "done",
-							deploymentId,
-							appUrl: (last as { url?: string }).url,
-							logsTail: (logs.logs ?? []).slice(-80),
-						});
-					}
-					if (status === "error" || status === "failed") {
-						return errorResult({
-							error: "Deployment failed.",
-							code: "DEPLOYMENT_FAILED",
-							details: { deploymentId, snapshot: last },
-						});
-					}
-					if (status === "cancelled") {
-						return errorResult({
-							error: "Deployment cancelled.",
-							code: "DEPLOYMENT_CANCELLED",
-							details: { deploymentId, snapshot: last },
-						});
-					}
-					await new Promise((r) => setTimeout(r, 3000));
-				}
-				// Running out of the wait window is not success. An okResult here
-				// meant an agent that checked only `ok` treated an unfinished — and
-				// possibly failing — deployment as shipped, which is the same class
-				// of false-positive as reporting a deploy healthy without checking
-				// that it serves. The CLI's own wait path returns DEPLOYMENT_TIMEOUT
-				// for this; match it, and keep `stillRunning` so the agent can tell
-				// "not finished yet" from "broken" and resume rather than redeploy.
-				return errorResult({
-					error: `Deployment still running after ${timeoutS}s. It has not failed — the server is still working on it.`,
-					code: "DEPLOYMENT_TIMEOUT",
-					details: {
-						deploymentId,
-						stillRunning: true,
-						status: String(last?.status ?? "unknown"),
-						phase: last?.phase ?? null,
-						hint: "Poll `deployment_status` / `deployment_logs` to follow it to completion.",
-					},
-				});
-			} catch (err) {
-				const { toEnvelope } = await import("../runtime.js");
-				return errorResult(toEnvelope(err));
-			} finally {
-				setCredentialResolutionDir(previousDir);
+			const { resetProjectAuthCache } = await import(
+				"../../lib/project-auth.js"
+			);
+			const { withInvocationContext } = await import(
+				"../../lib/invocation-context.js"
+			);
+			return withInvocationContext(cwd, async () => {
 				resetProjectAuthCache();
-				resetApiClient();
-			}
+				try {
+					const { isLoggedIn } = await import("../../lib/config.js");
+					if (!isLoggedIn()) {
+						return errorResult({
+							error: "Not authenticated.",
+							code: "AUTH_ERROR",
+							remediation:
+								"Run `tarout login --token <api-key>` from the project directory on the machine running this MCP server, then restart it from that directory so it picks up ./.tarout/auth.json.",
+						});
+					}
+					const { getApiClient } = await import("../../lib/api.js");
+					const client = getApiClient();
+
+					// 1) Inspect the project.
+					inspectCurrentProject(cwd);
+
+					// 2) Resolve target: linked > name > create.
+					let applicationId: string | undefined;
+					let appName: string | undefined;
+					const linked = getProjectConfig(cwd);
+					if (linked) {
+						applicationId = linked.applicationId;
+						appName = linked.name;
+					} else if (name) {
+						const apps =
+							(await client.application.allByOrganization.query()) as Array<{
+								applicationId: string;
+								name: string;
+							}>;
+						const match = apps.find(
+							(a) => a.name === name || a.applicationId === name,
+						);
+						if (match) {
+							applicationId = match.applicationId;
+							appName = match.name;
+						}
+					}
+					if (!applicationId) {
+						if (!doCreate) {
+							return errorResult({
+								error: `No linked or matching app for ${cwd}. Pass createIfMissing=true to create one.`,
+								code: "NOT_FOUND",
+							});
+						}
+						try {
+							const { getCurrentProfile } = await import("../../lib/config.js");
+							const profile = getCurrentProfile();
+							if (!profile) {
+								return errorResult({
+									error: "No CLI profile — cannot create an app without one.",
+									code: "AUTH_ERROR",
+									remediation:
+										"Run `tarout login` on the machine running this MCP server.",
+								});
+							}
+							// biome-ignore lint/suspicious/noExplicitAny: DeployOptions is untyped at the tool boundary.
+							const options: any = {
+								name: name ?? undefined,
+								yes: true,
+								nonInteractive: true,
+								json: true,
+							};
+							if (plan) options.plan = plan;
+							const created = (await createAppFromCurrentDirectory(
+								client,
+								profile,
+								options,
+								cwd,
+							)) as {
+								applicationId: string;
+								name: string;
+								organizationId?: string;
+							};
+							applicationId = created.applicationId;
+							appName = created.name;
+						} catch (err) {
+							if (isEntitlementError(err)) {
+								// biome-ignore lint/suspicious/noExplicitAny: catalog shape narrows via optional chaining.
+								const catalog: any = await client.subscription.getCatalog
+									.query()
+									.catch(() => ({ plans: [], addons: [] }));
+								const failedKey = extractEntitlementKeyFromError(err);
+								const remedy = failedKey
+									? resolveEntitlementRemedy(failedKey, catalog, {})
+									: null;
+								return errorResult({
+									error: err instanceof Error ? err.message : String(err),
+									code: "PERMISSION_DENIED",
+									remediation:
+										"Upgrade or add an addon: call `billing_upgrade` with the remedy below.",
+									details: { remedy, entitlementKey: failedKey },
+								});
+							}
+							throw err;
+						}
+					}
+
+					// 3) Upload source archive.
+					await uploadCurrentDirectorySource(
+						client,
+						applicationId,
+						appName ?? "app",
+						cwd,
+					);
+
+					// 4) Trigger deploy.
+					const started = (await client.application.deployToCloud.mutate({
+						applicationId,
+					})) as { deploymentId: string };
+					const deploymentId = started.deploymentId;
+
+					// 5) wait=false: return the id.
+					if (!doWait) {
+						return okResult({ status: "started", deploymentId, applicationId });
+					}
+
+					// 6) Poll with progress notifications.
+					const deadline = Date.now() + timeoutS * 1000;
+					let last: Record<string, unknown> | undefined;
+					let progressToken = 0;
+					while (Date.now() < deadline) {
+						last = (await client.deployment.one.query({
+							deploymentId,
+						})) as Record<string, unknown>;
+						const status = String(last.status ?? "").toLowerCase();
+						const progress = extra?.sendNotification;
+						if (typeof progress === "function") {
+							progressToken += 1;
+							void progress({
+								method: "notifications/progress",
+								params: {
+									progressToken,
+									message: `deployment ${deploymentId}: ${status}`,
+								},
+							});
+						}
+						if (status === "done" || status === "success") {
+							const logs = (await client.deployment.getDeploymentLogs
+								.query({ deploymentId, limit: 200 })
+								.catch(() => ({ logs: [] }))) as {
+								logs?: Array<Record<string, unknown>>;
+							};
+							return okResult({
+								status: "done",
+								deploymentId,
+								appUrl: (last as { url?: string }).url,
+								logsTail: (logs.logs ?? []).slice(-80),
+							});
+						}
+						if (status === "error" || status === "failed") {
+							return errorResult({
+								error: "Deployment failed.",
+								code: "DEPLOYMENT_FAILED",
+								details: { deploymentId, snapshot: last },
+							});
+						}
+						if (status === "cancelled") {
+							return errorResult({
+								error: "Deployment cancelled.",
+								code: "DEPLOYMENT_CANCELLED",
+								details: { deploymentId, snapshot: last },
+							});
+						}
+						await new Promise((r) => setTimeout(r, 3000));
+					}
+					// Running out of the wait window is not success. An okResult here
+					// meant an agent that checked only `ok` treated an unfinished — and
+					// possibly failing — deployment as shipped, which is the same class
+					// of false-positive as reporting a deploy healthy without checking
+					// that it serves. The CLI's own wait path returns DEPLOYMENT_TIMEOUT
+					// for this; match it, and keep `stillRunning` so the agent can tell
+					// "not finished yet" from "broken" and resume rather than redeploy.
+					return errorResult({
+						error: `Deployment still running after ${timeoutS}s. It has not failed — the server is still working on it.`,
+						code: "DEPLOYMENT_TIMEOUT",
+						details: {
+							deploymentId,
+							stillRunning: true,
+							status: String(last?.status ?? "unknown"),
+							phase: last?.phase ?? null,
+							hint: "Poll `deployment_status` / `deployment_logs` to follow it to completion.",
+						},
+					});
+				} catch (err) {
+					const { toEnvelope } = await import("../runtime.js");
+					return errorResult(toEnvelope(err));
+				}
+			});
 		},
 	);
 }

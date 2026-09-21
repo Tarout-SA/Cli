@@ -12,7 +12,8 @@ export default defineConfig({
 		// Single fork — the suite is small and this keeps it from spawning a fork
 		// per file and pegging the machine.
 		pool: "forks",
-		poolOptions: { forks: { maxForks: 1, minForks: 1 } },
+		maxWorkers: 1,
+		fileParallelism: false,
 		// Unit tests must never launch external applications. Browser-specific
 		// behavior lives under __test__/bun, where the `open` package is mocked.
 		env: { TAROUT_NO_BROWSER: "1" },

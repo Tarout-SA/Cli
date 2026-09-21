@@ -7,13 +7,13 @@
  * They return one of the two shapes below via okResult()/errorResult().
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { getApiClient, resetApiClient } from "../lib/api.js";
+import { getApiClient } from "../lib/api.js";
 import { isLoggedIn } from "../lib/config.js";
 import {
 	getCredentialResolutionDir,
 	resetProjectAuthCache,
-	setCredentialResolutionDir,
 } from "../lib/project-auth.js";
+import { withInvocationContext } from "../lib/invocation-context.js";
 import {
 	AuthError,
 	BuildFailedError,
@@ -117,7 +117,9 @@ function wrapToolHandler(
 export function guardServerHandlers(server: McpServer): void {
 	const original = server.registerTool.bind(server);
 	// biome-ignore lint/suspicious/noExplicitAny: SDK registerTool is overloaded; we wrap the trailing handler.
-	(server as unknown as { registerTool: (...a: any[]) => unknown }).registerTool =
+	(
+		server as unknown as { registerTool: (...a: any[]) => unknown }
+	).registerTool =
 		// biome-ignore lint/suspicious/noExplicitAny: SDK registerTool is overloaded; we wrap the trailing handler.
 		(...regArgs: any[]) => {
 			const name = typeof regArgs[0] === "string" ? regArgs[0] : "unknown";
@@ -132,7 +134,9 @@ export function guardServerHandlers(server: McpServer): void {
 
 export function okResult(data: unknown): ToolText {
 	const text =
-		typeof data === "string" ? JSON.stringify(data) : JSON.stringify(data, null, 2);
+		typeof data === "string"
+			? JSON.stringify(data)
+			: JSON.stringify(data, null, 2);
 	const result: ToolText = {
 		content: [{ type: "text", text }],
 	};
@@ -247,40 +251,30 @@ export async function withAuth(
 	procedurePath?: string,
 	options: { cwd?: string } = {},
 ): Promise<ToolText> {
-	const previousDir = options.cwd ? getCredentialResolutionDir() : null;
-	if (options.cwd) {
-		setCredentialResolutionDir(options.cwd);
-		resetProjectAuthCache();
-		// The client caches the token it was built with, so it has to be rebuilt
-		// against whatever credential this directory resolves to.
-		resetApiClient();
-	}
-	try {
-		if (!isLoggedIn()) {
-			return errorResult({
-				error: "Not authenticated.",
-				code: "AUTH_ERROR",
-				remediation: AUTH_REMEDIATION,
-			});
-		}
-		try {
-			const client = getApiClient();
-			const result = await fn(client);
-			return okResult(result);
-		} catch (err) {
-			const env = toEnvelope(err, procedurePath);
-			if (env.code === "FORBIDDEN") {
-				await enrichForbiddenEnvelope(env, err);
-			}
-			return errorResult(env);
-		}
-	} finally {
-		if (options.cwd) {
-			setCredentialResolutionDir(previousDir);
+	return withInvocationContext(
+		options.cwd ?? getCredentialResolutionDir(),
+		async () => {
 			resetProjectAuthCache();
-			resetApiClient();
-		}
-	}
+			if (!isLoggedIn()) {
+				return errorResult({
+					error: "Not authenticated.",
+					code: "AUTH_ERROR",
+					remediation: AUTH_REMEDIATION,
+				});
+			}
+			try {
+				const client = getApiClient();
+				const result = await fn(client);
+				return okResult(result);
+			} catch (err) {
+				const env = toEnvelope(err, procedurePath);
+				if (env.code === "FORBIDDEN") {
+					await enrichForbiddenEnvelope(env, err);
+				}
+				return errorResult(env);
+			}
+		},
+	);
 }
 
 /**
