@@ -1,7 +1,7 @@
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import type { Command } from "commander";
 import { getApiClient } from "../lib/api.js";
-import { getCurrentProfile, isLoggedIn } from "../lib/config.js";
+import { isLoggedIn } from "../lib/config.js";
 import {
 	AuthError,
 	CliError,
@@ -29,6 +29,7 @@ import {
 	pickDefaultResourceTier,
 	type ResourcePlan,
 } from "./deploy.js";
+import { requireProfile } from "../lib/auth-profile.js";
 
 const STORAGE_TIER_LABEL: Record<ResourcePlan, string> = {
 	FREE: "FREE (1 GB)",
@@ -176,8 +177,7 @@ export function registerStorageCommands(program: Command) {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
-				const profile = getCurrentProfile();
-				if (!profile) throw new AuthError();
+				const profile = await requireProfile();
 
 				// Default to private: omitting both flags must not change the
 				// behaviour anyone already scripted against.
@@ -1083,7 +1083,7 @@ export function registerStorageCommands(program: Command) {
 					throw new CliError("The platform did not return a download URL.");
 				}
 				const _getSpinner = startSpinner("Downloading...");
-				const res = await fetch(downloadUrl, { method: "GET" });
+				const res = await fetchRetryingRateLimit(downloadUrl);
 				if (!res.ok) {
 					failSpinner();
 					const detail = await res.text().catch(() => "");
@@ -1376,4 +1376,35 @@ function formatBytes(bytes: number): string {
 	const units = ["B", "KB", "MB", "GB", "TB"];
 	const i = Math.floor(Math.log(bytes) / Math.log(1024));
 	return `${(bytes / 1024 ** i).toFixed(1)} ${units[i]}`;
+}
+
+/**
+ * GET that waits out an HTTP 429 (honouring Retry-After, capped) instead of
+ * failing the transfer. The download proxy rate-limits per user, so a script
+ * pulling a folder file by file hits it in bursts; the next minute is fine.
+ */
+export async function fetchRetryingRateLimit(
+	url: string,
+	{
+		attempts = 4,
+		maxWaitMs = 60_000,
+		sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms)),
+		fetchImpl = fetch,
+	}: {
+		attempts?: number;
+		maxWaitMs?: number;
+		sleep?: (ms: number) => Promise<void>;
+		fetchImpl?: typeof fetch;
+	} = {},
+): Promise<Response> {
+	for (let attempt = 1; ; attempt++) {
+		const res = await fetchImpl(url, { method: "GET" });
+		if (res.status !== 429 || attempt >= attempts) return res;
+		const retryAfter = Number(res.headers.get("retry-after"));
+		const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+			? retryAfter * 1000
+			: 2 ** attempt * 1000;
+		await res.body?.cancel().catch(() => {});
+		await sleep(Math.min(waitMs, maxWaitMs));
+	}
 }

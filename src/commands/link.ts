@@ -8,7 +8,6 @@ import { basename } from "node:path";
 import type { Command } from "commander";
 import { getApiClient } from "../lib/api.js";
 import {
-	getCurrentProfile,
 	getProjectConfig,
 	isLoggedIn,
 	isProjectLinked,
@@ -33,6 +32,7 @@ import {
 import { confirm, select } from "../utils/prompts.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
 import { formatAppUrl } from "../utils/url.js";
+import { requireProfile } from "../lib/auth-profile.js";
 
 export function registerLinkCommands(program: Command) {
 	// Link command - connect local directory to a Tarout app
@@ -48,8 +48,7 @@ export function registerLinkCommands(program: Command) {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
-				const profile = getCurrentProfile();
-				if (!profile) throw new AuthError();
+				const profile = await requireProfile();
 
 				const client = getApiClient();
 				const cwd = process.cwd();

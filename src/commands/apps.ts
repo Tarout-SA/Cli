@@ -2,7 +2,7 @@ import type { Command } from "commander";
 import open from "open";
 import { getApiClient } from "../lib/api.js";
 import { toAppNameSlug } from "../lib/app-name.js";
-import { getCurrentProfile, isLoggedIn } from "../lib/config.js";
+import { isLoggedIn } from "../lib/config.js";
 import {
 	AuthError,
 	findSimilar,
@@ -26,6 +26,7 @@ import {
 import { confirm, input, select } from "../utils/prompts.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
 import { formatAppUrl } from "../utils/url.js";
+import { requireProfile } from "../lib/auth-profile.js";
 
 interface AppSummary {
 	appName?: string;
@@ -152,8 +153,7 @@ export function registerAppsCommands(program: Command) {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
-				const profile = getCurrentProfile();
-				if (!profile) throw new AuthError();
+				const profile = await requireProfile();
 
 				// Interactive mode if no name provided
 				let appName = name;

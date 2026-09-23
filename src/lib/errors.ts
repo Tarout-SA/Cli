@@ -26,6 +26,7 @@ export type DeploymentErrorCategory =
 	| "permission"
 	| "network"
 	| "database_tls"
+	| "app_start"
 	| "unknown";
 
 /**
@@ -453,6 +454,33 @@ interface ErrorPattern {
 
 /** Predefined error patterns for deployment analysis */
 const ERROR_PATTERNS: ErrorPattern[] = [
+	// The app built but did not come up. Listed first and matched on every
+	// health/rollback line a start crash prints, so it outscores the build
+	// rules: a stray "Dockerfile" in the platform's own warning used to label
+	// a crash on boot "Invalid Dockerfile syntax" (production 2026-09-23).
+	{
+		patterns: [
+			/failed to start/i,
+			/container is unhealthy/i,
+			/is not healthy/i,
+			/Healthcheck status: "unhealthy"/i,
+			/rolling back to the old container/i,
+			/EADDRINUSE/i,
+		],
+		category: "app_start",
+		type: "runtime_error",
+		possibleCauses: [
+			"Your app exits or crashes while starting (see the container logs above)",
+			"A required environment variable is missing",
+			"The app does not listen on the expected port",
+		],
+		suggestedFixes: [
+			"Read the container logs printed above the error",
+			"Run the start command locally with the same environment",
+			"Check env vars with `tarout env list <app>`",
+			"Make sure the app listens on process.env.PORT",
+		],
+	},
 	{
 		patterns: [
 			/npm ERR!/i,

@@ -1,7 +1,13 @@
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import superjson from "superjson";
-import type { Profile } from "./config.js";
 import { normalizeApiUrl } from "./api-url.js";
+import {
+	getApiUrl,
+	getCurrentProfile,
+	getToken,
+	type Profile,
+} from "./config.js";
+import { AuthError } from "./errors.js";
 import { platformFetch } from "./password-gate.js";
 
 type ApiClient = any;
@@ -98,4 +104,27 @@ export function isCredentialError(error: unknown): boolean {
 			message,
 		)
 	);
+}
+
+let envProfile: Promise<Profile> | null = null;
+
+/**
+ * The profile a command acts as. A stored profile (project or machine-wide)
+ * wins. A bare `TAROUT_TOKEN`, the documented CI path, has no stored profile,
+ * so resolve one from the API once per process, the same way `up` and
+ * `deploy` do. Requiring a stored profile made `apps create`, `db create`,
+ * `storage create` and `link` report "Not logged in" to a valid CI token.
+ */
+export async function requireProfile(): Promise<Profile> {
+	const stored = getCurrentProfile();
+	if (stored) return stored;
+	const token = getToken();
+	if (!token) throw new AuthError();
+	envProfile ??= resolveProfileFromCredential({ apiUrl: getApiUrl(), token });
+	return envProfile;
+}
+
+/** Test seam: forget the profile resolved from `TAROUT_TOKEN`. */
+export function resetEnvProfileForTests(): void {
+	envProfile = null;
 }

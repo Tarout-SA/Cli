@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import type { Command } from "commander";
 import { getApiClient } from "../lib/api.js";
 import { toAppNameSlug } from "../lib/app-name.js";
-import { getCurrentProfile, isLoggedIn } from "../lib/config.js";
+import { isLoggedIn } from "../lib/config.js";
 import {
 	AuthError,
 	CliError,
@@ -42,6 +42,7 @@ import {
 	type ResourcePlan,
 	resolveDatabasePlanOrExit,
 } from "./deploy.js";
+import { requireProfile } from "../lib/auth-profile.js";
 
 type DatabaseType = "postgres" | "mysql";
 
@@ -281,8 +282,7 @@ export function registerDbCommands(program: Command) {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
-				const profile = getCurrentProfile();
-				if (!profile) throw new AuthError();
+				const profile = await requireProfile();
 
 				// Interactive mode if no name provided
 				let dbName = name || options.name;

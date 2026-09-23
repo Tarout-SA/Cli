@@ -111,11 +111,29 @@ export function registerServersCommands(program: Command) {
 		.option("-s, --size <size>", "Server size (e.g., n2-standard-2)")
 		.option("-o, --os <os>", "OS type: ubuntu-22, ubuntu-24, debian-12")
 		.option("--provider <provider>", "Cloud provider: gcp, runpod")
+		.option(
+			"-k, --key <key...>",
+			"Saved SSH key name(s) or id(s) to install (default: your default keys)",
+		)
+		.option(
+			"--generate-key",
+			"Generate a new key pair and print its private key once, instead of using saved keys",
+		)
 		.action(async (name, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
 				const client = getApiClient();
+
+				// Resolve SSH access BEFORE anything is created: an unknown --key
+				// must fail without leaving a half-made server behind.
+				const savedKeys = options.generateKey
+					? []
+					: ((await client.sshKey.list.query()) as SavedSshKey[]);
+				const keyChoice = pickServerSshKeys(savedKeys, {
+					keys: options.key,
+					generateKey: Boolean(options.generateKey),
+				});
 
 				// Interactive mode
 				let serverName = name;
@@ -187,6 +205,7 @@ export function registerServersCommands(program: Command) {
 					log(`Type: ${serverType}`);
 					log(`Size: ${serverSize}`);
 					log(`OS: ${osType}`);
+					log(`SSH: ${describeSshKeyChoice(keyChoice)}`);
 					log("");
 
 					const confirmed = await confirm("Create this server?", false, {
@@ -209,6 +228,9 @@ export function registerServersCommands(program: Command) {
 					serverSize,
 					osType,
 					providerId: options.provider,
+					...(keyChoice.keyIds.length > 0
+						? { selectedKeyIds: keyChoice.keyIds }
+						: {}),
 				});
 
 				succeedSpinner("Server creation started!");
@@ -231,6 +253,7 @@ export function registerServersCommands(program: Command) {
 					`Name: ${serverName}`,
 					`Type: ${serverType} / ${serverSize}`,
 					`OS: ${osType}`,
+					`SSH: ${describeSshKeyChoice(keyChoice)}`,
 					`Status: ${colors.info("provisioning")}`,
 				]);
 
@@ -2740,4 +2763,70 @@ function normalizeDedicatedSize(value: string): "SMALL" | "MEDIUM" | "LARGE" {
 	throw new CliError(
 		`Invalid dedicated server size "${value}". Must be one of: SMALL, MEDIUM, LARGE.`,
 	);
+}
+
+export interface SavedSshKey {
+	id: string;
+	name: string;
+	isDefault?: boolean;
+}
+
+export interface SshKeyChoice {
+	keyIds: string[];
+	names: string[];
+	source: "explicit" | "default" | "generated";
+}
+
+/**
+ * Which saved keys a new server gets. `tarout keys default` promises "the
+ * default for new servers", but create sent no key ids, so the platform
+ * generated a fresh pair and the user's own key could not log in (production
+ * 2026-09-23). Explicit --key wins, then the default keys, and only with
+ * neither (or --generate-key) does the platform generate a pair.
+ */
+export function pickServerSshKeys(
+	saved: SavedSshKey[],
+	options: { keys?: string[]; generateKey?: boolean },
+): SshKeyChoice {
+	if (options.generateKey) return { keyIds: [], names: [], source: "generated" };
+	if (options.keys?.length) {
+		const picked = options.keys.map((ref) => {
+			const match =
+				saved.find((key) => key.id === ref) ??
+				saved.find((key) => key.name === ref);
+			if (!match) {
+				throw new NotFoundError(
+					"SSH key",
+					ref,
+					findSimilar(
+						ref,
+						saved.map((key) => key.name),
+					),
+				);
+			}
+			return match;
+		});
+		return {
+			keyIds: [...new Set(picked.map((key) => key.id))],
+			names: picked.map((key) => key.name),
+			source: "explicit",
+		};
+	}
+	const defaults = saved.filter((key) => key.isDefault);
+	if (defaults.length > 0) {
+		return {
+			keyIds: defaults.map((key) => key.id),
+			names: defaults.map((key) => key.name),
+			source: "default",
+		};
+	}
+	return { keyIds: [], names: [], source: "generated" };
+}
+
+function describeSshKeyChoice(choice: SshKeyChoice): string {
+	if (choice.source === "generated") {
+		return "new key pair (private key shown once)";
+	}
+	const label = choice.names.join(", ");
+	return choice.source === "default" ? `${label} (default key)` : label;
 }

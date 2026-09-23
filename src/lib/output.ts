@@ -219,6 +219,27 @@ export function outputError(
 ): void {
 	if (globalOptions.json) {
 		outputJson(jsonError(code, message, undefined, details));
+		return;
+	}
+	// Human mode used to print nothing here, so a caller that exits right
+	// after (every NEEDS_UPGRADE gate, a domain verify timeout, a failed build)
+	// left `tarout up --yes` ending on "Creating application..." with exit 5
+	// and no reason at all (production 2026-09-23).
+	console.error(colors.error(`Error: ${message}`));
+	const extra = (details ?? {}) as {
+		options?: Array<{ label?: string; command?: string }>;
+		nextCommand?: string;
+	};
+	const options = Array.isArray(extra.options)
+		? extra.options.filter((option) => option?.label && option?.command)
+		: [];
+	if (options.length > 0) {
+		console.error("");
+		for (const option of options) {
+			console.error(`  ${option.label}: ${colors.cyan(String(option.command))}`);
+		}
+	} else if (typeof extra.nextCommand === "string" && extra.nextCommand) {
+		console.error(`  Next: ${colors.cyan(extra.nextCommand)}`);
 	}
 }
 

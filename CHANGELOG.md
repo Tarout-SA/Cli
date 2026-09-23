@@ -17,6 +17,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider to confirm the machine is gone, then removes the record.
 - **`tarout servers info` and `servers list` show the server's IP.** They read a
   field the API does not return and printed "Not assigned" for running servers.
+- **A `TAROUT_TOKEN` alone works for every command.** `apps create`, `db create`,
+  `storage create`, `link` and the `orgs` commands demanded a stored login and
+  answered a valid CI token with "Not logged in". They now resolve the account
+  from the token, the way `up` and `deploy` already did.
+- **`tarout servers create` installs your default SSH key.** `tarout keys
+  default` promised "the default for new servers", but create sent no key, so
+  the platform generated a fresh pair and your own key could not log in. Create
+  now installs your default key(s); `--key <name>` picks specific saved keys and
+  `--generate-key` keeps the old one-time generated pair.
+- **`tarout storage get` waits out a rate limit.** A burst of downloads hit HTTP
+  429 and failed; it now honours `Retry-After` and retries.
+- **Errors print a reason outside `--json` mode.** A plan-limit refusal (and a
+  few other structured errors) only ever printed as JSON, so `tarout up --yes`
+  on a full Free plan ended on "Creating application..." with exit 5 and no
+  explanation. The reason and every option to continue now print to stderr.
+- **A crash on boot is diagnosed as one.** An app that exits while starting was
+  analysed as "Invalid Dockerfile syntax" because of a platform warning line; it
+  now reads as a start failure and points at the container logs, env vars and
+  port.
 
 ## [1.10.1]
 

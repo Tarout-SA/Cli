@@ -817,12 +817,10 @@ export function registerUpCommand(program: Command): void {
 					err.message.startsWith("Invalid --source")
 				) {
 					outputError("INVALID_ARGUMENTS", err.message);
-					if (!isJsonMode()) log(colors.error(err.message));
 					exit(ExitCode.INVALID_ARGUMENTS);
 				}
 				if (err instanceof Error && err.message.startsWith("--repo must be")) {
 					outputError("INVALID_ARGUMENTS", err.message);
-					if (!isJsonMode()) log(colors.error(err.message));
 					exit(ExitCode.INVALID_ARGUMENTS);
 				}
 				handleError(err);

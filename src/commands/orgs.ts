@@ -19,6 +19,7 @@ import {
 } from "../lib/output.js";
 import { confirm, input } from "../utils/prompts.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
+import { requireProfile } from "../lib/auth-profile.js";
 
 export function registerOrgsCommands(program: Command) {
 	const orgs = program.command("orgs").description("Manage organizations");
@@ -89,8 +90,7 @@ export function registerOrgsCommands(program: Command) {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
-				const profile = getCurrentProfile();
-				if (!profile) throw new AuthError();
+				const profile = await requireProfile();
 
 				let name = options.name;
 				if (!name) {
@@ -132,8 +132,7 @@ export function registerOrgsCommands(program: Command) {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
-				const profile = getCurrentProfile();
-				if (!profile) throw new AuthError();
+				const profile = await requireProfile();
 
 				if (!shouldSkipConfirmation()) {
 					log("");
@@ -196,8 +195,7 @@ export function registerOrgsCommands(program: Command) {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
-				const profile = getCurrentProfile();
-				if (!profile) throw new AuthError();
+				const profile = await requireProfile();
 
 				if (!shouldSkipConfirmation()) {
 					log("");
