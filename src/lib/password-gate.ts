@@ -76,7 +76,11 @@ export async function platformFetch(
 		headers.set("cookie", existingCookie);
 	}
 
-	const response = await fetch(input, { redirect: "error", ...init, headers });
+	const method = (
+		init?.method ?? (input instanceof Request ? input.method : "GET")
+	).toUpperCase();
+	const send = method === "GET" ? fetchRetryingNetwork : fetch;
+	const response = await send(input, { redirect: "error", ...init, headers });
 	if (response.status !== 401) return response;
 
 	const body = await response
@@ -88,4 +92,45 @@ export async function platformFetch(
 	const cookie = await unlockPasswordGate(url.origin);
 	headers.set("cookie", cookie);
 	return fetch(input, { redirect: "error", ...init, headers });
+}
+
+const NETWORK_FAILURE_CODES = new Set([
+	"ECONNRESET",
+	"ECONNREFUSED",
+	"ETIMEDOUT",
+	"ENOTFOUND",
+	"EAI_AGAIN",
+	"EPIPE",
+	"UND_ERR_SOCKET",
+	"UND_ERR_CONNECT_TIMEOUT",
+]);
+
+function isNetworkFailure(error: unknown): boolean {
+	if (!(error instanceof Error)) return false;
+	const code = (error as { cause?: { code?: string } }).cause?.code;
+	return error.message === "fetch failed" || (!!code && NETWORK_FAILURE_CODES.has(code));
+}
+
+/**
+ * GET with a short retry on transport failures. Queries are idempotent, and a
+ * single dropped connection used to abort a whole deploy right after sign-in
+ * ("Error: fetch failed", 3 of 100 concurrent `tarout up` runs on 2026-09-23).
+ * Only GET: a mutation must never be sent twice.
+ */
+export async function fetchRetryingNetwork(
+	input: FetchInput,
+	init?: RequestInit,
+	{
+		attempts = 3,
+		sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms)),
+	}: { attempts?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<Response> {
+	for (let attempt = 1; ; attempt++) {
+		try {
+			return await fetch(input, init);
+		} catch (error) {
+			if (attempt >= attempts || !isNetworkFailure(error)) throw error;
+			await sleep(500 * 3 ** (attempt - 1));
+		}
+	}
 }

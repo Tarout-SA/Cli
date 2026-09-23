@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.3]
+
+### Fixed
+
+- **A dropped connection no longer aborts a deploy.** Read requests (every
+  query) retry a transport failure twice with a short backoff; one bad socket
+  right after sign-in used to end `tarout up` with "fetch failed". Writes are
+  never retried, so nothing is sent twice.
+
 ## [1.10.2]
 
 ### Fixed
