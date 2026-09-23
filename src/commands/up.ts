@@ -53,7 +53,8 @@ import {
 	inferSuggestedPlan,
 	inspectCurrentProject,
 	isEntitlementError,
-	isGitSourced,
+	type AppGitSourceDetail,
+	shouldRefuseUploadOverGitSource,
 	type ProjectInspection,
 	promptEntitlementRemedy,
 	streamDeploymentWithLogs,
@@ -637,7 +638,23 @@ export function registerUpCommand(program: Command): void {
 					// person who noticed was whoever pushed a fix that never shipped.
 					// An explicit `--source upload` still wins; this only refuses to
 					// infer the destructive option from a default.
-					if (!explicitSource && isGitSourced(app.sourceType)) {
+					// Only a REUSED app can already deploy on push; fetch its real
+					// source (the app list carries no repository fields) before
+					// refusing. A freshly created app always reads sourceType
+					// "github" with no repository and must upload normally.
+					const sourceDetail =
+						!explicitSource && reused
+							? ((await client.application.one.query({
+									applicationId: app.applicationId,
+								})) as AppGitSourceDetail)
+							: {};
+					if (
+						shouldRefuseUploadOverGitSource({
+							explicitSource,
+							reused,
+							app: sourceDetail,
+						})
+					) {
 						throw new InvalidArgumentError(
 							`${app.name} deploys from its connected ${app.sourceType} repository, and \`tarout up\` would replace that with an upload of this folder, stopping push-to-deploy.\n` +
 								`  • Redeploy it as-is:        tarout deploy ${app.name} --wait\n` +

@@ -4397,6 +4397,84 @@ export function isGitSourced(sourceType: string | null | undefined): boolean {
 	);
 }
 
+/** Repository fields an application carries once a git source is really connected. */
+export interface AppGitSourceDetail {
+	sourceType?: string | null;
+	repository?: string | null;
+	customGitUrl?: string | null;
+	gitlabRepository?: string | null;
+	gitlabProjectId?: number | string | null;
+	bitbucketRepository?: string | null;
+	giteaRepository?: string | null;
+}
+
+function present(value: unknown): boolean {
+	return value !== null && value !== undefined && String(value).trim() !== "";
+}
+
+/**
+ * True only when `app` has a real repository behind its git sourceType. The
+ * platform creates every app with `sourceType: github` before any source is
+ * chosen, so the type alone says nothing about push-to-deploy.
+ */
+export function hasConnectedGitRepository(app: AppGitSourceDetail): boolean {
+	if (!isGitSourced(app.sourceType)) return false;
+	return [
+		app.repository,
+		app.customGitUrl,
+		app.gitlabRepository,
+		app.gitlabProjectId,
+		app.bitbucketRepository,
+		app.giteaRepository,
+	].some(present);
+}
+
+/**
+ * Whether `tarout up` must refuse to replace an app's source with an upload.
+ * Only an app the caller REUSED can have push-to-deploy worth protecting; an
+ * app created in this same run has no source yet, and refusing it broke every
+ * first `tarout up` (2026-09-23). An explicit `--source upload` always wins.
+ */
+export function shouldRefuseUploadOverGitSource(input: {
+	explicitSource: boolean;
+	reused: boolean;
+	app: AppGitSourceDetail;
+}): boolean {
+	if (input.explicitSource || !input.reused) return false;
+	return hasConnectedGitRepository(input.app);
+}
+
+const TRANSIENT_NETWORK_CODES = new Set([
+	"ECONNRESET",
+	"ECONNREFUSED",
+	"ETIMEDOUT",
+	"EPIPE",
+	"ENOTFOUND",
+	"EAI_AGAIN",
+	"UND_ERR_SOCKET",
+	"UND_ERR_CONNECT_TIMEOUT",
+	"UND_ERR_HEADERS_TIMEOUT",
+]);
+
+/**
+ * A failure of the transport rather than an answer from the API: fetch
+ * rejected, the socket dropped, or an edge/proxy returned an HTML error page
+ * where JSON was expected. Worth retrying while polling a deploy the server
+ * keeps running regardless.
+ */
+export function isTransientNetworkError(error: unknown): boolean {
+	if (!(error instanceof Error)) return false;
+	const cause = (error as { cause?: { code?: string } }).cause;
+	if (cause?.code && TRANSIENT_NETWORK_CODES.has(cause.code)) return true;
+	const message = error.message ?? "";
+	return (
+		message === "fetch failed" ||
+		/Unexpected token '<'/.test(message) ||
+		/\b(502|503|504)\b/.test(message) ||
+		/socket hang up|network error|other side closed/i.test(message)
+	);
+}
+
 /**
  * Bind this project's GitHub remote to `app` so pushes auto-deploy, instead of
  * uploading a source zip.
@@ -5792,15 +5870,34 @@ export async function streamDeploymentWithLogs(
 	// false timeout (the server keeps running it regardless of this cap).
 	const maxWaitMs = 1_200_000; // 20 minutes
 	const pollIntervalMs = 3000;
+	const MAX_CONSECUTIVE_POLL_FAILURES = 40; // x 3s interval = ~2 minutes
+	let consecutivePollFailures = 0;
 
 	try {
 		while (Date.now() - startTime < maxWaitMs) {
 			await sleep(pollIntervalMs);
 
-			// Get updated deployment status
-			const updatedDeployment = await client.deployment.one.query({
-				deploymentId,
-			});
+			// Get updated deployment status. The server keeps running the deploy
+			// no matter what happens to this client, so a network blip while
+			// polling must not end the wait: retry transport failures for up to
+			// ~2 minutes before giving up (seen at 100 concurrent deploys).
+			let updatedDeployment: Awaited<
+				ReturnType<typeof client.deployment.one.query>
+			>;
+			try {
+				updatedDeployment = await client.deployment.one.query({
+					deploymentId,
+				});
+				consecutivePollFailures = 0;
+			} catch (error) {
+				if (
+					isTransientNetworkError(error) &&
+					++consecutivePollFailures <= MAX_CONSECUTIVE_POLL_FAILURES
+				) {
+					continue;
+				}
+				throw error;
+			}
 			lastStatus = updatedDeployment.status;
 
 			// Emit a forward-progress signal on phase change or every HEARTBEAT_MS,

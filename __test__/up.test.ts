@@ -151,3 +151,59 @@ describe("isGitSourced — the guard that keeps `up` from breaking push-to-deplo
 		expect(isGitSourced("something-new")).toBe(false);
 	});
 });
+
+describe("shouldRefuseUploadOverGitSource — first `tarout up` must never be refused", () => {
+	it("never refuses an app created in this same run, even though it reads sourceType github", async () => {
+		const { shouldRefuseUploadOverGitSource } = await import("../src/commands/deploy");
+		expect(
+			shouldRefuseUploadOverGitSource({
+				explicitSource: false,
+				reused: false,
+				app: { sourceType: "github", repository: null },
+			}),
+		).toBe(false);
+	});
+
+	it("does not refuse a reused app whose github sourceType has no repository behind it", async () => {
+		const { shouldRefuseUploadOverGitSource } = await import("../src/commands/deploy");
+		expect(
+			shouldRefuseUploadOverGitSource({ explicitSource: false, reused: true, app: { sourceType: "github" } }),
+		).toBe(false);
+	});
+
+	it("refuses a reused app that really deploys from a repository", async () => {
+		const { shouldRefuseUploadOverGitSource } = await import("../src/commands/deploy");
+		for (const app of [
+			{ sourceType: "github", repository: "site" },
+			{ sourceType: "gitlab", gitlabProjectId: 42 },
+			{ sourceType: "git", customGitUrl: "https://git.example.com/x.git" },
+		]) {
+			expect(shouldRefuseUploadOverGitSource({ explicitSource: false, reused: true, app })).toBe(true);
+		}
+	});
+
+	it("lets an explicit --source upload replace a connected repository", async () => {
+		const { shouldRefuseUploadOverGitSource } = await import("../src/commands/deploy");
+		expect(
+			shouldRefuseUploadOverGitSource({
+				explicitSource: true,
+				reused: true,
+				app: { sourceType: "github", repository: "site" },
+			}),
+		).toBe(false);
+	});
+});
+
+describe("isTransientNetworkError — deploy polling survives network blips", () => {
+	it("treats transport failures as transient and API answers as final", async () => {
+		const { isTransientNetworkError } = await import("../src/commands/deploy");
+		expect(isTransientNetworkError(new TypeError("fetch failed"))).toBe(true);
+		expect(isTransientNetworkError(new SyntaxError(`Unexpected token '<', "<html>" is not valid JSON`))).toBe(true);
+		const reset = new TypeError("fetch failed");
+		(reset as { cause?: unknown }).cause = { code: "ECONNRESET" };
+		expect(isTransientNetworkError(reset)).toBe(true);
+		expect(isTransientNetworkError(new Error("UNAUTHORIZED"))).toBe(false);
+		expect(isTransientNetworkError(new Error("NOT_FOUND"))).toBe(false);
+		expect(isTransientNetworkError("fetch failed")).toBe(false);
+	});
+});

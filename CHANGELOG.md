@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A first `tarout up` no longer refuses the app it just created.** Every new
+  app reads `sourceType: github` before any source is chosen, so the guard that
+  protects push-to-deploy refused a brand-new app ("deploys from its connected
+  github repository") and every new user's first deploy failed without
+  `--source upload`. The guard now applies only to an app you reuse, and only
+  when a repository is actually connected.
+- **Deploy polling survives network blips.** A dropped connection or an HTML
+  error page while waiting on a deploy used to end `tarout up` / `deploy --wait`
+  with "fetch failed" although the server kept deploying. Transport failures
+  are now retried for about two minutes.
 - Isolate MCP credentials, API clients, and project selection for concurrent tool calls.
 - Persist MCP project switches and respect organization- and project-bound API keys.
 - Accept environment-only authentication in `build` and `dev`.
