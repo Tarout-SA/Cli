@@ -25,6 +25,15 @@ describe("analyzeDeploymentError", () => {
 		expect(analysis.possibleCauses.join(" ")).not.toMatch(/Dockerfile/);
 	});
 
+	it("trusts the platform's verdict over a noisy build log", () => {
+		const noisyLog = [
+			...Array.from({ length: 8 }, (_, i) => `npm run build: Build failed step ${i} exit code 1`),
+			"New container is unhealthy.",
+		];
+		const analysis = analyzeDeploymentError(noisyLog, "Your app failed to start. - New container is unhealthy.");
+		expect(analysis.category).toBe("app_start");
+	});
+
 	it("still recognises a genuine Dockerfile build failure", () => {
 		const analysis = analyzeDeploymentError(["COPY failed: file not found in build context", "failed to build: Dockerfile:7"]);
 		expect(analysis.category).toBe("docker_build");

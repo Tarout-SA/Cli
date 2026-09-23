@@ -450,6 +450,12 @@ interface ErrorPattern {
 	possibleCauses: string[];
 	/** Suggested fixes */
 	suggestedFixes: string[];
+	/**
+	 * When the deployment's own error message matches, this pattern wins
+	 * outright: the server already classified the failure, and counting lines
+	 * in a noisy build log can outvote it.
+	 */
+	decisiveOnErrorMessage?: boolean;
 }
 
 /** Predefined error patterns for deployment analysis */
@@ -469,6 +475,7 @@ const ERROR_PATTERNS: ErrorPattern[] = [
 		],
 		category: "app_start",
 		type: "runtime_error",
+		decisiveOnErrorMessage: true,
 		possibleCauses: [
 			"Your app exits or crashes while starting (see the container logs above)",
 			"A required environment variable is missing",
@@ -758,6 +765,29 @@ export function analyzeDeploymentError(
 
 	// Include error message in analysis if provided
 	const allLines = errorMessage ? [...logs, errorMessage] : logs;
+
+	// The platform's verdict beats line counting: "Your app failed to start"
+	// was still analysed as a build-script error because the raw log carries
+	// more build chatter than health-check lines (production 2026-09-23).
+	const decisive = errorMessage
+		? ERROR_PATTERNS.find(
+				(pattern) =>
+					pattern.decisiveOnErrorMessage &&
+					pattern.patterns.some((regex) => regex.test(errorMessage)),
+			)
+		: undefined;
+	if (decisive) {
+		const matched = allLines.filter((line) =>
+			decisive.patterns.some((regex) => regex.test(line)),
+		);
+		return {
+			type: decisive.type,
+			category: decisive.category,
+			possibleCauses: decisive.possibleCauses,
+			suggestedFixes: decisive.suggestedFixes,
+			relevantLogLines: [...new Set(matched)].slice(0, 10),
+		};
+	}
 
 	// Find the pattern with the most matches
 	for (const pattern of ERROR_PATTERNS) {
