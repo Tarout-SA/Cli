@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.2]
+
+### Fixed
+
+- **`tarout servers delete` deletes a running server.** It used to fail with a
+  generic "Something went wrong" because the platform only removes a server
+  record once the machine is terminated. It now terminates first, waits for the
+  provider to confirm the machine is gone, then removes the record.
+- **`tarout servers info` and `servers list` show the server's IP.** They read a
+  field the API does not return and printed "Not assigned" for running servers.
+
 ## [1.10.1]
 
 ### Fixed

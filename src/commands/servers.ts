@@ -87,7 +87,7 @@ export function registerServersCommands(program: Command) {
 						s.serverType || colors.dim("-"),
 						s.serverSize || s.size || colors.dim("-"),
 						getStatusBadge(s.status || "unknown"),
-						s.publicIp || s.ip || colors.dim("-"),
+						s.publicIp || s.ipAddress || s.ip || colors.dim("-"),
 						formatDate(s.createdAt),
 					]),
 				);
@@ -314,7 +314,7 @@ export function registerServersCommands(program: Command) {
 				log("");
 				log(colors.bold("Network"));
 				log(
-					`  Public IP: ${colors.cyan(details.publicIp || colors.dim("Not assigned"))}`,
+					`  Public IP: ${colors.cyan(details.publicIp || details.ipAddress || colors.dim("Not assigned"))}`,
 				);
 				log(`  Private IP: ${details.privateIp || colors.dim("-")}`);
 				log("");
@@ -512,10 +512,47 @@ export function registerServersCommands(program: Command) {
 					}
 				}
 
+				const serverId = server.id || server.serverId;
+
+				// The platform only removes a server record once the machine itself
+				// is confirmed gone. "delete" promises the whole thing, so terminate
+				// first and wait for the provider delete instead of failing with
+				// "must be terminated first" (seen 2026-09-23).
+				if (server.status !== "terminated") {
+					if (server.status !== "terminating") {
+						startSpinner("Terminating server...");
+						await client.virtualMachine.terminate.mutate({ id: serverId } as any);
+						succeedSpinner("Termination started");
+					}
+					startSpinner("Waiting for the machine to be deleted...");
+					const deadline = Date.now() + 10 * 60 * 1000;
+					for (;;) {
+						const current: any = await client.virtualMachine.get
+							.query({ id: serverId } as any)
+							.catch(() => null);
+						const status = current?.status;
+						if (status === "terminated") break;
+						if (status === "failed") {
+							failSpinner();
+							throw new Error(
+								"Termination could not be confirmed. Run `tarout servers delete` again, or contact support if it keeps failing.",
+							);
+						}
+						if (Date.now() > deadline) {
+							failSpinner();
+							throw new Error(
+								"The server is still terminating after 10 minutes. It will finish in the background; run `tarout servers delete` again to remove the record.",
+							);
+						}
+						await new Promise((resolve) => setTimeout(resolve, 5000));
+					}
+					succeedSpinner("Machine deleted");
+				}
+
 				const _deleteSpinner = startSpinner("Deleting server...");
 
 				await client.virtualMachine.delete.mutate({
-					id: server.id || server.serverId,
+					id: serverId,
 				});
 
 				succeedSpinner("Server deleted!");
