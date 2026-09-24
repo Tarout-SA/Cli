@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.4]
+
+### Fixed
+
+- **`tarout domains link <app> <domain>` works again.** It sent every domain
+  through a call the platform now reserves for subdomains of domains registered
+  through Tarout, so it failed for every hostname, including the documented
+  `domains add-external` -> `domains verify` -> `domains link` path. It now
+  links a hostname you already added, creates a subdomain under your registered
+  domain, and otherwise tells you exactly which commands to run first.
+- **`tarout domains unlink` detaches instead of deleting.** It deleted the
+  domain's route, which the platform refuses for external domains ("Remove it
+  from the Domains page"). It now unlinks the domain from its app and keeps it,
+  so `domains link` can attach it again; `tarout domains delete` removes a
+  domain for good. JSON output is now `{ "unlinked": true, "domainId": ... }`.
+
 ## [1.10.3]
 
 ### Fixed

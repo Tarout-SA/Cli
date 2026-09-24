@@ -374,7 +374,7 @@ export function registerDomainsCommands(program: Command) {
 				]);
 
 				// Render the routing contract the server computed (exact relative
-				// record names included). Older platforms don't send routingRecords —
+				// record names included). Older platforms don't send routingRecords:
 				// fall back to deriving A records for a proxied apex, else a CNAME.
 				const apexIps: string[] = Array.isArray(result.apexIps)
 					? result.apexIps
@@ -407,7 +407,7 @@ export function registerDomainsCommands(program: Command) {
 					}
 					if (result.apexViaCname) {
 						warn(
-							"Set the root CNAME to Proxied (orange cloud) in Cloudflare — a DNS-only root record will not route.",
+							"Set the root CNAME to Proxied (orange cloud) in Cloudflare: a DNS-only root record will not route.",
 						);
 						log("");
 					}
@@ -528,7 +528,7 @@ export function registerDomainsCommands(program: Command) {
 						}
 						if (domain.isApex && pendingApexIps.length === 0) {
 							warn(
-								"Root CNAME records only work on Cloudflare-hosted DNS and must be set to Proxied (orange cloud) — a DNS-only root record will not route.",
+								"Root CNAME records only work on Cloudflare-hosted DNS and must be set to Proxied (orange cloud); a DNS-only root record will not route.",
 							);
 							log("");
 						}
@@ -603,15 +603,40 @@ export function registerDomainsCommands(program: Command) {
 
 				updateSpinner("Linking domain...");
 
-				const domain = await client.domain.create.mutate({
-					host: domainName,
-					applicationId: app.applicationId,
-				});
+				// The platform has one onboarding flow per kind of hostname, and
+				// `domain.create` only serves hosts under a Tarout-registered domain.
+				// This used to call it for everything, so after that rule landed
+				// every `domains link` failed, including the documented
+				// add-external -> verify -> link path (found 2026-09-24).
+				const host = domainName.toLowerCase();
+				const plan = resolveDomainLinkPlan(
+					host,
+					await client.domain.all.query({ includeUnlinked: true }),
+					await client.domainRegistrar.getAll.query(),
+				);
+
+				let domain: any;
+				if (plan.kind === "existing") {
+					await client.domain.linkToApplication.mutate({
+						domainId: plan.domainId,
+						applicationId: app.applicationId,
+					});
+					domain = { domainId: plan.domainId, host, isVerified: plan.isVerified };
+				} else if (plan.kind === "registered-subdomain") {
+					domain = await client.domain.createWithRegisteredDomain.mutate({
+						registeredDomainId: plan.registeredDomainId,
+						subdomain: plan.subdomain,
+						applicationId: app.applicationId,
+					} as any);
+				} else {
+					failSpinner();
+					throw new InvalidArgumentError(plan.message);
+				}
 
 				succeedSpinner("Domain linked!");
 
 				if (isJsonMode()) {
-					outputData(domain);
+					outputData({ ...domain, host, applicationId: app.applicationId, linked: true });
 					return;
 				}
 
@@ -681,14 +706,19 @@ export function registerDomainsCommands(program: Command) {
 
 				const _deleteSpinner = startSpinner("Unlinking domain...");
 
-				await client.domain.delete.mutate({
+				// Detach from the app and keep the domain, so `domains link` can
+				// attach it again. This used to delete the route row, which the
+				// platform refuses for external domains ("Remove it from the Domains
+				// page"): the domain would be left without routing. Removing a domain
+				// for good is `tarout domains delete`.
+				await client.domain.unlinkFromApplication.mutate({
 					domainId: domain.domainId,
 				});
 
 				succeedSpinner("Domain unlinked!");
 
 				if (isJsonMode()) {
-					outputData({ deleted: true, domainId: domain.domainId });
+					outputData({ unlinked: true, domainId: domain.domainId });
 				} else {
 					quietOutput(domain.domainId);
 				}
@@ -2567,6 +2597,49 @@ export function registerDomainsCommands(program: Command) {
 }
 
 // ── Helper functions ──
+
+export type DomainLinkPlan =
+	| { kind: "existing"; domainId: string; isVerified: boolean }
+	| { kind: "registered-subdomain"; registeredDomainId: string; subdomain: string }
+	| { kind: "unavailable"; message: string };
+
+/**
+ * How `domains link` attaches `host`: an app-domain row that already exists
+ * (added with `domains add-external`, or created earlier) is linked as is; a
+ * single-label subdomain of a domain registered through Tarout is created
+ * under it; anything else has to be added first.
+ */
+export function resolveDomainLinkPlan(
+	host: string,
+	appDomains: any[],
+	registeredDomains: any[],
+): DomainLinkPlan {
+	const existing = appDomains.find((d: any) => d.host?.toLowerCase() === host);
+	if (existing) {
+		return {
+			kind: "existing",
+			domainId: existing.domainId,
+			isVerified: Boolean(existing.isVerified),
+		};
+	}
+	const parent = registeredDomains
+		.filter((r: any) => typeof r.domainName === "string" && host.endsWith(`.${r.domainName.toLowerCase()}`))
+		.sort((a: any, b: any) => b.domainName.length - a.domainName.length)[0];
+	if (parent) {
+		const subdomain = host.slice(0, -(parent.domainName.length + 1));
+		if (/^(?!-)[a-z0-9-]{1,63}(?<!-)$/.test(subdomain)) {
+			return {
+				kind: "registered-subdomain",
+				registeredDomainId: parent.domainId ?? parent.id,
+				subdomain,
+			};
+		}
+	}
+	return {
+		kind: "unavailable",
+		message: `${host} has not been added yet. Run \`tarout domains add-external ${host}\`, create the record from \`tarout domains instructions ${host}\`, run \`tarout domains verify ${host}\`, then link it again.`,
+	};
+}
 
 function findApp(
 	apps: Array<{ applicationId: string; name: string; appName?: string }>,
