@@ -3,6 +3,7 @@ import open from "open";
 import { getApiClient } from "../lib/api.js";
 import { toAppNameSlug } from "../lib/app-name.js";
 import { isLoggedIn } from "../lib/config.js";
+import { findRepoAccess } from "../lib/github-source.js";
 import {
 	AuthError,
 	findSimilar,
@@ -586,50 +587,42 @@ export function registerAppsCommands(program: Command) {
 					return;
 				}
 
-				// Get github providers if no provider-id given
+				// Without --provider-id, use the connection that can actually read
+				// the repo. The bind clears the app's current source and does not
+				// check access itself, so a guess here leaves an app whose every
+				// build fails at clone.
 				let githubId = options.providerId;
+				let bindOwner = owner;
+				let bindRepository = repository;
 				if (!githubId) {
-					const providers = await client.github.githubProviders.query();
-					const providerList = providers?.providers || providers || [];
-					if (Array.isArray(providerList) && providerList.length > 0) {
-						if (providerList.length === 1) {
-							githubId = providerList[0].githubId || providerList[0].id;
-						} else {
-							githubId = await select(
-								"Select GitHub connection:",
-								providerList.map((p: any) => ({
-									name: p.name || p.login || p.githubId,
-									value: p.githubId || p.id,
-								})),
-								{
-									field: "github_provider_id",
-									flag: "--provider-id",
-								},
-							);
-						}
+					const { access, providers } = await findRepoAccess(client, {
+						owner,
+						repository,
+					});
+					if (!access) {
+						failSpinner();
+						throw new NotFoundError(
+							"GitHub repository access",
+							`${owner}/${repository}`,
+							[
+								providers === 0
+									? "Connect GitHub to Tarout first: tarout providers github connect --wait"
+									: `No GitHub connection in this organization can read ${owner}/${repository}. Grant access: tarout providers github connect --wait`,
+							],
+						);
 					}
-				}
-
-				// A blank githubId is silently accepted by the server
-				// (assertGitProviderOwnedByCaller early-returns on a falsy id), which
-				// would write sourceType:"github" with no installation to match — the
-				// app LOOKS connected but the push webhook can never fire. Fail loudly
-				// instead, matching `tarout up --source github`.
-				if (!githubId) {
-					failSpinner();
-					throw new NotFoundError("GitHub connection", "none", [
-						"Install the Tarout GitHub App: visit your Tarout dashboard → Settings → Git Providers.",
-						"Or run: tarout providers github connect",
-					]);
+					githubId = access.githubId;
+					bindOwner = access.owner;
+					bindRepository = access.repository;
 				}
 
 				const _configSpinner = startSpinner("Connecting GitHub repository...");
 
 				await client.application.saveGithubProvider.mutate({
 					applicationId: app.applicationId,
-					repository,
+					repository: bindRepository,
 					branch: branch || "main",
-					owner,
+					owner: bindOwner,
 					buildPath: options.buildPath || "/",
 					githubId,
 					watchPaths: [],

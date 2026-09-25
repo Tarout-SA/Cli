@@ -214,7 +214,7 @@ This reuses the image the failed deployment already produced and re-runs only
 the deploy step. It refuses deployments that failed *during* the build, because
 there is no image to reuse — fix the code and run `tarout deploy` instead.
 
-`tarout deploy` inspects the current folder for database, file storage, and Git signals before it asks questions. If Git exists, local upload remains available, so users without GitHub can still deploy. If the user chooses GitHub, run `tarout providers github connect` to open Tarout's Git provider setup page, then connect the repository to the app and deploy with `--source configured`.
+`tarout deploy` inspects the current folder for database, file storage, and Git signals before it asks questions. A folder with a github.com remote deploys from that repo, so every push redeploys: the CLI binds it when the organization's GitHub connection can read the repo. When it cannot, a terminal run offers to connect GitHub and waits for it; an agent or script run uploads the folder and its result names the fix, `tarout providers github connect --wait --app <app>`, which opens Tarout's GitHub setup page, waits until GitHub can read the repo, and binds the app. A folder with no GitHub remote is uploaded, so users without GitHub can still deploy.
 
 ### Logs
 

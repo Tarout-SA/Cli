@@ -164,36 +164,48 @@ or pass \`--new-app\`, so it doesn't stop to ask which app) and read the JSON re
 \`success\` / \`data.url\`. This hands-free rule is about a deploy the user **asked
 for** — it does not override the "say deploy" check below.
 
-**Git connection happens by itself — don't wire it by hand.** If this project has a
-GitHub remote and the org has the Tarout GitHub App installed, \`up\` and \`deploy\`
-bind the repo for you so updates ship on push; otherwise they upload this folder.
-Use \`tarout apps git github <id|name> --repo <owner/repo> --branch <branch>\` only to
-re-point an app that already exists, or when the org has several GitHub
-installations and the automatic bind declines rather than guess. If no App is
-installed, the CLI says so once and uploads — relay the one-time browser setup
-(\`tarout providers github connect\`) as a follow-up and keep deploying meanwhile.
-**You cannot install the App for them** — that step is browser-only.
+**A project on GitHub deploys from GitHub.** If this folder has a GitHub remote, the
+app must build from that repo so every push deploys. An uploaded folder only changes
+when someone reruns the CLI, so it goes stale the moment work is pushed instead of
+deployed. \`up\` and \`deploy\` bind the repo for you when the org's GitHub connection
+can read it. When it cannot, the deploy still uploads (the user still gets their
+deploy) and the final result says so: \`data.source.pushToDeploy\` is \`false\` and
+\`data.source.next\` holds the fix. **Run that command in the same turn**, don't just
+mention it: \`tarout providers github connect --wait --app <id>\` opens Tarout's GitHub
+setup in the browser, waits until GitHub can read the repo, and binds the app. The
+GitHub step is browser-only, so tell the user to finish it in that tab, exactly as they
+finish login or payment. Never pass \`--source upload\` unless the user asked for an
+upload: it switches the automatic bind off. Use
+\`tarout apps git github <id|name> --repo <owner/repo> --branch <branch>\` only to point
+an app at a different repo or branch.
 
 **\`up\` will not overwrite a Git connection by accident.** Run it on an app that
 deploys from a connected repo and it stops with an error naming
-\`tarout deploy <id|name>\` instead — uploading over a Git source would silently end
+\`tarout deploy <id|name>\` instead. Uploading over a Git source would silently end
 push-to-deploy, so it is no longer something a default can do. Pass
-\`--source upload\` when you genuinely mean to replace the source. Both \`up\` and
-\`deploy\` also bind this project's GitHub remote themselves when the org has the
-GitHub App installed, so prefer letting them do it over connecting by hand.
+\`--source upload\` when you genuinely mean to replace the source.
+
+**A GitHub build ships what is pushed, not this folder.** For such an app, pushing IS
+deploying: a request to deploy covers pushing the commits it needs, unless your
+instructions require separate approval to push, in which case ask for that one
+approval. When local commits or edits are not on the branch the app builds, the deploy
+result lists them under \`data.warnings\`; relay those, and never report an unpushed
+change as live.
 
 **After you change code, check whether it ships by itself.** Tarout does not watch the
 filesystem. Read the app's source once with \`tarout apps info <id|name> --json\`
 (field \`sourceType\`):
 
-- \`github\` — **pushes auto-deploy.** Commit and push to the app's connected branch
+- \`github\`: **pushes auto-deploy.** Commit and push to the app's connected branch
   and Tarout redeploys on its own; say that instead of asking for a deploy. Note the
   build clones the remote, so uncommitted or unpushed work is NOT deployed.
-- \`gitlab\` / \`bitbucket\` / \`gitea\` / \`git\` — connected, but Tarout registers **no
+- \`gitlab\` / \`bitbucket\` / \`gitea\` / \`git\`: connected, but Tarout registers **no
   push webhook** for these providers. The build pulls the latest pushed commit, so
   after pushing you still have to run \`tarout deploy <id|name> --wait\`.
-- \`drop\` (this folder was uploaded) or no source — no push-to-deploy at all;
-  \`tarout deploy <id|name> --wait\` re-zips and re-uploads this folder.
+- \`drop\` (this folder was uploaded) or no source: no push-to-deploy at all;
+  \`tarout deploy <id|name> --wait\` re-zips and re-uploads this folder. If the folder
+  has a GitHub remote, that is a gap to close, not a state to keep: run
+  \`tarout providers github connect --wait --app <id|name>\`.
 
 **Only when the app has no push-to-deploy** (\`drop\`/unconfigured, or a
 gitlab/bitbucket/gitea/custom-git source) and the user did **not** ask you to deploy:

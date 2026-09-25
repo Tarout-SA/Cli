@@ -16,6 +16,7 @@ import { ensureAgentSetup } from "../lib/agent-setup.js";
 import { getApiClient } from "../lib/api.js";
 import { getProjectConfig, setProjectConfig } from "../lib/config.js";
 import { unsafeDeployDirectory } from "../lib/deploy-safety.js";
+import { findRepoAccess } from "../lib/github-source.js";
 import {
 	applyManifestResources,
 	generateSecretValue,
@@ -54,6 +55,8 @@ import {
 	inspectCurrentProject,
 	isEntitlementError,
 	type AppGitSourceDetail,
+	emitDeployWarnings,
+	gitDeployWarnings,
 	shouldRefuseUploadOverGitSource,
 	type ProjectInspection,
 	promptEntitlementRemedy,
@@ -584,6 +587,7 @@ export function registerUpCommand(program: Command): void {
 					}
 				}
 
+				let buildsFromGit = source === "github";
 				if (source === "github") {
 					if (!options.repo) {
 						throw new Error(
@@ -598,30 +602,30 @@ export function registerUpCommand(program: Command): void {
 						repository,
 						branch: options.branch ?? "main",
 					});
-					const providersResponse: unknown =
-						await client.github.githubProviders.query();
-					type Provider = { githubId?: string; id?: string };
-					const providerList: Provider[] = Array.isArray(providersResponse)
-						? (providersResponse as Provider[])
-						: Array.isArray(
-									(providersResponse as { providers?: Provider[] })?.providers,
-								)
-							? (providersResponse as { providers: Provider[] }).providers
-							: [];
-					const githubId =
-						providerList[0]?.githubId ?? providerList[0]?.id ?? "";
-					if (!githubId) {
-						throw new NotFoundError("GitHub connection", "none", [
-							"Install the Tarout GitHub App: visit your Tarout dashboard → Settings → Git Providers.",
-						]);
+					// Prove the connection can read the repo before binding: the bind
+					// clears the app's uploaded source and does not check access itself.
+					const { access, providers } = await findRepoAccess(client, {
+						owner,
+						repository,
+					});
+					if (!access) {
+						throw new NotFoundError(
+							"GitHub repository access",
+							`${owner}/${repository}`,
+							[
+								providers === 0
+									? "Connect GitHub to Tarout first: tarout providers github connect --wait"
+									: `Your GitHub connection cannot read ${owner}/${repository}. Grant it access: tarout providers github connect --wait`,
+							],
+						);
 					}
 					await client.application.saveGithubProvider.mutate({
 						applicationId: app.applicationId,
-						repository,
-						owner,
+						repository: access.repository,
+						owner: access.owner,
 						branch: options.branch ?? "main",
 						buildPath: "/",
-						githubId,
+						githubId: access.githubId,
 						watchPaths: [],
 						enableSubmodules: false,
 					});
@@ -670,7 +674,9 @@ export function registerUpCommand(program: Command): void {
 					// through to the upload below.
 					const connectedGit = explicitSource
 						? false
-						: await tryConnectGitHubSource(client, app, inspection);
+						: await tryConnectGitHubSource(client, app, inspection, {
+								offerInstall: true,
+							});
 
 					if (!connectedGit) {
 						emitEvent({ event: "upload_started" });
@@ -681,7 +687,14 @@ export function registerUpCommand(program: Command): void {
 						);
 						emitEvent({ event: "upload_done" });
 					}
+					buildsFromGit = connectedGit;
 				}
+
+				// A Git-sourced build clones the pushed branch, not this folder.
+				const warnings = buildsFromGit
+					? await gitDeployWarnings(client, app.applicationId, inspection)
+					: [];
+				emitDeployWarnings(warnings);
 
 				// Apply the manifest's declared build/health/release settings before
 				// triggering, so this deploy runs under them rather than the next
@@ -767,6 +780,7 @@ export function registerUpCommand(program: Command): void {
 					result.deploymentId,
 					app.name,
 					app.applicationId,
+					{ localRemote: inspection.git.githubRepo, warnings },
 				);
 			} catch (err) {
 				// Entitlement gates hit during resource provisioning

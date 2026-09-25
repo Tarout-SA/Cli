@@ -19,6 +19,7 @@ import { getApiClient, resetApiClient } from "../lib/api.js";
 import { toAppNameSlug } from "../lib/app-name.js";
 import { selectAuthStrategy } from "../lib/auth-strategy.js";
 import {
+	browserLaunchSuppressed,
 	canLaunchBrowser,
 	openInBrowser,
 	paymentBrowserOpener,
@@ -50,6 +51,18 @@ import {
 } from "../lib/credential-store.js";
 import { resolveCredentialPlacement } from "../lib/project-auth.js";
 import { unsafeDeployDirectory } from "../lib/deploy-safety.js";
+import {
+	type DeploySourceSummary,
+	describeDeploySource,
+	findRepoAccess,
+	type GitHubRepoRef,
+	gitHubSetupUrl,
+	readLocalGitState,
+	type RepoAccess,
+	type RepoAccessLookup,
+	unshippedWorkWarnings,
+	waitForRepoAccess,
+} from "../lib/github-source.js";
 import {
 	type Catalog,
 	type EntitlementRemedy,
@@ -2451,9 +2464,9 @@ async function resolveSourcePreference(
 	const label = inspection.git.provider
 		? `${inspection.git.provider} Git repository detected. Deployment source:`
 		: "Git repository detected. Deployment source:";
-	return select<SourcePreference>(label, [
+	const choices: Array<{ name: string; value: SourcePreference }> = [
 		{
-			name: "Use current folder upload for this deploy (default, no GitHub required)",
+			name: "Upload this folder for this deploy (pushes will not deploy)",
 			value: "upload",
 		},
 		{
@@ -2464,7 +2477,18 @@ async function resolveSourcePreference(
 			name: "Open Tarout Git provider setup in the browser, then rerun deploy",
 			value: "connect",
 		},
-	]);
+	];
+	// The first choice is the default. For a GitHub repo that is the repo
+	// itself: picking upload here is an explicit choice, which also switches
+	// off the automatic bind, so it must never be the one Enter selects.
+	const github = inspection.git.githubRepo;
+	if (github) {
+		choices.unshift({
+			name: `Deploy from GitHub (${github.owner}/${github.repository}), every push redeploys (recommended)`,
+			value: "auto",
+		});
+	}
+	return select<SourcePreference>(label, choices);
 }
 
 function normalizeSourcePreference(
@@ -2835,7 +2859,9 @@ async function deployResolvedTarget(
 			// upload`, so an explicit choice always wins.
 			const connectedGit =
 				shouldUploadSource && sourcePreference !== "upload"
-					? await tryConnectGitHubSource(client, app, inspection)
+					? await tryConnectGitHubSource(client, app, inspection, {
+							offerInstall: true,
+						})
 					: false;
 
 			if (shouldUploadSource && !connectedGit) {
@@ -2845,6 +2871,13 @@ async function deployResolvedTarget(
 					app.name,
 				);
 			}
+
+			// A Git-sourced build clones the pushed branch, not this folder.
+			const warnings =
+				connectedGit || !shouldUploadSource
+					? await gitDeployWarnings(client, app.applicationId, inspection)
+					: [];
+			emitDeployWarnings(warnings);
 
 			const _deploySpinner = startSpinner(`Deploying ${app.name}...`);
 
@@ -2858,6 +2891,7 @@ async function deployResolvedTarget(
 					result.deploymentId,
 					app.name,
 					app.applicationId,
+					{ localRemote: inspection.git.githubRepo, warnings },
 				);
 				return;
 			}
@@ -2868,6 +2902,7 @@ async function deployResolvedTarget(
 				outputData({
 					deploymentId: result.deploymentId,
 					status: "deploying",
+					...(warnings.length > 0 ? { warnings } : {}),
 				});
 			} else {
 				quietOutput(result.deploymentId);
@@ -4475,106 +4510,250 @@ export function isTransientNetworkError(error: unknown): boolean {
 	);
 }
 
+/** How long a terminal deploy waits for the GitHub connection to finish. */
+const GITHUB_CONNECT_WAIT_MS = 10 * 60 * 1000;
+
+export interface GitHubConnectOptions {
+	/**
+	 * When no GitHub connection can read the repo, offer to open Tarout's GitHub
+	 * setup page and wait for it, then bind. Only a person at a terminal is
+	 * asked: agents and scripts are never blocked on a browser flow mid-deploy
+	 * (their tool call would time out under the build), so their deploy uploads
+	 * and the final result names the connect command instead.
+	 */
+	offerInstall?: boolean;
+	/** Test seams. */
+	interactive?: boolean;
+	wait?: typeof waitForRepoAccess;
+}
+
+function canAskToConnectGitHub(): boolean {
+	return (
+		!isJsonMode() &&
+		!isNonInteractiveMode() &&
+		!shouldSkipConfirmation() &&
+		Boolean(process.stdin.isTTY) &&
+		canLaunchBrowser() &&
+		!browserLaunchSuppressed()
+	);
+}
+
 /**
  * Bind this project's GitHub remote to `app` so pushes auto-deploy, instead of
  * uploading a source zip.
  *
- * Returns true only when the app is now Git-sourced. Every miss — no remote, a
- * non-GitHub remote, a detached HEAD, no GitHub App installed on the org, or a
- * failed mutation — returns false so the caller falls back to the upload path.
- * This is an opportunistic upgrade, never a reason to fail a deploy.
- *
- * Deliberately silent about *why* it declined in the common case: a user with no
- * GitHub App gets one actionable hint, not a lecture on every deploy.
+ * Returns true only when the app is now Git-sourced. Every miss (no remote, a
+ * non-GitHub remote, a detached HEAD, no GitHub connection that can read the
+ * repo, or a failed mutation) returns false so the caller falls back to the
+ * upload path, and says so: an app that quietly stays on upload keeps serving
+ * whatever was last uploaded while every push goes nowhere.
  */
 export async function tryConnectGitHubSource(
+	// biome-ignore lint/suspicious/noExplicitAny: untyped tRPC proxy client.
 	client: any,
 	app: AppSummary,
 	inspection: ProjectInspection,
+	opts: GitHubConnectOptions = {},
 ): Promise<boolean> {
 	const repo = inspection.git.githubRepo;
 	const branch = inspection.git.branch;
 	if (!repo || !branch) return false;
 
-	let githubId: string | undefined;
+	let lookup: RepoAccessLookup;
 	try {
-		const response = await client.github.githubProviders.query();
-		const list = Array.isArray(response)
-			? response
-			: Array.isArray(response?.providers)
-				? response.providers
-				: [];
-		// Exactly one connection is the overwhelmingly common case. With several,
-		// picking arbitrarily could bind the wrong installation, so we decline and
-		// let the user choose explicitly via `tarout apps git github`.
-		if (list.length !== 1) {
-			if (list.length === 0) emitGitHubConnectHint(repo, branch);
-			return false;
-		}
-		githubId = list[0]?.githubId ?? list[0]?.id ?? undefined;
+		lookup = await findRepoAccess(client, repo);
 	} catch {
 		return false;
 	}
 
-	if (!githubId) return false;
+	let access = lookup.access;
+	if (
+		!access &&
+		opts.offerInstall &&
+		(opts.interactive ?? canAskToConnectGitHub())
+	) {
+		access = await askToConnectGitHub(
+			client,
+			repo,
+			lookup.providers,
+			opts.wait ?? waitForRepoAccess,
+		);
+	}
+	if (!access) {
+		emitGitHubConnectHint(repo, branch, app, lookup.providers);
+		return false;
+	}
 
-	const _spinner = startSpinner(
-		`Connecting ${repo.owner}/${repo.repository} (${branch})...`,
-	);
+	return bindGitHubRepo(client, app, access, branch);
+}
+
+/**
+ * Point `app` at a GitHub repository the org can read. Callers prove access
+ * first (see findRepoAccess): the mutation itself does not check, and it
+ * clears the app's uploaded source.
+ */
+export async function bindGitHubRepo(
+	// biome-ignore lint/suspicious/noExplicitAny: untyped tRPC proxy client.
+	client: any,
+	app: AppSummary,
+	access: RepoAccess,
+	branch: string,
+): Promise<boolean> {
+	const repository = `${access.owner}/${access.repository}`;
+	const _spinner = startSpinner(`Connecting ${repository} (${branch})...`);
 	try {
 		await client.application.saveGithubProvider.mutate({
 			applicationId: app.applicationId,
-			repository: repo.repository,
-			owner: repo.owner,
+			repository: access.repository,
+			owner: access.owner,
 			branch,
 			buildPath: "/",
-			githubId,
+			githubId: access.githubId,
 			watchPaths: [],
 			enableSubmodules: false,
 		});
 	} catch {
-		// The repo may not be covered by the installation, or the branch may not
-		// exist on the remote yet. Fall back to an upload rather than failing.
-		failSpinner("Couldn't connect the GitHub repository — uploading instead.");
+		failSpinner("Couldn't connect the GitHub repository, uploading instead.");
 		return false;
 	}
 
-	succeedSpinner(`Connected ${repo.owner}/${repo.repository} (${branch}).`);
+	succeedSpinner(`Connected ${repository} (${branch}).`);
 	if (isJsonMode()) {
 		outputJsonLine({
 			type: "event",
 			event: "github_connected",
-			repository: `${repo.owner}/${repo.repository}`,
+			repository,
 			branch,
 		});
 	} else {
 		log(
-			`Pushes to ${colors.cyan(branch)} will now redeploy automatically. Uncommitted work is not deployed.`,
+			`Pushes to ${colors.cyan(branch)} now redeploy automatically. Work that is not pushed is not deployed.`,
 		);
 	}
 	return true;
 }
 
-/** One-time nudge when a GitHub remote exists but no GitHub App is installed. */
+async function askToConnectGitHub(
+	// biome-ignore lint/suspicious/noExplicitAny: untyped tRPC proxy client.
+	client: any,
+	repo: { owner: string; repository: string },
+	providers: number,
+	wait: typeof waitForRepoAccess,
+): Promise<RepoAccess | undefined> {
+	const name = `${repo.owner}/${repo.repository}`;
+	log("");
+	log(
+		providers === 0
+			? `This folder tracks ${colors.cyan(name)}, but your organization has not connected GitHub, so pushes would not deploy.`
+			: `This folder tracks ${colors.cyan(name)}, but your GitHub connection does not include that repository, so pushes would not deploy.`,
+	);
+	const yes = await confirm("Connect GitHub now so every push deploys?", true);
+	if (!yes) return undefined;
+
+	const access = await wait(client, repo, {
+		timeoutMs: GITHUB_CONNECT_WAIT_MS,
+		onWaiting: () => {
+			startSpinner(
+				providers === 0
+					? "Waiting for GitHub. Finish connecting it in the browser..."
+					: `Waiting for GitHub. Grant access to ${name} in the browser...`,
+			);
+		},
+	});
+	if (access) {
+		succeedSpinner(`GitHub can read ${name}.`);
+	} else {
+		failSpinner("GitHub was not connected in time, uploading this folder instead.");
+	}
+	return access;
+}
+
+/** Said on every miss: the deploy is about to upload a folder that has a GitHub home. */
 function emitGitHubConnectHint(
 	repo: { owner: string; repository: string },
 	branch: string,
+	app: AppSummary,
+	providers: number,
 ): void {
+	const name = `${repo.owner}/${repo.repository}`;
+	const next = `tarout providers github connect --wait --app ${app.applicationId}`;
+	const reason = providers === 0 ? "no_github_connection" : "repo_not_accessible";
 	if (isJsonMode()) {
 		outputJsonLine({
 			type: "event",
 			event: "github_connect_available",
-			repository: `${repo.owner}/${repo.repository}`,
+			repository: name,
 			branch,
-			next: "Install the Tarout GitHub App (tarout providers github connect) to get push-to-deploy.",
+			reason,
+			url: gitHubSetupUrl(),
+			next,
 		});
 		return;
 	}
 	log("");
 	log(
-		`${colors.dim("Tip:")} this folder tracks ${colors.cyan(`${repo.owner}/${repo.repository}`)}. Connect it to redeploy on every push:`,
+		colors.warn(
+			reason === "no_github_connection"
+				? `${name} is not connected to Tarout, so this deploy uploads this folder and pushes will not deploy.`
+				: `Your GitHub connection cannot read ${name}, so this deploy uploads this folder and pushes will not deploy.`,
+		),
 	);
-	log(`  ${colors.dim("tarout providers github connect")}`);
+	log(`  Put it on push-to-deploy: ${colors.dim(next)}`);
+	log("");
+}
+
+/**
+ * What a deploy that builds from GitHub will leave out of this folder. Only
+ * computed when the app builds the repository this folder tracks; for any
+ * other app the local working copy says nothing about the build.
+ */
+export async function gitDeployWarnings(
+	// biome-ignore lint/suspicious/noExplicitAny: untyped tRPC proxy client.
+	client: any,
+	applicationId: string,
+	inspection: ProjectInspection,
+	cwd: string = process.cwd(),
+): Promise<string[]> {
+	const local = inspection.git.githubRepo;
+	if (!local) return [];
+	let detail: {
+		sourceType?: string | null;
+		owner?: string | null;
+		repository?: string | null;
+		branch?: string | null;
+	};
+	try {
+		detail = await client.application.one.query({ applicationId });
+	} catch {
+		return [];
+	}
+	if (
+		detail?.sourceType !== "github" ||
+		!detail.owner ||
+		!detail.repository ||
+		!detail.branch
+	) {
+		return [];
+	}
+	const builds = `${detail.owner}/${detail.repository}`.toLowerCase();
+	if (builds !== `${local.owner}/${local.repository}`.toLowerCase()) return [];
+	const state = await readLocalGitState(
+		cwd,
+		detail.branch,
+		inspection.git.branch,
+		local,
+	);
+	return unshippedWorkWarnings(state, detail.branch);
+}
+
+export function emitDeployWarnings(warnings: string[]): void {
+	if (warnings.length === 0) return;
+	if (isJsonMode()) {
+		outputJsonLine({ type: "event", event: "unshipped_changes", warnings });
+		return;
+	}
+	log("");
+	for (const warning of warnings) log(colors.warn(`! ${warning}`));
 	log("");
 }
 
@@ -5822,11 +6001,27 @@ function deploymentPhaseLabel(
 	}
 }
 
+function formatDeploySource(source: DeploySourceSummary): string {
+	if (source.pushToDeploy && source.repository) {
+		return `GitHub ${colors.cyan(source.repository)} (${source.branch ?? "default branch"}), pushes deploy automatically`;
+	}
+	if (source.type === "drop") return "uploaded folder (pushes do not deploy)";
+	return source.type ?? "unknown";
+}
+
+export interface DeployResultContext {
+	/** The GitHub repo this folder tracks, to say when the app is not using it. */
+	localRemote?: GitHubRepoRef;
+	/** Things this deploy leaves out, repeated in the final result. */
+	warnings?: string[];
+}
+
 export async function streamDeploymentWithLogs(
 	client: any,
 	deploymentId: string,
 	appName: string,
 	applicationId: string,
+	context: DeployResultContext = {},
 ): Promise<void> {
 	// Get deployment details to get logPath
 	stopSpinner();
@@ -5994,6 +6189,11 @@ export async function streamDeploymentWithLogs(
 				const deployUrl =
 					formatAppUrl(finalApp.appSubdomain) ??
 					formatAppUrl(finalApp.domain?.[0]?.host);
+				const source = describeDeploySource(
+					{ ...finalApp, applicationId },
+					context.localRemote,
+				);
+				const warnings = context.warnings ?? [];
 
 				if (isJsonMode()) {
 					outputData({
@@ -6001,6 +6201,8 @@ export async function streamDeploymentWithLogs(
 						status: "done",
 						url: deployUrl,
 						duration,
+						source,
+						...(warnings.length > 0 ? { warnings } : {}),
 						logs: logLines,
 					});
 				} else {
@@ -6010,6 +6212,17 @@ export async function streamDeploymentWithLogs(
 					log("");
 					log(`URL: ${colors.cyan(deployUrl || "Pending...")}`);
 					log(`Duration: ${colors.dim(`${duration}s`)}`);
+					log(`Source: ${formatDeploySource(source)}`);
+					for (const warning of warnings) log(colors.warn(`! ${warning}`));
+					if (source.next) {
+						log("");
+						log(
+							colors.warn(
+								`Pushes to ${source.githubRemote} do not deploy this app. Put it on push-to-deploy:`,
+							),
+						);
+						log(`  ${colors.dim(source.next)}`);
+					}
 					log("");
 				}
 				return;

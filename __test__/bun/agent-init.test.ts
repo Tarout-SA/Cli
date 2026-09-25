@@ -98,15 +98,31 @@ describe("scaffoldAgentConfig — claude", () => {
 		expect(md).toContain("This hands-free rule is about a deploy the user **asked");
 	});
 
-	it("explains automatic GitHub binding and the manual fallback", () => {
+	it("makes a GitHub project deploy from GitHub, and says how to close the gap", () => {
 		scaffoldAgentConfig({ cwd: dir, agent: "claude" });
 		const md = readFileSync(join(dir, "CLAUDE.md"), "utf-8");
 
-		expect(md).toContain("Git connection happens by itself");
+		expect(md).toContain("A project on GitHub deploys from GitHub");
 		expect(md).toContain("bind the repo for you");
+		// An upload fallback is a gap the agent closes in the same turn, not a
+		// follow-up to mention: that is how an app sat on upload for weeks.
+		expect(md).toContain("tarout providers github connect --wait --app <id>");
+		expect(md).toContain("Run that command in the same turn");
+		expect(md).toContain("data.source.pushToDeploy");
+		expect(md).not.toContain("keep deploying meanwhile");
+		// `--source upload` switches the bind off, so it is never a default.
+		expect(md).toContain("Never pass `--source upload` unless the user asked");
 		expect(md).toContain("tarout apps git github <id|name> --repo <owner/repo>");
-		// Installing the GitHub App is browser-only — the agent must hand off.
+		// Installing the GitHub App is browser-only; the user finishes it.
 		expect(md).toContain("browser-only");
+	});
+
+	it("warns that a GitHub build ships only pushed work", () => {
+		scaffoldAgentConfig({ cwd: dir, agent: "claude" });
+		const md = readFileSync(join(dir, "CLAUDE.md"), "utf-8");
+
+		expect(md).toContain("A GitHub build ships what is pushed, not this folder");
+		expect(md).toContain("data.warnings");
 	});
 
 	it("explains that `tarout up` refuses to sever a Git connection", () => {

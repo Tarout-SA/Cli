@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.0] - 2026-09-25
+
+### Added
+
+- **`tarout providers github connect --wait --app <app>`.** Opens Tarout's
+  GitHub setup page (in `--json` mode too, as checkout does), waits until
+  GitHub can read this folder's repo, and binds the app, so it redeploys on
+  every push. `--repo`, `--branch`, `--timeout <seconds>` (default 480) and
+  `--no-open` adjust it; without `--wait` it only opens the page.
+- **`data.source` on every successful `deploy --wait` / `up` result.** Says
+  where the app builds from and whether a push deploys it (`pushToDeploy`).
+  When the app is on upload but the folder tracks a GitHub repo, it also
+  carries `githubRemote` and `next`, the connect command above. The terminal
+  output prints the same as a `Source:` line.
+- **`data.warnings` for builds from GitHub.** A GitHub-sourced deploy clones
+  the pushed branch, so unpushed commits, uncommitted edits, a different
+  checked-out branch, or a branch origin has never seen are listed (and
+  emitted as an `unshipped_changes` event) instead of shipping stale code
+  silently.
+
+### Changed
+
+- **A project on GitHub deploys from GitHub.** In a terminal, when the org has
+  no GitHub connection that can read the repo, `deploy` and `up` now offer to
+  connect it, open the setup page, wait, and deploy from the repo. Agents and
+  scripts are never held on a browser mid-deploy: they upload, and the result
+  names the connect command. The interactive `deploy` source picker lists
+  "Deploy from GitHub" first for a GitHub repo; picking upload there used to be
+  the default, and it also switched the automatic bind off.
+- **`github_connect_available` now fires whenever a GitHub folder is uploaded**,
+  with `reason` (`no_github_connection` or `repo_not_accessible`), the setup
+  `url`, and `next`, and the terminal output says pushes will not deploy.
+- **The `CLAUDE.md` block from `tarout agent init`** tells agents to run the
+  connect command in the same turn instead of relaying it as a follow-up, never
+  to pass `--source upload` unless asked, and that a GitHub build ships only
+  pushed work.
+
+### Fixed
+
+- **Auto-connect, `up --source github` and `apps git github` no longer bind a
+  repo the GitHub connection cannot read.** The platform's bind does not check
+  access and clears the uploaded source, so binding a repo outside the
+  installation left an app whose every build failed at clone. Access is now
+  proven against GitHub's repository list first; the bind uses GitHub's own
+  spelling of the repo; and with several GitHub connections the one that can
+  read the repo is used instead of declining.
+
 ## [1.13.0] - 2026-09-25
 
 ### Added

@@ -1,17 +1,39 @@
 import type { Command } from "commander";
-import open from "open";
 import { getApiClient } from "../lib/api.js";
-import { getApiUrl, isLoggedIn } from "../lib/config.js";
-import { AuthError, handleError } from "../lib/errors.js";
+import { openInBrowser } from "../lib/browser.js";
+import { isLoggedIn } from "../lib/config.js";
+import {
+	AuthError,
+	CliError,
+	handleError,
+	InvalidArgumentError,
+	NotFoundError,
+} from "../lib/errors.js";
+import {
+	findRepoAccess,
+	type GitHubRepoRef,
+	gitHubSetupUrl,
+	readGitHubProviders,
+	waitForRepoAccess,
+} from "../lib/github-source.js";
 import {
 	colors,
 	isJsonMode,
 	log,
 	outputData,
+	outputJsonLine,
 	quietOutput,
 	shouldSkipConfirmation,
 	table,
 } from "../lib/output.js";
+import { ExitCode } from "../utils/exit-codes.js";
+import {
+	type AppSummary,
+	bindGitHubRepo,
+	findApp,
+	inspectCurrentProject,
+	parseGitHubRemote,
+} from "./deploy.js";
 import { confirm, input, select } from "../utils/prompts.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
 
@@ -157,28 +179,37 @@ export function registerProvidersCommands(program: Command) {
 
 	github
 		.command("connect")
-		.description("Open Tarout's GitHub provider setup flow")
-		.action(async () => {
+		.description(
+			"Connect GitHub so pushes deploy: opens Tarout's GitHub setup page, and with --app binds this folder's repo",
+		)
+		.option(
+			"--wait",
+			"Wait until GitHub is connected (with --app or --repo: until it can read that repo)",
+		)
+		.option(
+			"--app <app>",
+			"Put this app on push-to-deploy from this folder's GitHub repo (implies --wait)",
+		)
+		.option(
+			"--repo <owner/repo>",
+			"Repository to wait for or bind (defaults to this folder's GitHub remote)",
+		)
+		.option(
+			"--branch <branch>",
+			"Branch to bind with --app (defaults to the checked-out branch)",
+		)
+		.option(
+			"--timeout <seconds>",
+			"How long --wait waits for the browser step",
+			"480",
+		)
+		.option("--no-open", "Print the setup URL instead of opening the browser")
+		.action(async (options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
-
-				const url = `${getApiUrl().replace(/\/+$/, "")}/dashboard/settings/git-providers`;
-				if (isJsonMode()) {
-					outputData({
-						action: "connect_github_provider",
-						url,
-						next: "Complete the browser flow, then run tarout apps git github <app> --repo <owner/repo> or tarout deploy <app> --source configured.",
-					});
-					return;
-				}
-
-				log("");
-				log(`Opening Tarout Git provider setup: ${colors.cyan(url)}`);
-				log(
-					"Complete the GitHub browser flow, then connect the repository to your app.",
-				);
-				await open(url);
+				await connectGitHub(options);
 			} catch (err) {
+				failSpinner();
 				handleError(err);
 			}
 		});
@@ -799,4 +830,228 @@ export function registerProvidersCommands(program: Command) {
 async function resolveAuthId(client: any): Promise<string> {
 	const me = (await client.user.get.query()) as any;
 	return me?.userId || me?.user?.id || me?.id || "";
+}
+
+interface ConnectGitHubOptions {
+	wait?: boolean;
+	app?: string;
+	repo?: string;
+	branch?: string;
+	timeout?: string;
+	open?: boolean;
+}
+
+function parseRepoArg(value: string): GitHubRepoRef {
+	const parsed =
+		parseGitHubRemote(value) ??
+		(() => {
+			const [owner, repository, extra] = value.trim().split("/");
+			return owner && repository && !extra ? { owner, repository } : undefined;
+		})();
+	if (!parsed) {
+		throw new InvalidArgumentError(
+			`--repo must be "owner/name" or a GitHub URL (got "${value}").`,
+		);
+	}
+	return parsed;
+}
+
+/**
+ * `tarout providers github connect`.
+ *
+ * Installing a GitHub App is an authorization on github.com, so a person
+ * clicks through it. Everything around that click is done here: open the page
+ * (in `--json` mode too, as checkout does), wait until the connection can read
+ * the repo, then bind the app. An agent runs this one command and the app is
+ * on push-to-deploy when it returns.
+ */
+async function connectGitHub(options: ConnectGitHubOptions): Promise<void> {
+	const url = gitHubSetupUrl();
+	const noOpen = options.open === false;
+	const waiting = Boolean(options.wait || options.app);
+
+	if (!waiting) {
+		const opened = noOpen ? false : await openSetupPage(url);
+		if (isJsonMode()) {
+			outputData({
+				action: "connect_github_provider",
+				url,
+				opened,
+				next: "Finish connecting GitHub in the browser, then run: tarout providers github connect --wait --app <app>",
+			});
+			return;
+		}
+		log("");
+		log("Finish connecting GitHub in the browser, then put an app on push-to-deploy:");
+		log(`  ${colors.dim("tarout providers github connect --wait --app <app>")}`);
+		log("");
+		return;
+	}
+
+	const timeoutSec = Number(options.timeout ?? "480");
+	if (!Number.isFinite(timeoutSec) || timeoutSec <= 0) {
+		throw new InvalidArgumentError("--timeout must be a positive number of seconds.");
+	}
+
+	const client = getApiClient();
+	const inspection = inspectCurrentProject();
+
+	let app: AppSummary | undefined;
+	if (options.app) {
+		const apps: AppSummary[] = await client.application.allByOrganization.query();
+		app = findApp(apps, options.app);
+		if (!app) throw new NotFoundError("Application", options.app);
+	}
+
+	const repo = options.repo
+		? parseRepoArg(options.repo)
+		: app
+			? inspection.git.githubRepo
+			: undefined;
+	if (app && !repo) {
+		throw new InvalidArgumentError(
+			"This folder has no GitHub remote. Run it from the repo's folder or pass --repo owner/name.",
+		);
+	}
+	const branch = options.branch ?? inspection.git.branch;
+	if (app && !branch) {
+		throw new InvalidArgumentError(
+			"No branch is checked out here (detached HEAD). Pass --branch <branch>.",
+		);
+	}
+
+	if (!repo) {
+		const connected = await waitForAnyConnection(client, url, {
+			timeoutMs: timeoutSec * 1000,
+			noOpen,
+		});
+		if (isJsonMode()) {
+			outputData({ connected: true, providers: connected });
+		} else {
+			succeedSpinner("GitHub is connected.");
+		}
+		return;
+	}
+
+	const name = `${repo.owner}/${repo.repository}`;
+	let access = (await findRepoAccess(client, repo)).access;
+	if (!access) {
+		access = await waitForRepoAccess(client, repo, {
+			timeoutMs: timeoutSec * 1000,
+			noOpen,
+			openUrl: openSetupPage,
+			onWaiting: ({ opened }) => announceWaiting(url, opened, name, timeoutSec),
+		});
+	}
+	if (!access) {
+		throw new CliError(
+			`GitHub could not read ${name} after ${timeoutSec}s.`,
+			ExitCode.GENERAL_ERROR,
+			[
+				`Finish the GitHub step at ${url} (install the app and give it access to ${name}), then rerun this command.`,
+			],
+			{ reason: "github_connect_timeout", url, repository: name },
+		);
+	}
+	succeedSpinner(`GitHub can read ${access.owner}/${access.repository}.`);
+
+	if (!app || !branch) {
+		if (isJsonMode()) {
+			outputData({
+				connected: true,
+				repository: `${access.owner}/${access.repository}`,
+				next: `tarout providers github connect --wait --app <app> --repo ${access.owner}/${access.repository}`,
+			});
+		}
+		return;
+	}
+
+	const bound = await bindGitHubRepo(client, app, access, branch);
+	if (!bound) {
+		throw new CliError(
+			`Could not connect ${app.name} to ${access.owner}/${access.repository}.`,
+		);
+	}
+	if (isJsonMode()) {
+		outputData({
+			connected: true,
+			applicationId: app.applicationId,
+			repository: `${access.owner}/${access.repository}`,
+			branch,
+			pushToDeploy: true,
+			next: `Push to ${branch} to deploy, or run: tarout deploy ${app.applicationId} --wait`,
+		});
+		return;
+	}
+	log(
+		`Run ${colors.dim(`tarout deploy ${app.name} --wait`)} to build from GitHub now, or just push.`,
+	);
+	log("");
+}
+
+async function openSetupPage(url: string): Promise<boolean> {
+	return openInBrowser(url, {
+		hint: "Connect GitHub on this page (if the browser didn't open, visit it):",
+	});
+}
+
+function announceWaiting(
+	url: string,
+	opened: boolean,
+	repository: string,
+	timeoutSec: number,
+): void {
+	if (isJsonMode()) {
+		outputJsonLine({
+			type: "event",
+			event: "github_connect_waiting",
+			url,
+			opened,
+			repository,
+			timeoutSec,
+		});
+		return;
+	}
+	startSpinner(
+		`Waiting for GitHub to grant access to ${repository}. Finish it in the browser...`,
+	);
+}
+
+async function waitForAnyConnection(
+	// biome-ignore lint/suspicious/noExplicitAny: untyped tRPC proxy client.
+	client: any,
+	url: string,
+	opts: { timeoutMs: number; noOpen: boolean },
+): Promise<number> {
+	const existing = readGitHubProviders(await client.github.githubProviders.query());
+	if (existing.length > 0) return existing.length;
+
+	const opened = opts.noOpen ? false : await openSetupPage(url);
+	if (isJsonMode()) {
+		outputJsonLine({
+			type: "event",
+			event: "github_connect_waiting",
+			url,
+			opened,
+			timeoutSec: Math.round(opts.timeoutMs / 1000),
+		});
+	} else {
+		startSpinner("Waiting for GitHub. Finish connecting it in the browser...");
+	}
+	const deadline = Date.now() + opts.timeoutMs;
+	while (Date.now() < deadline) {
+		await new Promise((resolve) => setTimeout(resolve, 5000));
+		try {
+			const list = readGitHubProviders(await client.github.githubProviders.query());
+			if (list.length > 0) return list.length;
+		} catch {
+			// A dropped poll is not an answer; keep waiting.
+		}
+	}
+	throw new CliError(
+		`GitHub was not connected within ${Math.round(opts.timeoutMs / 1000)}s.`,
+		ExitCode.GENERAL_ERROR,
+		[`Finish the GitHub step at ${url}, then rerun this command.`],
+		{ reason: "github_connect_timeout", url },
+	);
 }
