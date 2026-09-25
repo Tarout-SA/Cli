@@ -5,7 +5,97 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.12.0]
+
+### Added
+
+- **`tarout servers kept-storage` (alias `kept`).** Lists every volume,
+  snapshot and reserved IP that was kept when its server was terminated, in one
+  table with its size or IP and the server it came from. These keep billing
+  until they are deleted with `servers volumes delete`, `servers snapshots
+  delete` or `servers ips release`, and the command says so. `--json` prints the
+  platform's object as is; `--quiet` prints only the ids.
+- **`--keep-volumes`, `--keep-snapshots` and `--keep-ips` on `servers
+  terminate` and `servers delete`.** By default a server's volumes, snapshots
+  and reserved IPs are deleted with it. Before asking for confirmation, both
+  commands now show exactly what will be deleted and what will be kept (and
+  that kept items keep billing).
+- **`tarout wallet agree`.** Accepts the Compute Wallet agreement, which must be
+  accepted before cloud servers can be created or the wallet topped up. It
+  links to the full terms at https://tarout.sa/dashboard/wallet and asks for
+  confirmation first (`--yes` skips it). Only the organization owner can
+  accept.
+- **`servers create --software <coolify|dokploy>` and `--no-ssh`.** Pre-install
+  Coolify or Dokploy, or create the server with SSH disabled.
+- **`servers alerts set --comparison <gt|lt|gte|lte>` and `--duration
+  <minutes>`.**
+- **`servers volumes create --type <balanced|ssd|standard>` and `--attach`.**
+
+### Changed
+
+- **`servers alerts set` no longer offers a memory alert, and `servers metrics`
+  shows memory as "not collected".** Cloud servers run no agent that can report
+  memory, so a memory alert could never fire; the platform now refuses it, and
+  the CLI says so and suggests `free -m` over SSH.
+
+- **`tarout wallet topup --amount` now takes SAR, not halalas.** The prompt
+  already asked for SAR, so the flag and the prompt disagreed by a factor of
+  100. `--amount 50` now means 50 SAR. Scripts that pass halalas can switch to
+  the hidden `--halalas <n>` flag. Amounts below the 5 SAR minimum are refused
+  instead of being silently raised to 5 SAR by the platform.
+
+### Fixed
+
+- **`tarout servers metrics` shows real numbers.** It read fields the platform
+  never sends, so it printed nothing. It now shows the latest, average and peak
+  CPU and memory (percent) and disk and network rates (per second) for the
+  chosen range, and says "no data yet" for an empty series.
+- **`servers volumes list` reads the real volume fields:** size, disk type,
+  status and device name, with the full volume id. `servers volumes create` no
+  longer claims the new volume is attached; it is created detached, and the
+  command prints how to attach it. `servers volumes attach` no longer needs a
+  server argument, because a volume only attaches to the server it was created
+  for.
+- **`servers ips list` and `servers ips reserve` show the IP address.** They
+  read the wrong field and printed "-". Both also show the full id, and `ips
+  reserve` defaults to the `me-central2` region with a unique name, so a second
+  reservation no longer collides with the first.
+- **`servers check-quota` shows the quota.** It printed "- / -" for every line.
+  It now shows used and allowed servers in total and per CPU and GPU, whether
+  another server can be created, and why not.
+- **`servers os-images` lists the three supported images** with their name and
+  description. The misleading `--provider hetzner` help is gone (the flag is
+  still accepted and ignored).
+- **`servers create` only offers what the platform accepts.** The OS prompt no
+  longer offers Rocky Linux, which the platform rejects; the server type is
+  derived from the sizes your account can create, so GPU is no longer offered
+  when it is not available; the `--size` help shows real size ids (`cpu-xs`,
+  `cpu-s`, `cpu-m`, ...); and an unknown OS, type or size fails before anything
+  is created.
+- **`servers delete` works on a server that is already terminated.** It looked
+  the server up in a list that hides terminated servers, so it failed with "not
+  found". It now looks up ids directly, skips terminating a server that is
+  already gone, and explains clearly when the record cannot be deleted because
+  volumes or snapshots kept from it still exist.
+- **`servers info` no longer prints a Private IP line.** The platform never
+  returns a private IP, so it always showed "-".
+- **`servers snapshots create` builds a default name that fits.** The old
+  default could pass the 50 character limit for long server names.
+- **`servers firewall add` no longer fails on the second rule.** Every rule
+  defaulted to the name "allow-port", and names are unique per server. The
+  default is now `allow-<protocol>-<port>`.
+- **`servers alerts set` uses the right unit.** CPU and memory thresholds are
+  percentages; disk and network thresholds are now given in MB/s and converted
+  to the bytes per second the platform stores, instead of every threshold being
+  labelled "%". `servers alerts list` shows each threshold in its own unit.
+- **`servers cancel-vm-subscription` explains itself.** Cloud servers are billed
+  hourly and have no subscription, so the platform call always failed. The
+  command now says so and exits with an error without calling the API.
+- **`tarout wallet topup` prints the amount.** It read a field the platform does
+  not send and always printed "Default"; it now prints the amount from the
+  checkout in SAR.
+- `servers snapshots list` and `servers firewall list` show the full id that
+  `servers snapshots delete` and `servers firewall delete` need.
 
 ## [1.11.0]
 

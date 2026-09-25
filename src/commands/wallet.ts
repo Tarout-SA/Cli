@@ -1,8 +1,12 @@
-import type { Command } from "commander";
+import { type Command, Option } from "commander";
 import { getApiClient } from "../lib/api.js";
 import { paymentBrowserOpener } from "../lib/browser.js";
 import { isLoggedIn } from "../lib/config.js";
-import { AuthError, handleError } from "../lib/errors.js";
+import {
+	AuthError,
+	handleError,
+	InvalidArgumentError,
+} from "../lib/errors.js";
 import {
 	box,
 	colors,
@@ -10,9 +14,10 @@ import {
 	log,
 	outputData,
 	quietOutput,
+	shouldSkipConfirmation,
 	table,
 } from "../lib/output.js";
-import { input } from "../utils/prompts.js";
+import { confirm, input } from "../utils/prompts.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
 
 export function registerWalletCommands(program: Command) {
@@ -93,7 +98,7 @@ export function registerWalletCommands(program: Command) {
 				const { entries, breakdown } = data;
 
 				log("");
-				log(colors.bold(`Wallet Ledger — last ${options.days} days`));
+				log(colors.bold(`Wallet Ledger (last ${options.days} days)`));
 				log("");
 
 				if (!entries || entries.length === 0) {
@@ -127,25 +132,50 @@ export function registerWalletCommands(program: Command) {
 	// Top up wallet
 	wallet
 		.command("topup")
-		.description("Top up wallet balance")
-		.option("-a, --amount <halalas>", "Amount in halalas (100 halalas = 1 SAR)")
+		.description(`Top up wallet balance (minimum ${MIN_TOPUP_SAR} SAR)`)
+		.option(
+			"-a, --amount <sar>",
+			`Amount in SAR, e.g. 50 (minimum ${MIN_TOPUP_SAR} SAR)`,
+		)
+		// --amount used to take halalas. Scripts that still pass halalas
+		// can use this hidden flag.
+		.addOption(new Option("--halalas <n>", "Amount in halalas").hideHelp())
 		.action(async (options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
 				let amountHalalas: number | undefined;
 
-				if (options.amount) {
-					amountHalalas = Number.parseInt(options.amount);
+				if (options.amount !== undefined) {
+					amountHalalas = sarToHalalas(options.amount);
+				} else if (options.halalas !== undefined) {
+					const halalas = Number(options.halalas);
+					if (!Number.isInteger(halalas) || halalas <= 0) {
+						throw new InvalidArgumentError(
+							`Invalid amount "${options.halalas}" halalas. Use a whole number, or --amount <sar>.`,
+						);
+					}
+					amountHalalas = halalas;
 				} else {
 					const amountStr = await input(
-						"Amount in SAR (e.g., 50 for 50 SAR, leave blank for default):",
+						`Amount in SAR (minimum ${MIN_TOPUP_SAR}, leave blank for ${MIN_TOPUP_SAR} SAR):`,
 						undefined,
 						{ field: "wallet_topup_amount_sar", flag: "--amount" },
 					);
-					if (amountStr) {
-						amountHalalas = Math.round(Number.parseFloat(amountStr) * 100);
+					if (amountStr?.trim()) {
+						amountHalalas = sarToHalalas(amountStr);
 					}
+				}
+
+				// The platform silently raises anything below the minimum to it,
+				// so refuse here instead of charging an amount nobody typed.
+				if (
+					amountHalalas !== undefined &&
+					amountHalalas < MIN_TOPUP_SAR * 100
+				) {
+					throw new InvalidArgumentError(
+						`The minimum top-up is ${MIN_TOPUP_SAR} SAR (you asked for ${(amountHalalas / 100).toFixed(2)} SAR).`,
+					);
 				}
 
 				const client = getApiClient();
@@ -172,9 +202,11 @@ export function registerWalletCommands(program: Command) {
 				const paymentUrl =
 					result.publicPaymentUrl || result.paymentUrl || result.url || "";
 
+				// The response carries `amountHalalas` (what the checkout charges).
+				const chargedHalalas = Number(result.amountHalalas ?? amountHalalas);
 				box("Wallet Top-Up", [
 					`Order ID: ${colors.cyan(result.orderId || "")}`,
-					`Amount: ${result.amount ? `${(result.amount / 100).toFixed(2)} SAR` : "Default"}`,
+					`Amount: ${Number.isFinite(chargedHalalas) && chargedHalalas > 0 ? formatSar(chargedHalalas) : "-"}`,
 					`Payment URL: ${colors.cyan(paymentUrl)}`,
 				]);
 
@@ -189,6 +221,76 @@ export function registerWalletCommands(program: Command) {
 				log(
 					`Confirm after payment: ${colors.dim(`tarout wallet confirm ${result.orderId || "<orderId>"}`)}`,
 				);
+				log("");
+			} catch (err) {
+				handleError(err);
+			}
+		});
+
+	// Accept the Compute Wallet agreement
+	wallet
+		.command("agree")
+		.description(
+			"Accept the Compute Wallet agreement (needed before creating servers or topping up; owner only)",
+		)
+		.action(async () => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+
+				if (!shouldSkipConfirmation()) {
+					log("");
+					log(colors.bold("Compute Wallet agreement"));
+					log("");
+					log(
+						"The Compute Wallet agreement must be accepted before you can create cloud servers or top up the wallet.",
+					);
+					log(`Read the full terms at ${colors.cyan(WALLET_TERMS_URL)}`);
+					log("");
+					const accepted = await confirm(
+						"Do you accept the Compute Wallet agreement for this organization?",
+						false,
+						{
+							field: "confirm_wallet_agreement",
+							flag: "--yes",
+							context: { termsUrl: WALLET_TERMS_URL },
+						},
+					);
+					if (!accepted) {
+						log("Not accepted.");
+						return;
+					}
+				}
+
+				const client = getApiClient();
+				const _spinner = startSpinner("Accepting agreement...");
+
+				// Owner only: the platform answers FORBIDDEN for anyone else, and
+				// handleError prints that.
+				const result = await client.wallet.acceptAgreement.mutate();
+
+				succeedSpinner("Agreement accepted!");
+
+				if (isJsonMode()) {
+					outputData(result);
+					return;
+				}
+
+				quietOutput(String(result?.agreementAcceptedAt ?? ""));
+
+				log("");
+				log(
+					colors.success(
+						`Compute Wallet agreement accepted${result?.agreementAcceptedAt ? ` on ${formatDate(result.agreementAcceptedAt)}` : ""}.`,
+					),
+				);
+				log(`  Balance: ${formatSar(result?.balanceHalalas ?? 0)}`);
+				if (result?.isReady) {
+					log("  The wallet is ready for cloud servers.");
+				} else {
+					log(
+						`  Top up to start using it: ${colors.dim(`tarout wallet topup --amount ${MIN_TOPUP_SAR}`)}`,
+					);
+				}
 				log("");
 			} catch (err) {
 				handleError(err);
@@ -231,6 +333,22 @@ export function registerWalletCommands(program: Command) {
 				handleError(err);
 			}
 		});
+}
+
+/** Smallest top-up the platform accepts (500 halalas). */
+const MIN_TOPUP_SAR = 5;
+const WALLET_TERMS_URL = "https://tarout.sa/dashboard/wallet";
+
+/** Parses a SAR amount ("50", "12.5") into whole halalas. */
+export function sarToHalalas(value: string): number {
+	const text = String(value).trim();
+	const sar = Number(text);
+	if (text === "" || !Number.isFinite(sar) || sar <= 0) {
+		throw new InvalidArgumentError(
+			`Invalid amount "${value}". Give the amount in SAR, e.g. --amount 50.`,
+		);
+	}
+	return Math.round(sar * 100);
 }
 
 function formatAmount(halalas: string | number): string {
