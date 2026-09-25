@@ -129,12 +129,23 @@ describe("quiet-mode coverage sweep", () => {
 		h.client = {
 			aiGateway: {
 				getAvailableModels: {
-					query: async () => [{ id: "gpt-4o" }, { modelId: "claude-3" }],
+					query: async () => ({
+						global: {
+							isEnabled: true,
+							models: [{ id: "z-ai/glm-5.3", providerStatus: "available" }],
+						},
+						saudi: {
+							isEnabled: true,
+							models: [
+								{ id: "groq/openai/gpt-oss-20b", providerStatus: "available" },
+							],
+						},
+					}),
 				},
 			},
 		};
 		await runQuiet(registerAiCommands, ["ai", "models"]);
-		expect(logs).toEqual(["gpt-4o", "claude-3"]);
+		expect(logs).toEqual(["z-ai/glm-5.3", "groq/openai/gpt-oss-20b"]);
 	});
 
 	it("monitor delete emits the monitor id", async () => {

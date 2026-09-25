@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0]
+
+### Added
+
+- **`tarout ai keys create --expires <when>` and `ai keys update --expires`.**
+  Takes a number of days (`30`), a future ISO date (`2026-12-31`), or `never`
+  (which clears an expiry on update). The dashboard already offered expiry;
+  the CLI could not set it.
+
+### Fixed
+
+- **`tarout ai models` lists the catalog.** It expected a flat array, but the
+  platform returns the catalog per product (`{ global, saudi }`), so it printed
+  "No AI models available" for every account. It now shows every model with
+  its region, context window, USD price per million tokens (as the catalog
+  reports it, markup included) and whether it is callable right now. `--quiet`
+  prints only callable model ids.
+- **`tarout ai usage` and `ai keys usage` report real spend in SAR.** They
+  divided a USD amount by 100 and labelled it SAR, read totals from the wrong
+  field, and mixed an all-time total with a windowed history. Both now read the
+  same activity data as the dashboard: one window, SAR amounts, per-day rows.
+- **`tarout ai keys list` shows the full key id.** It showed 8 characters,
+  which no other command accepts.
+- **`tarout ai keys create --quiet` prints the new key id.** It printed an
+  empty line.
+- **`tarout ai keys delete` says what happens.** The key stops working at once
+  and its usage history is kept; it no longer claims the delete is permanent
+  and cannot be undone. `ai keys revoke` now warns that a revoked key can never
+  be re-enabled (the platform enforces this from this release on).
+
 ## [1.10.4]
 
 ### Fixed

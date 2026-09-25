@@ -6,6 +6,7 @@ import {
 	box,
 	colors,
 	isJsonMode,
+	isQuietMode,
 	log,
 	outputData,
 	quietOutput,
@@ -55,46 +56,55 @@ export function registerAiCommands(program: Command) {
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching AI models...");
 
-				const models = await client.aiGateway.getAvailableModels.query();
+				const catalog = await client.aiGateway.getAvailableModels.query();
 
 				succeedSpinner();
 
 				if (isJsonMode()) {
-					outputData(models);
+					outputData(catalog);
 					return;
 				}
 
-				const modelList = Array.isArray(models)
-					? models
-					: (models as any)?.models || [];
-
+				const modelList = flattenModelCatalog(catalog);
 				if (!modelList.length) {
 					log("");
 					log("No AI models available.");
 					return;
 				}
 
-				// Quiet mode: emit one model id per line (this list doesn't use
-				// table(), so there is no automatic quiet rendering).
-				for (const model of modelList) {
-					quietOutput(String(model.id || model.modelId || ""));
+				// Quiet mode: one callable model id per line. table()'s own quiet
+				// rendering would print every row, unavailable models included.
+				if (isQuietMode()) {
+					for (const model of modelList) {
+						if (model.available) quietOutput(model.id);
+					}
+					return;
 				}
 
 				log("");
-				log(colors.bold("Available AI Models"));
+				// Prices are what the customer pays (markup included), in USD per
+				// million tokens, exactly as the catalog reports them. Usage is
+				// billed in SAR; `tarout ai usage` shows spend in SAR.
+				table(
+					["MODEL", "NAME", "REGION", "CONTEXT", "IN $/1M", "OUT $/1M", "STATUS"],
+					modelList.map((model) => [
+						colors.cyan(model.id),
+						model.name,
+						model.region,
+						model.contextWindow ? model.contextWindow.toLocaleString("en-US") : "-",
+						formatUsd(model.input),
+						formatUsd(model.output),
+						model.available
+							? colors.success("available")
+							: colors.error("unavailable"),
+					]),
+				);
 				log("");
-
-				for (const model of modelList) {
-					const id = model.id || model.modelId || "";
-					const name = model.name || model.displayName || id;
-					const provider = model.provider || model.modelProvider || "";
-					const desc = model.description || "";
-					log(`  ${colors.cyan(id)}`);
-					if (name !== id) log(`    Name: ${name}`);
-					if (provider) log(`    Provider: ${provider}`);
-					if (desc) log(`    ${colors.dim(desc)}`);
-					log("");
-				}
+				log(
+					colors.dim(
+						"Any key calls any available model: set `model` in each request. Aliases (glm, gpt-oss-local, ...) also work.",
+					),
+				);
 			} catch (err) {
 				handleError(err);
 			}
@@ -175,7 +185,8 @@ export function registerAiCommands(program: Command) {
 				table(
 					["ID", "NAME", "ENABLED", "CREATED"],
 					items.map((k: any) => [
-						colors.cyan((k.keyId || k.id || "").slice(0, 8)),
+						// Full id: every other key command takes the complete id.
+						colors.cyan(k.id || k.keyId || ""),
 						k.keyName || k.name || "",
 						k.isEnabled || k.enabled
 							? colors.success("yes")
@@ -210,12 +221,17 @@ export function registerAiCommands(program: Command) {
 			"--monthly-cap <sar>",
 			"Monthly credit limit in SAR (0 or omitted = no limit)",
 		)
+		.option(
+			"--expires <when>",
+			"Expiry: a number of days (30), an ISO date (2026-12-31), or never",
+		)
 		.action(
 			async (options: {
 				name?: string;
 				model?: string;
 				provider?: string;
 				monthlyCap?: string;
+				expires?: string;
 			}) => {
 				try {
 					if (!isLoggedIn()) throw new AuthError();
@@ -243,6 +259,11 @@ export function registerAiCommands(program: Command) {
 						monthlySpendCapHalalas = Math.round(sar * 100);
 					}
 
+					const expiresAt =
+						options.expires === undefined
+							? undefined
+							: parseExpires(options.expires);
+
 					const client = getApiClient();
 					const _spinner = startSpinner("Creating AI Gateway key...");
 
@@ -251,6 +272,7 @@ export function registerAiCommands(program: Command) {
 						...(monthlySpendCapHalalas === undefined
 							? {}
 							: { monthlySpendCapHalalas }),
+						...(expiresAt ? { expiresAt } : {}),
 					});
 
 					succeedSpinner("AI Gateway key created.");
@@ -261,14 +283,16 @@ export function registerAiCommands(program: Command) {
 					}
 
 					const secret = (result as any).apiKey ?? (result as any).key ?? "";
-					quietOutput(String((result as any).keyId ?? ""));
+					quietOutput(String((result as any).id ?? (result as any).keyId ?? ""));
 
 					log("");
 					box("AI Gateway key created", [
 						`Name: ${colors.bold(keyName)}`,
+						`ID: ${(result as any).id ?? (result as any).keyId ?? ""}`,
 						...(monthlySpendCapHalalas
 							? [`Monthly credit limit: ${colors.bold(`${(monthlySpendCapHalalas / 100).toFixed(2)} SAR`)}`]
 							: []),
+						...(expiresAt ? [`Expires: ${formatDate(expiresAt)}`] : []),
 						...(secret ? [`Key: ${colors.cyan(secret)}`] : []),
 						`Models: every model in the catalog (see ${colors.cyan("tarout ai models")})`,
 					]);
@@ -350,45 +374,41 @@ export function registerAiCommands(program: Command) {
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching usage...");
 
-				const data = await client.aiGateway.getKeyUsage.query({
-					keyId,
-					days: Number.parseInt(options.days) || 7,
-				});
-
-				succeedSpinner();
-
+				const days = clampDays(options.days, 7);
 				if (isJsonMode()) {
+					const data = await client.aiGateway.getKeyUsage.query({ keyId, days });
+					succeedSpinner();
 					outputData(data);
 					return;
 				}
 
-				log("");
-				log(colors.bold(`Key Usage: last ${options.days} days`));
-				log("");
+				// Activity is what the dashboard shows: the same window, the same
+				// SAR amounts. getKeyUsage mixes an all-time total with a windowed
+				// history and reports cost in USD.
+				const activity = (await client.aiGateway.getActivity.query({
+					days,
+					keyId,
+				})) as ActivityData;
 
-				const agg = (data as any).aggregated;
-				if (agg) {
-					log(
-						`  Total requests: ${colors.cyan(String(agg.totalRequests || 0))}`,
-					);
-					log(`  Total tokens: ${colors.cyan(String(agg.totalTokens || 0))}`);
-					log(
-						`  Cost: ${colors.cyan(`${(Number(agg.totalCostHalalas || agg.totalCost || 0) / 100).toFixed(4)} SAR`)}`,
-					);
-				}
+				succeedSpinner();
 
-				const history = (data as any).history;
-				if (history && history.length > 0) {
+				log("");
+				log(colors.bold(`Key usage: last ${activity.days ?? days} days`));
+				log("");
+				printActivityTotals(activity);
+
+				const perDay = dailyTotals(activity.daily ?? []);
+				if (perDay.length > 0) {
 					log("");
 					table(
 						["DATE", "REQUESTS", "TOKENS", "COST SAR"],
-						history
-							.slice(0, 10)
-							.map((h: any) => [
-								formatDate(h.date || h.timestamp),
-								String(h.requests || h.requestCount || 0),
-								String(h.tokens || h.totalTokens || 0),
-								(Number(h.costHalalas || h.cost || 0) / 100).toFixed(4),
+						perDay
+							.slice(-10)
+							.map((day) => [
+								day.date,
+								String(day.requests),
+								String(day.tokens),
+								formatSar(day.costHalalas),
 							]),
 					);
 				}
@@ -404,14 +424,16 @@ export function registerAiCommands(program: Command) {
 	keys
 		.command("revoke")
 		.argument("<key-id>", "Key ID to revoke")
-		.description("Revoke an AI Gateway key")
+		.description(
+			"Revoke an AI Gateway key permanently (unlike --disable, it cannot be re-enabled)",
+		)
 		.action(async (keyId: string) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
 				if (!shouldSkipConfirmation()) {
 					const ok = await confirm(
-						`Revoke AI Gateway key ${keyId}? Applications using it will start failing.`,
+						`Revoke AI Gateway key ${keyId}? Applications using it will start failing, and a revoked key can never be re-enabled.`,
 						false,
 					);
 					if (!ok) {
@@ -438,13 +460,19 @@ export function registerAiCommands(program: Command) {
 	keys
 		.command("update")
 		.argument("<key-id>", "Key ID to update")
-		.description("Rename, enable, or disable an AI Gateway key")
+		.description(
+			"Rename, enable or disable, cap, or change the expiry of an AI Gateway key",
+		)
 		.option("-n, --name <name>", "New key name")
 		.option("--enable", "Enable the key")
 		.option("--disable", "Disable the key")
 		.option(
 			"--monthly-cap <sar>",
 			"Monthly spend ceiling in SAR (0 clears the cap)",
+		)
+		.option(
+			"--expires <when>",
+			"New expiry: a number of days, an ISO date, or never (clears it)",
 		)
 		.action(
 			async (
@@ -454,6 +482,7 @@ export function registerAiCommands(program: Command) {
 					enable?: boolean;
 					disable?: boolean;
 					monthlyCap?: string;
+					expires?: string;
 				},
 			) => {
 				try {
@@ -484,13 +513,19 @@ export function registerAiCommands(program: Command) {
 							? false
 							: undefined;
 
+					const expiresAt =
+						options.expires === undefined
+							? undefined
+							: parseExpires(options.expires);
+
 					if (
 						options.name === undefined &&
 						isEnabled === undefined &&
-						monthlySpendCapHalalas === undefined
+						monthlySpendCapHalalas === undefined &&
+						expiresAt === undefined
 					) {
 						throw new CliError(
-							"Nothing to update. Pass --name, --enable/--disable, or --monthly-cap.",
+							"Nothing to update. Pass --name, --enable/--disable, --monthly-cap, or --expires.",
 							ExitCode.INVALID_ARGUMENTS,
 						);
 					}
@@ -504,6 +539,7 @@ export function registerAiCommands(program: Command) {
 						...(monthlySpendCapHalalas === undefined
 							? {}
 							: { monthlySpendCapHalalas }),
+						...(expiresAt === undefined ? {} : { expiresAt }),
 					});
 					succeedSpinner("Key updated.");
 
@@ -521,14 +557,16 @@ export function registerAiCommands(program: Command) {
 	keys
 		.command("delete")
 		.argument("<key-id>", "Key ID to delete")
-		.description("Permanently delete an AI Gateway key")
+		.description(
+			"Delete an AI Gateway key (it stops working; its usage history is kept)",
+		)
 		.action(async (keyId: string) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
 				if (!shouldSkipConfirmation()) {
 					const ok = await confirm(
-						`Permanently delete AI Gateway key ${keyId}? This cannot be undone.`,
+						`Delete AI Gateway key ${keyId}? It stops working immediately. Its usage history stays in Activity.`,
 						false,
 					);
 					if (!ok) {
@@ -563,34 +601,28 @@ export function registerAiCommands(program: Command) {
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching usage...");
 
-				const data = await client.aiGateway.getOrganizationUsage.query({
-					days: Number.parseInt(options.days) || 30,
-				});
-
-				succeedSpinner();
-
+				const days = clampDays(options.days, 30);
 				if (isJsonMode()) {
+					const data = await client.aiGateway.getOrganizationUsage.query({
+						days,
+					});
+					succeedSpinner();
 					outputData(data);
 					return;
 				}
 
-				log("");
-				log(colors.bold(`Organization AI Usage: last ${options.days} days`));
-				log("");
+				const activity = (await client.aiGateway.getActivity.query({
+					days,
+				})) as ActivityData;
 
-				const d = data as any;
-				if (d.totalRequests !== undefined)
-					log(`  Total requests: ${colors.cyan(String(d.totalRequests))}`);
-				if (d.totalTokens !== undefined)
-					log(`  Total tokens: ${colors.cyan(String(d.totalTokens))}`);
-				if (d.totalCostHalalas !== undefined || d.totalCost !== undefined) {
-					const halalas = d.totalCostHalalas ?? d.totalCost ?? 0;
-					log(
-						`  Total cost: ${colors.cyan(`${(Number(halalas) / 100).toFixed(4)} SAR`)}`,
-					);
-				}
+				succeedSpinner();
 
-				const models = d.byModel || d.models || [];
+				log("");
+				log(colors.bold(`Organization AI usage: last ${activity.days ?? days} days`));
+				log("");
+				printActivityTotals(activity);
+
+				const models = activity.byModel ?? [];
 				if (models.length > 0) {
 					log("");
 					log(colors.bold("By model:"));
@@ -598,11 +630,11 @@ export function registerAiCommands(program: Command) {
 						["MODEL", "REQUESTS", "TOKENS", "COST SAR"],
 						models
 							.slice(0, 10)
-							.map((m: any) => [
-								m.modelId || m.model || "-",
-								String(m.requests || m.requestCount || 0),
-								String(m.tokens || m.totalTokens || 0),
-								(Number(m.costHalalas || m.cost || 0) / 100).toFixed(4),
+							.map((m) => [
+								m.modelId,
+								String(m.requests),
+								String(m.promptTokens + m.completionTokens),
+								formatSar(m.costHalalas),
 							]),
 					);
 				}
@@ -868,6 +900,159 @@ export function registerAiCommands(program: Command) {
 				handleError(err);
 			}
 		});
+}
+
+interface CatalogModel {
+	id: string;
+	name?: string;
+	region?: string;
+	contextWindow?: number;
+	providerStatus?: string;
+	costPer1MTokens?: { input: number | null; output: number | null };
+}
+
+interface ListedModel {
+	id: string;
+	name: string;
+	region: string;
+	contextWindow: number;
+	input: number | null;
+	output: number | null;
+	available: boolean;
+}
+
+/**
+ * `aiGateway.getAvailableModels` returns the catalog per product
+ * (`{ global: { isEnabled, models }, saudi: {...} }`). The CLI used to expect a
+ * flat array and printed "No AI models available" for every account.
+ */
+export function flattenModelCatalog(catalog: unknown): ListedModel[] {
+	if (!catalog || typeof catalog !== "object") return [];
+	const products = Array.isArray(catalog)
+		? [{ isEnabled: true, models: catalog }]
+		: Object.values(catalog as Record<string, unknown>);
+	const rows: ListedModel[] = [];
+	for (const product of products) {
+		if (!product || typeof product !== "object") continue;
+		const { models, isEnabled } = product as {
+			models?: CatalogModel[];
+			isEnabled?: boolean;
+		};
+		for (const model of models ?? []) {
+			if (!model?.id) continue;
+			rows.push({
+				id: model.id,
+				name: model.name ?? model.id,
+				region: model.region === "saudi" ? "Saudi Arabia" : "Global",
+				contextWindow: model.contextWindow ?? 0,
+				input: model.costPer1MTokens?.input ?? null,
+				output: model.costPer1MTokens?.output ?? null,
+				available:
+					isEnabled !== false && (model.providerStatus ?? "available") === "available",
+			});
+		}
+	}
+	return rows;
+}
+
+function formatUsd(value: number | null): string {
+	return value === null ? "-" : `$${value.toFixed(2)}`;
+}
+
+function formatSar(halalas: number): string {
+	return (Number(halalas || 0) / 100).toFixed(4);
+}
+
+function clampDays(raw: string | undefined, fallback: number): number {
+	const days = Number.parseInt(raw ?? "", 10);
+	if (!Number.isFinite(days) || days < 1) return fallback;
+	return Math.min(days, 90);
+}
+
+/**
+ * `--expires 30` (days from now), `--expires 2026-12-31` (ISO date), or
+ * `--expires never`. `never` returns null, which clears an expiry on update.
+ */
+export function parseExpires(raw: string): Date | null {
+	const value = raw.trim().toLowerCase();
+	if (value === "never" || value === "none") return null;
+	if (/^\d+$/.test(value)) {
+		const days = Number(value);
+		if (days < 1) {
+			throw new CliError(
+				`Invalid --expires "${raw}". Pass a positive number of days, an ISO date, or never.`,
+				ExitCode.INVALID_ARGUMENTS,
+			);
+		}
+		return new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+	}
+	const date = new Date(raw);
+	if (Number.isNaN(date.getTime()) || date.getTime() <= Date.now()) {
+		throw new CliError(
+			`Invalid --expires "${raw}". Pass a positive number of days, a future ISO date, or never.`,
+			ExitCode.INVALID_ARGUMENTS,
+		);
+	}
+	return date;
+}
+
+interface ActivityData {
+	days?: number;
+	totals?: {
+		requests: number;
+		promptTokens: number;
+		completionTokens: number;
+		costHalalas: number;
+	};
+	daily?: Array<{
+		date: string;
+		requests: number;
+		promptTokens: number;
+		completionTokens: number;
+		costHalalas: number;
+	}>;
+	byModel?: Array<{
+		modelId: string;
+		requests: number;
+		promptTokens: number;
+		completionTokens: number;
+		costHalalas: number;
+	}>;
+}
+
+function printActivityTotals(activity: ActivityData): void {
+	const totals = activity.totals ?? {
+		requests: 0,
+		promptTokens: 0,
+		completionTokens: 0,
+		costHalalas: 0,
+	};
+	log(`  Requests: ${colors.cyan(String(totals.requests))}`);
+	log(
+		`  Tokens: ${colors.cyan(String(totals.promptTokens + totals.completionTokens))} ${colors.dim(`(${totals.promptTokens} in, ${totals.completionTokens} out)`)}`,
+	);
+	log(`  Spend: ${colors.cyan(`${formatSar(totals.costHalalas)} SAR`)}`);
+}
+
+/** The activity series is per day per model; the key view wants per day. */
+function dailyTotals(daily: NonNullable<ActivityData["daily"]>) {
+	const byDate = new Map<
+		string,
+		{ date: string; requests: number; tokens: number; costHalalas: number }
+	>();
+	for (const row of daily) {
+		const day = byDate.get(row.date) ?? {
+			date: row.date,
+			requests: 0,
+			tokens: 0,
+			costHalalas: 0,
+		};
+		day.requests += row.requests;
+		day.tokens += row.promptTokens + row.completionTokens;
+		day.costHalalas += row.costHalalas;
+		byDate.set(row.date, day);
+	}
+	return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
 }
 
 function formatDate(date: string | Date | null | undefined): string {
