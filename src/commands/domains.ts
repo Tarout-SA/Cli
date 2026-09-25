@@ -132,14 +132,16 @@ export function registerDomainsCommands(program: Command) {
 
 				log("");
 				table(
-					["DOMAIN", "SOURCE", "STATUS", "CF ZONE", "EXPIRY", "AUTO-RENEW"],
+					["DOMAIN", "SOURCE", "STATUS", "DNS", "EXPIRY", "AUTO-RENEW"],
 					domainsList.map((d: any) => [
 						colors.cyan(d.domainName),
 						d.source === "purchased"
 							? colors.info("purchased")
 							: colors.dim("external"),
 						formatStatus(d.status),
-						formatCfStatus(d.cloudflareZoneStatus),
+						// The router strips provider columns and renames the zone state
+						// to `dnsZoneStatus` (omitProviderFieldsForResponse).
+						formatDnsZoneStatus(d.dnsZoneStatus),
 						d.source === "purchased" && d.expiryDate
 							? formatDate(d.expiryDate)
 							: colors.dim("-"),
@@ -165,10 +167,12 @@ export function registerDomainsCommands(program: Command) {
 	domains
 		.command("register")
 		.argument("<domain>", "Domain name to register (e.g., example.com)")
-		.description("Purchase a domain via Name.com")
+		.description(
+			"Purchase a domain through Tarout's managed registrar (.sa domains are registered from the dashboard)",
+		)
 		.option(
 			"--years <n>",
-			"Registration length in years (1-10)",
+			"Registration length in years (1-10; defaults to the registry minimum, 1 for most TLDs)",
 			(v) => Number.parseInt(v, 10),
 			1,
 		)
@@ -188,7 +192,7 @@ export function registerDomainsCommands(program: Command) {
 		.option("--state <state>", "Registrant state/region")
 		.option("--zip <zip>", "Registrant postal/ZIP code")
 		.option("--country <code>", "Registrant country (2-letter ISO code, e.g. SA)")
-		.action(async (domainName, options) => {
+		.action(async (domainName, options, command: Command) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
@@ -204,18 +208,58 @@ export function registerDomainsCommands(program: Command) {
 				const _spinner = startSpinner(
 					`Checking availability for ${domainName}...`,
 				);
-				const availability = await client.domainRegistrar.searchDomain.query({
-					domainName,
-				});
+				const availability: any =
+					await client.domainRegistrar.searchDomain.query({
+						domainName,
+					});
 
-				if (!availability.available) {
+				// searchDomain answers with `purchasable` (DomainAvailability in
+				// cloud/src/server/services/domain-management.ts). The CLI used to
+				// read `available`, which the platform never sends, so every
+				// registration stopped here with "not available".
+				if (!availability?.purchasable) {
 					failSpinner();
 					throw new CliError(
-						`${domainName} is not available for registration.`,
+						`${domainName} is not available for registration.${availability?.reason ? ` ${availability.reason}` : ""}`,
+					);
+				}
+
+				// A .sa registration needs a Saudi registry application and a
+				// supporting document upload that this command cannot collect; the
+				// platform refuses the payment without them.
+				if (availability.registrationFlow === "saudi") {
+					failSpinner();
+					throw new CliError(
+						`${domainName} needs a Saudi registry application with a supporting document. Register it from the dashboard: https://tarout.sa/dashboard/domains`,
+					);
+				}
+
+				// Some registries sell in multi-year blocks (.ai is two years
+				// minimum). The quoted price already covers that minimum term, and
+				// the platform rejects a shorter one, so default to it and refuse
+				// an explicit shorter term before any money moves.
+				const minYears =
+					typeof availability.minYears === "number" && availability.minYears > 1
+						? availability.minYears
+						: 1;
+				const yearsFromUser =
+					command?.getOptionValueSource?.("years") === "cli";
+				const years: number = yearsFromUser
+					? options.years
+					: Math.max(options.years ?? 1, minYears);
+				if (!Number.isInteger(years)) {
+					failSpinner();
+					throw new InvalidArgumentError("--years must be a whole number.");
+				}
+				if (years < minYears) {
+					failSpinner();
+					throw new InvalidArgumentError(
+						`.${availability.tld ?? domainName.split(".").pop()} domains must be registered for at least ${minYears} years. Pass --years ${minYears} or more.`,
 					);
 				}
 
 				succeedSpinner();
+				const currency = availability.currency || "SAR";
 
 				// Human availability summary. JSON/agent mode skips the display and
 				// proceeds straight through the purchase flow (contact collection →
@@ -227,10 +271,10 @@ export function registerDomainsCommands(program: Command) {
 						`${colors.cyan(domainName)} is ${colors.success("available")}!`,
 					);
 					log(
-						`  Price: ${colors.bold(`${availability.purchasePrice} ${availability.currency}`)}`,
+						`  Price: ${colors.bold(`${availability.purchasePrice} ${currency}`)}${minYears > 1 ? colors.dim(` (${minYears}-year minimum term)`) : ""}`,
 					);
 					log(
-						`  Renewal: ${colors.dim(`${availability.renewalPrice} ${availability.currency}/yr`)}`,
+						`  Renewal: ${colors.dim(`${availability.renewalPrice} ${currency}/yr`)}`,
 					);
 					if (availability.premium) {
 						log(`  ${colors.warn("Premium domain")}`);
@@ -261,7 +305,7 @@ export function registerDomainsCommands(program: Command) {
 				const payment =
 					await client.domainRegistrar.createRegistrationPayment.mutate({
 						domainName,
-						years: options.years ?? 1,
+						years,
 						privacyEnabled: options.privacy !== false,
 						autoRenew: options.autoRenew !== false,
 						contact,
@@ -297,7 +341,7 @@ export function registerDomainsCommands(program: Command) {
 		.argument("<domain>", "Domain to transfer in (e.g., example.com)")
 		.option(
 			"--auth-code <code>",
-			"Authorization/EPP code from the current registrar",
+			"Not sent: support asks for the EPP code over a secure channel after verifying ownership",
 		)
 		.option("--current-registrar <name>", "Name of the current registrar")
 		.option("--note <text>", "Note for the support team")
@@ -312,15 +356,25 @@ export function registerDomainsCommands(program: Command) {
 				}
 				const client = getApiClient();
 				const _spinner = startSpinner("Requesting transfer...");
+				// requestTransferIn deliberately has no auth-code input: the ticket
+				// must never hold the EPP secret, so support requests it through a
+				// secure channel once ownership is verified. The CLI used to send
+				// it anyway and the platform dropped it without a word.
 				const res: any = await client.domainRegistrar.requestTransferIn.mutate({
 					domainName,
-					authCode: options.authCode || undefined,
 					currentRegistrar: options.currentRegistrar || undefined,
 					note: options.note || undefined,
 				});
 				succeedSpinner("Transfer requested.");
+				const authCodeNotice = options.authCode
+					? "The auth code was not sent. Support will ask for it through a secure channel after verifying ownership; do not paste it into the ticket."
+					: undefined;
 				if (isJsonMode()) {
-					outputData(res);
+					outputData(
+						authCodeNotice
+							? { ...res, authCodeSent: false, notice: authCodeNotice }
+							: res,
+					);
 					return;
 				}
 				box("Domain Transfer Requested", [
@@ -328,6 +382,7 @@ export function registerDomainsCommands(program: Command) {
 					`Support ticket: ${colors.dim(res?.ticketId || "-")}`,
 					"Our team will follow up with the next steps.",
 				]);
+				if (authCodeNotice) warn(authCodeNotice);
 			} catch (err) {
 				handleError(err);
 			}
@@ -441,7 +496,7 @@ export function registerDomainsCommands(program: Command) {
 		.command("verify")
 		.argument("<domain>", "Domain ID or domain name")
 		.description(
-			"Verify CNAME record (or nameserver change) for an external domain",
+			"Check the DNS records (A/CNAME and ownership TXT) for an external domain",
 		)
 		.action(async (domainIdentifier) => {
 			try {
@@ -462,16 +517,12 @@ export function registerDomainsCommands(program: Command) {
 					throw new NotFoundError("Domain", domainIdentifier, suggestions);
 				}
 
-				const isCfSaas = !!domain.cloudflareCustomHostnameId;
-				updateSpinner(
-					isCfSaas ? "Verifying CNAME record..." : "Verifying nameservers...",
-				);
+				updateSpinner("Checking DNS records...");
 
-				const result = await client.domainRegistrar.verifyExternalDomain.mutate(
-					{
+				const result: any =
+					await client.domainRegistrar.verifyExternalDomain.mutate({
 						domainId: domain.domainId,
-					},
-				);
+					});
 
 				succeedSpinner();
 
@@ -485,85 +536,55 @@ export function registerDomainsCommands(program: Command) {
 				if (result.verified) {
 					success(`Domain ${colors.cyan(domain.domainName)} is verified!`);
 					log("");
-					log(
-						isCfSaas
-							? "CNAME is active and SSL is provisioned."
-							: "Nameservers are correctly configured. DNS management is now active.",
-					);
-				} else {
-					error(
-						isCfSaas
-							? `CNAME not yet detected for ${domain.domainName}`
-							: `Nameserver change not yet detected for ${domain.domainName}`,
-					);
+					log("DNS records are in place and SSL is active.");
 					log("");
-					if (isCfSaas && domain.cnameTarget) {
-						// Same contract as add-external: A records only for a proxied
-						// apex (stored apexIps); a root CNAME for the flattened apex
-						// contract; the hostname-named CNAME for subdomains.
-						const pendingApexIps: string[] = Array.isArray(domain.apexIps)
-							? domain.apexIps
-							: [];
-						const pendingRecords =
-							domain.isApex && pendingApexIps.length > 0
-								? pendingApexIps.map((ip: string) => ({
-										type: "A",
-										name: "@",
-										value: ip,
-									}))
-								: [
-										{
-											type: "CNAME",
-											name: domain.isApex ? "@" : domain.domainName,
-											value: domain.cnameTarget,
-										},
-									];
-						log("Ensure you have added this record at your DNS provider:");
+					return;
+				}
+
+				// Every external domain now routes through Tarout with A/CNAME
+				// records: nameserver delegation is retired (the platform refuses to
+				// verify those rows). The router strips the provider ids this used
+				// to branch on (cloudflareCustomHostnameId, cloudflareNameservers),
+				// so every domain landed in a nameserver message with no records.
+				error(`${domain.domainName} is not verified yet.`);
+				const reasons: string[] = Array.isArray(result.verificationErrors)
+					? result.verificationErrors.filter(Boolean)
+					: [];
+				if (reasons.length > 0) {
+					log("");
+					for (const reason of reasons) log(`  - ${reason}`);
+				}
+				log("");
+
+				const records = pendingVerificationRecords(domain, result);
+				if (records.length > 0) {
+					log("Make sure these records exist at your DNS provider:");
+					log("");
+					for (const record of records) {
+						log(`  Type:   ${colors.cyan(record.type)}`);
+						log(`  Name:   ${colors.cyan(record.name)}`);
+						log(`  Value:  ${colors.cyan(record.value)}`);
 						log("");
-						for (const record of pendingRecords) {
-							log(`  Type:   ${colors.cyan(record.type)}`);
-							log(`  Name:   ${colors.cyan(record.name)}`);
-							log(`  Value:  ${colors.cyan(record.value)}`);
-							log("");
-						}
-						if (domain.isApex && pendingApexIps.length === 0) {
-							warn(
-								"Root CNAME records only work on Cloudflare-hosted DNS and must be set to Proxied (orange cloud); a DNS-only root record will not route.",
-							);
-							log("");
-						}
-						log(
-							`Exact records: ${colors.dim(`tarout domains instructions ${domain.domainName}`)}`,
-						);
-						if (result.sslStatus && result.sslStatus !== "active") {
-							log("");
-							log(
-								`  SSL status: ${colors.dim(result.sslStatus.replace(/_/g, " "))}`,
-							);
-						}
-						log("");
-						log(
-							colors.dim(
-								"DNS changes propagate in minutes. SSL is provisioned automatically.",
-							),
-						);
-					} else if (
-						domain.cloudflareNameservers &&
-						domain.cloudflareNameservers.length > 0
-					) {
-						log("Ensure your nameservers are set to:");
-						log("");
-						for (const ns of domain.cloudflareNameservers) {
-							log(`  ${colors.cyan(ns)}`);
-						}
-						log("");
-						log(
-							colors.dim(
-								"Nameserver changes can take up to 48 hours to propagate.",
-							),
-						);
 					}
 				}
+				const apexIps: string[] = Array.isArray(domain.apexIps)
+					? domain.apexIps
+					: [];
+				if (domain.isApex && apexIps.length === 0 && domain.cnameTarget) {
+					warn(
+						"A root CNAME only works on DNS providers that flatten it at the apex (Cloudflare DNS with the record Proxied). A DNS-only root record will not route.",
+					);
+					log("");
+				}
+				if (result.sslStatus && result.sslStatus !== "active") {
+					log(`  SSL status: ${colors.dim(String(result.sslStatus).replace(/_/g, " "))}`);
+					log("");
+				}
+				log(
+					colors.dim(
+						"DNS changes usually propagate within minutes. Tarout re-checks pending domains every minute and issues SSL automatically.",
+					),
+				);
 				log("");
 			} catch (err) {
 				handleError(err);
@@ -1143,9 +1164,12 @@ export function registerDomainsCommands(program: Command) {
 					outputData(data);
 					return;
 				}
+				// registrarReadiness returns { configured, available, ... }; there is
+				// no `ready` field, so this always printed "no".
 				const r = data as any;
+				const ready = Boolean(r.configured && r.available);
 				log(
-					`Registrar ready: ${r.ready ? colors.success("yes") : colors.error("no")}`,
+					`Registrar ready: ${ready ? colors.success("yes") : colors.error("no")}`,
 				);
 				if (r.message) log(colors.dim(r.message));
 			} catch (err) {
@@ -1177,11 +1201,7 @@ export function registerDomainsCommands(program: Command) {
 				log("");
 				table(
 					["DOMAIN", "AVAILABLE", "PRICE"],
-					list.map((r: any) => [
-						colors.cyan(r.domainName || r.domain || "-"),
-						r.available ? colors.success("yes") : colors.dim("no"),
-						r.price ? `${r.price} SAR/yr` : "-",
-					]),
+					list.map(availabilityRow),
 				);
 				log("");
 			} catch (err) {
@@ -1212,11 +1232,7 @@ export function registerDomainsCommands(program: Command) {
 				log("");
 				table(
 					["DOMAIN", "AVAILABLE", "PRICE"],
-					list.map((r: any) => [
-						colors.cyan(r.domainName || r.domain || "-"),
-						r.available ? colors.success("yes") : colors.dim("no"),
-						r.price ? `${r.price} SAR/yr` : "-",
-					]),
+					list.map(availabilityRow),
 				);
 				log("");
 			} catch (err) {
@@ -1249,19 +1265,44 @@ export function registerDomainsCommands(program: Command) {
 					outputData(data);
 					return;
 				}
+				// getById returns the registered_domain columns (whoisPrivacy,
+				// expiryDate) minus provider fields; `privacyEnabled` and
+				// `expiresAt` never existed, so privacy always read "disabled" and
+				// expiry "-".
 				const d = data as any;
+				const purchased = d.source === "purchased";
 				log("");
 				log(colors.bold(d.domainName || domainIdentifier));
+				log(`  Source:      ${d.source || "-"}`);
 				log(`  Status:      ${formatStatus(d.status || "-")}`);
+				log(`  DNS:         ${formatDnsZoneStatus(d.dnsZoneStatus)}`);
 				log(
-					`  Privacy:     ${d.privacyEnabled ? colors.success("enabled") : "disabled"}`,
+					`  SSL:         ${d.sslStatus ? String(d.sslStatus).replace(/_/g, " ") : "-"}`,
 				);
-				log(`  Auto-renew:  ${d.autoRenew ? colors.success("yes") : "no"}`);
-				log(`  Locked:      ${d.locked ? colors.warn("yes") : "no"}`);
-				log(
-					`  Expires:     ${d.expiresAt ? new Date(d.expiresAt).toLocaleDateString() : "-"}`,
-				);
+				if (purchased) {
+					log(
+						`  Privacy:     ${d.whoisPrivacy ? colors.success("enabled") : "disabled"}`,
+					);
+					log(`  Auto-renew:  ${d.autoRenew ? colors.success("yes") : "no"}`);
+					log(`  Locked:      ${d.locked ? colors.warn("yes") : "no"}`);
+					log(
+						`  Expires:     ${d.expiryDate ? formatDate(d.expiryDate) : "-"}`,
+					);
+				}
 				log(`  ID:          ${colors.dim(d.domainId || "-")}`);
+				const linkedHosts: any[] = Array.isArray(d.linkedHosts)
+					? d.linkedHosts
+					: [];
+				if (linkedHosts.length > 0) {
+					log("");
+					log(colors.bold("Hostnames"));
+					for (const host of linkedHosts) {
+						const target = host.application
+							? host.application.name || host.application.appName
+							: colors.dim("not linked");
+						log(`  ${host.host} -> ${target}`);
+					}
+				}
 				log("");
 			} catch (err) {
 				failSpinner();
@@ -1748,14 +1789,15 @@ export function registerDomainsCommands(program: Command) {
 					outputData(data);
 					return;
 				}
+				// getSSLStatus returns { status, message, activatedAt,
+				// usesTaroutRouting }. There is no `valid` or `expiresAt`, so a
+				// pending certificate read "invalid/missing".
 				const s = data as any;
 				log("");
 				log(colors.bold("SSL Certificate Status"));
-				log(
-					`  Status: ${s.valid || s.status === "active" ? colors.success("valid") : colors.error("invalid/missing")}`,
-				);
-				if (s.expiresAt)
-					log(`  Expires: ${new Date(s.expiresAt).toLocaleDateString()}`);
+				log(`  Status:    ${formatSslStatus(s.status)}`);
+				if (s.message) log(`  ${colors.dim(s.message)}`);
+				if (s.activatedAt) log(`  Activated: ${formatDate(s.activatedAt)}`);
 				log("");
 			} catch (err) {
 				failSpinner();
@@ -2656,6 +2698,70 @@ function findApp(
 	);
 }
 
+/**
+ * One search result row. The platform answers with `purchasable` and
+ * `purchasePrice` (DomainAvailability); `available` and `price` were never
+ * sent, so every result read "no" with no price. `purchasePrice` covers the
+ * registry's minimum term, which is two years for TLDs such as .ai.
+ */
+function availabilityRow(r: any): string[] {
+	const term =
+		typeof r.minYears === "number" && r.minYears > 1 ? `${r.minYears}yr` : "yr";
+	return [
+		colors.cyan(r.domainName || "-"),
+		r.purchasable ? colors.success("yes") : colors.dim("no"),
+		r.purchasable && typeof r.purchasePrice === "number"
+			? `${r.purchasePrice} ${r.currency || "SAR"}/${term}`
+			: "-",
+	];
+}
+
+type DnsRecordHint = { type: string; name: string; value: string };
+
+/**
+ * The records an unverified external domain still needs, built from what the
+ * platform actually returns: the routing contract from the domainRegistrar
+ * row (`apexIps` for a gateway apex, `cnameTarget` otherwise) plus the
+ * challenges from verifyExternalDomain (ownership TXT, the edge's activation
+ * TXT, a wildcard's certificate TXT, and a CAA grant when a CAA policy blocks
+ * issuance).
+ */
+function pendingVerificationRecords(
+	domain: any,
+	result: any,
+): DnsRecordHint[] {
+	const records: DnsRecordHint[] = [];
+	const apexIps: string[] = Array.isArray(domain?.apexIps) ? domain.apexIps : [];
+	if (domain?.isApex && apexIps.length > 0) {
+		for (const ip of apexIps) records.push({ type: "A", name: "@", value: ip });
+	} else if (domain?.cnameTarget) {
+		records.push({
+			type: "CNAME",
+			name: domain.isApex ? "@" : domain.domainName,
+			value: domain.cnameTarget,
+		});
+	}
+	for (const challenge of [
+		result?.ownershipVerification,
+		result?.cfOwnershipVerification,
+	]) {
+		if (challenge?.name && challenge?.value) {
+			records.push({ type: "TXT", name: challenge.name, value: challenge.value });
+		}
+	}
+	if (result?.dcvTxtName && result?.dcvTxtValue) {
+		records.push({ type: "TXT", name: result.dcvTxtName, value: result.dcvTxtValue });
+	}
+	if (result?.caaBlock?.recordName && result?.caaBlock?.recordValue) {
+		records.push({
+			type: "CAA",
+			name: result.caaBlock.recordName,
+			value: result.caaBlock.recordValue,
+		});
+	}
+	return records;
+}
+
 /** Find a registered domain by domainId or domainName */
 function findRegisteredDomain(domains: any[], identifier: string) {
 	const lowerIdentifier = identifier.toLowerCase();
@@ -2701,8 +2807,26 @@ function formatStatus(status: string): string {
 	}
 }
 
-function formatCfStatus(status: string | null | undefined): string {
+function formatSslStatus(status: string | null | undefined): string {
+	switch (status) {
+		case "active":
+			return colors.success("active");
+		case "failed":
+			return colors.error("failed");
+		case undefined:
+		case null:
+		case "":
+			return colors.warn("pending");
+		default:
+			return colors.warn(String(status).replace(/_/g, " "));
+	}
+}
+
+function formatDnsZoneStatus(status: string | null | undefined): string {
 	if (!status) return colors.dim("-");
+	// Abandoned external domains carry a `cleanup_<stage>:<lease>` marker while
+	// the platform removes them; the lease suffix means nothing to a customer.
+	if (status.startsWith("cleanup_")) return colors.dim("removing");
 	switch (status) {
 		case "active":
 			return colors.success("active");

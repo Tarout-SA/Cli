@@ -1,4 +1,4 @@
-import type { Command } from "commander";
+import { type Command, Option } from "commander";
 import open from "open";
 import { getApiClient } from "../lib/api.js";
 import { toAppNameSlug } from "../lib/app-name.js";
@@ -201,13 +201,17 @@ export function registerAppsCommands(program: Command) {
 					`Slug: ${application.appName}`,
 				]);
 
+				// `apps info` only reads the app; point at the commands that
+				// actually set its source.
+				const shortId = application.applicationId.slice(0, 8);
 				log("Next steps:");
 				log(
-					`  1. Connect a source: ${colors.dim(`tarout apps info ${application.applicationId.slice(0, 8)}`)}`,
+					`  1. Connect a source: ${colors.dim(`tarout apps git github ${shortId} --repo <owner/repo>`)}`,
 				);
 				log(
-					`  2. Deploy: ${colors.dim(`tarout deploy ${application.applicationId.slice(0, 8)}`)}`,
+					`     ${colors.dim(`(or: tarout apps git gitlab | url | docker-hub ${shortId})`)}`,
 				);
+				log(`  2. Deploy: ${colors.dim(`tarout deploy ${shortId}`)}`);
 				log("");
 			} catch (err) {
 				handleError(err);
@@ -332,20 +336,12 @@ export function registerAppsCommands(program: Command) {
 				log(`  ${getStatusBadge(app.applicationStatus)}`);
 				log("");
 
-				// Source
+				// Source. application.one strips the github/gitlab/bitbucket/gitea
+				// relations, so read the source columns on the app row itself.
 				log(`${colors.bold("Source")}`);
-				if (app.sourceType) {
-					log(`  Type: ${app.sourceType}`);
-					if (app.github) {
-						log(`  Repository: ${app.github.repository}`);
-						log(`  Branch: ${app.github.branch}`);
-					} else if (app.gitlab) {
-						log(`  Repository: ${app.gitlab.gitlabRepository}`);
-						log(`  Branch: ${app.gitlab.gitlabBranch}`);
-					} else if (app.bitbucket) {
-						log(`  Repository: ${app.bitbucket.bitbucketRepository}`);
-						log(`  Branch: ${app.bitbucket.bitbucketBranch}`);
-					}
+				const sourceLines = describeAppSource(app);
+				if (sourceLines.length > 0) {
+					for (const line of sourceLines) log(`  ${line}`);
 				} else {
 					log(`  ${colors.dim("Not configured")}`);
 				}
@@ -785,14 +781,48 @@ export function registerAppsCommands(program: Command) {
 	git
 		.command("docker-hub")
 		.argument("<app>", "Application ID or name")
-		.description("Deploy from a Docker Hub image")
-		.option("-i, --image <image>", "Docker image (e.g., nginx, myorg/myapp)")
-		.option("--username <username>", "Docker Hub username (for private images)")
-		.option("--token <token>", "Docker Hub access token (for private images)")
-		.option("--private", "Mark as private image")
+		.description(
+			"Deploy from a public Docker Hub image pinned to a digest (image@sha256:<digest>)",
+		)
+		.option(
+			"-i, --image <image>",
+			"Public image pinned to a digest, e.g. nginx@sha256:<64 hex chars>",
+		)
+		.option(
+			"--port <port>",
+			"Port the container listens on (platform default: 3000)",
+		)
+		// Private images are refused by the platform. The flags stay parseable
+		// only so old scripts get a clear refusal instead of "unknown option".
+		.addOption(new Option("--username <username>").hideHelp())
+		.addOption(new Option("--token <token>").hideHelp())
+		.addOption(new Option("--private").hideHelp())
 		.action(async (appIdentifier, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
+
+				if (
+					options.private ||
+					options.username !== undefined ||
+					options.token !== undefined
+				) {
+					throw new InvalidArgumentError(
+						"Private Docker images are not supported yet. Use a public image pinned to a sha256 digest (drop --private, --username and --token).",
+					);
+				}
+				let containerPort: number | undefined;
+				if (options.port !== undefined) {
+					containerPort = Number(options.port);
+					if (
+						!Number.isInteger(containerPort) ||
+						containerPort < 1 ||
+						containerPort > 65_535
+					) {
+						throw new InvalidArgumentError(
+							`Invalid --port "${options.port}". Use a whole number from 1 to 65535.`,
+						);
+					}
+				}
 
 				const client = getApiClient();
 
@@ -809,12 +839,21 @@ export function registerAppsCommands(program: Command) {
 				let image = options.image;
 				if (!image) {
 					image = await input(
-						"Docker image (e.g., nginx:latest or myorg/app:1.0):",
+						"Docker image pinned to a digest (e.g., nginx@sha256:<digest>):",
 						undefined,
 						{
 							field: "docker_image",
 							flag: "--image",
 						},
+					);
+				}
+				image = String(image ?? "").trim();
+				// The platform only deploys immutable references; a tag such as
+				// nginx:latest is rejected server-side. Fail before the round trip.
+				if (!/@sha256:[a-f0-9]{64}$/i.test(image)) {
+					failSpinner();
+					throw new InvalidArgumentError(
+						`"${image}" is not pinned to a digest. Tarout deploys only immutable images: pass image@sha256:<64 hex chars>, e.g. nginx@sha256:... (find the digest with \`docker buildx imagetools inspect <image>:<tag>\`).`,
 					);
 				}
 
@@ -823,19 +862,17 @@ export function registerAppsCommands(program: Command) {
 				await client.application.saveDockerHubProvider.mutate({
 					applicationId: app.applicationId,
 					dockerHubImage: image,
-					dockerHubUsername: options.username,
-					dockerHubAccessToken: options.token,
-					dockerHubIsPrivate: options.private || false,
+					...(containerPort !== undefined ? { containerPort } : {}),
 				});
 
 				succeedSpinner("Docker Hub image configured!");
 
 				if (isJsonMode()) {
-					outputData({ configured: true, image });
+					outputData({ configured: true, image, containerPort });
 				} else {
 					box("Docker Hub Configured", [
 						`Image: ${colors.cyan(image)}`,
-						`Access: ${options.private ? colors.warn("private") : "public"}`,
+						`Port: ${containerPort ?? 3000}`,
 					]);
 					log(`Deploy: ${colors.dim(`tarout deploy ${appIdentifier}`)}`);
 					log("");
@@ -849,14 +886,27 @@ export function registerAppsCommands(program: Command) {
 	git
 		.command("url")
 		.argument("<app>", "Application ID or name")
-		.description("Connect a custom git URL as source")
-		.option("-u, --url <git-url>", "Git repository URL")
+		.description(
+			"Connect a public Git repository by HTTPS URL (for private repos use `apps git github` or `apps git gitlab`)",
+		)
+		.option(
+			"-u, --url <git-url>",
+			"HTTPS repository URL, e.g. https://git.example.com/org/repo.git",
+		)
 		.option("-b, --branch <branch>", "Branch to deploy", "main")
 		.option("--build-path <path>", "Build path", "/")
-		.option("--ssh-key <key-id>", "SSH key ID for private repos")
+		// The platform clones custom Git remotes over HTTPS only and never uses
+		// an SSH key. Kept parseable so old scripts get a clear refusal.
+		.addOption(new Option("--ssh-key <key-id>").hideHelp())
 		.action(async (appIdentifier, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
+
+				if (options.sshKey !== undefined) {
+					throw new InvalidArgumentError(
+						"--ssh-key is not supported: custom Git sources are cloned over HTTPS only. For a private repository, connect it with `tarout apps git github <app> --repo owner/repo` or `tarout apps git gitlab <app> --repo namespace/repo`.",
+					);
+				}
 
 				const client = getApiClient();
 
@@ -872,10 +922,16 @@ export function registerAppsCommands(program: Command) {
 
 				let gitUrl = options.url;
 				if (!gitUrl) {
-					gitUrl = await input("Git URL (https://... or git@...):", undefined, {
+					gitUrl = await input("Git URL (https://...):", undefined, {
 						field: "git_url",
 						flag: "--url",
 					});
+				}
+				gitUrl = String(gitUrl ?? "").trim();
+				const urlProblem = httpsGitUrlProblem(gitUrl);
+				if (urlProblem) {
+					failSpinner();
+					throw new InvalidArgumentError(urlProblem);
 				}
 
 				const _configSpinner = startSpinner("Connecting git repository...");
@@ -885,9 +941,6 @@ export function registerAppsCommands(program: Command) {
 					customGitUrl: gitUrl,
 					customGitBranch: options.branch || "main",
 					customGitBuildPath: options.buildPath || "/",
-					// customGitSSHKeyId is optional (string) — omit it entirely when
-					// unset; sending null fails validation (optional ≠ nullable).
-					...(options.sshKey ? { customGitSSHKeyId: options.sshKey } : {}),
 					watchPaths: [],
 					enableSubmodules: false,
 				});
@@ -1132,9 +1185,13 @@ export function registerAppsCommands(program: Command) {
 	apps
 		.command("analytics")
 		.argument("<app>", "Application ID or name")
-		.description("View application analytics")
-		.option("-d, --days <days>", "Days of data", "7")
-		.action(async (appIdentifier, options) => {
+		.description(
+			"View deployment analytics: success rate, recent deploys, domains",
+		)
+		// application.getAnalytics takes only the app id and reports all-time
+		// counts plus a fixed 7-day window; --days never reached the server.
+		.addOption(new Option("-d, --days <days>").hideHelp())
+		.action(async (appIdentifier) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
@@ -1154,8 +1211,7 @@ export function registerAppsCommands(program: Command) {
 
 				const data = await client.application.getAnalytics.query({
 					applicationId: app.applicationId,
-					days: Number.parseInt(options.days) || 7,
-				} as any);
+				});
 
 				succeedSpinner();
 
@@ -1164,27 +1220,34 @@ export function registerAppsCommands(program: Command) {
 					return;
 				}
 
-				const d = data as any;
+				// { deployments: { total, successful, failed, successRate,
+				// recentCount }, lastDeployment, domains: { count, primary },
+				// status, createdAt }
+				const d = (data ?? {}) as any;
+				const deps = d.deployments ?? {};
 
+				log("");
+				log(colors.bold(`Analytics for ${app.name}`));
 				log("");
 				log(
-					colors.bold(`Analytics for ${app.name} — last ${options.days} days`),
+					`  Deployments:  ${colors.cyan(formatCount(deps.total))} total, ${formatCount(deps.successful)} succeeded, ${formatCount(deps.failed)} failed (${deps.successRate ?? 0}% success)`,
 				);
-				log("");
-
-				if (d.requests !== undefined)
-					log(`  Requests: ${colors.cyan(String(d.requests))}`);
-				if (d.visitors !== undefined)
-					log(`  Visitors: ${colors.cyan(String(d.visitors))}`);
-				if (d.bandwidth !== undefined)
-					log(`  Bandwidth: ${colors.cyan(formatBytes(d.bandwidth))}`);
-				if (d.responseTime !== undefined)
-					log(`  Avg response: ${colors.cyan(`${d.responseTime}ms`)}`);
-				if (d.errorRate !== undefined)
+				log(
+					`  Last 7 days:  ${formatCount(deps.recentCount)} deployment${deps.recentCount === 1 ? "" : "s"}`,
+				);
+				if (d.lastDeployment) {
 					log(
-						`  Error rate: ${colors.cyan(`${(d.errorRate * 100).toFixed(2)}%`)}`,
+						`  Last deploy:  ${getStatusBadge(d.lastDeployment.status)} ${colors.dim(new Date(d.lastDeployment.createdAt).toLocaleString())}${d.lastDeployment.title ? ` ${colors.dim(`(${d.lastDeployment.title})`)}` : ""}`,
 					);
-
+				} else {
+					log(`  Last deploy:  ${colors.dim("never deployed")}`);
+				}
+				if (d.domains) {
+					log(
+						`  Domains:      ${formatCount(d.domains.count)}${d.domains.primary ? ` (primary: ${d.domains.primary})` : ""}`,
+					);
+				}
+				if (d.status) log(`  Status:       ${getStatusBadge(d.status)}`);
 				log("");
 			} catch (err) {
 				handleError(err);
@@ -1195,10 +1258,18 @@ export function registerAppsCommands(program: Command) {
 	apps
 		.command("metrics")
 		.argument("<app>", "Application ID or name")
-		.description("View application resource metrics (CPU, memory)")
-		.action(async (appIdentifier) => {
+		.description(
+			"View request telemetry: requests, errors, latency, status codes",
+		)
+		.option(
+			"--period <period>",
+			`Time window (${TELEMETRY_PERIODS.join(", ")})`,
+			"6h",
+		)
+		.action(async (appIdentifier, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
+				const period = parseTelemetryPeriod(options.period, "6h");
 
 				const client = getApiClient();
 
@@ -1216,7 +1287,8 @@ export function registerAppsCommands(program: Command) {
 
 				const data = await client.application.getMetrics.query({
 					applicationId: app.applicationId,
-				} as any);
+					period,
+				});
 
 				succeedSpinner();
 
@@ -1225,39 +1297,37 @@ export function registerAppsCommands(program: Command) {
 					return;
 				}
 
-				const d = data as any;
+				// Tarout Monitor request telemetry: { available, period, totals,
+				// latency, statusBreakdown, security, topPaths, timeline }.
+				const d = (data ?? {}) as any;
 
 				log("");
-				log(colors.bold(`Metrics for ${app.name}`));
+				log(colors.bold(`Metrics for ${app.name} (last ${d.period ?? period})`));
 				log("");
+				if (logNoTelemetry(d, period)) return;
 
-				if (d.cpu !== undefined) log(`  CPU: ${colors.cyan(`${d.cpu}%`)}`);
-				if (d.memory !== undefined)
-					log(`  Memory: ${colors.cyan(formatBytes(d.memory))}`);
-				if (d.memoryUsage !== undefined && d.memoryLimit !== undefined)
+				const totals = d.totals ?? {};
+				const latency = d.latency ?? {};
+				const codes = d.statusBreakdown ?? {};
+				log(`  Requests:     ${colors.cyan(formatCount(totals.requests))}`);
+				log(`  Page views:   ${formatCount(totals.pageViews)}`);
+				log(`  Errors:       ${formatCount(totals.errors)}`);
+				log(`  Slow:         ${formatCount(totals.slowRequests)}`);
+				log(
+					`  Latency:      avg ${formatMs(latency.avgMs)}, p95 ${formatMs(latency.p95Ms)}, max ${formatMs(latency.maxMs)}`,
+				);
+				log(
+					`  Status codes: 2xx ${formatCount(codes.s2xx)}  3xx ${formatCount(codes.s3xx)}  4xx ${formatCount(codes.s4xx)}  5xx ${formatCount(codes.s5xx)}`,
+				);
+				if (d.security?.monitored) {
 					log(
-						`  Memory: ${colors.cyan(formatBytes(d.memoryUsage))} / ${formatBytes(d.memoryLimit)}`,
-					);
-				if (d.uptime !== undefined)
-					log(`  Uptime: ${colors.cyan(String(d.uptime))}`);
-				if (d.restarts !== undefined)
-					log(`  Restarts: ${colors.cyan(String(d.restarts))}`);
-
-				const metrics = d.metrics || d.data || [];
-				if (Array.isArray(metrics) && metrics.length > 0) {
-					log("");
-					table(
-						["TIME", "CPU %", "MEM"],
-						metrics
-							.slice(-10)
-							.map((m: any) => [
-								formatTime(m.timestamp || m.time),
-								`${m.cpu || 0}%`,
-								formatBytes(m.memory || m.memoryUsage || 0),
-							]),
+						`  Security:     ${formatCount(d.security.events)} events, ${formatCount(d.security.blockedRequests)} blocked`,
 					);
 				}
-
+				if (d.latestAt) {
+					log(`  Latest event: ${new Date(d.latestAt).toLocaleString()}`);
+				}
+				logTopPaths(d.topPaths);
 				log("");
 			} catch (err) {
 				handleError(err);
@@ -1331,9 +1401,11 @@ export function registerAppsCommands(program: Command) {
 
 				const _syncSpinner = startSpinner("Syncing status...");
 
-				await client.application.syncApplicationStatus.mutate({
+				// syncApplicationStatus is a QUERY returning
+				// { applicationStatus, changed }; calling .mutate always failed.
+				const result = (await client.application.syncApplicationStatus.query({
 					applicationId: app.applicationId,
-				});
+				})) as { applicationStatus?: string; changed?: boolean } | null;
 
 				succeedSpinner("Status synced!");
 
@@ -1341,11 +1413,13 @@ export function registerAppsCommands(program: Command) {
 					outputData({
 						synced: true,
 						applicationId: app.applicationId,
+						applicationStatus: result?.applicationStatus ?? null,
+						changed: Boolean(result?.changed),
 					});
 				} else {
 					log("");
 					log(
-						`${colors.success("Status synced.")} Run ${colors.dim(`tarout apps info ${appIdentifier}`)} to view.`,
+						`Status: ${result?.applicationStatus ? getStatusBadge(result.applicationStatus) : colors.dim("unknown")}${result?.changed ? colors.dim(" (updated)") : ""}`,
 					);
 					log("");
 				}
@@ -1417,10 +1491,16 @@ export function registerAppsCommands(program: Command) {
 	apps
 		.command("visitors")
 		.argument("<app>", "Application ID or name")
-		.description("Show visitor traffic statistics for an application")
-		.action(async (appIdentifier) => {
+		.description("Show page views, requests and top paths for an application")
+		.option(
+			"--period <period>",
+			`Time window (${TELEMETRY_PERIODS.join(", ")})`,
+			"24h",
+		)
+		.action(async (appIdentifier, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
+				const period = parseTelemetryPeriod(options.period, "24h");
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching visitor stats...");
 				const appsList: AppSummary[] =
@@ -1432,23 +1512,30 @@ export function registerAppsCommands(program: Command) {
 				}
 				const data = await client.application.getVisitorStats.query({
 					applicationId: app.applicationId,
+					period,
 				});
 				succeedSpinner();
 				if (isJsonMode()) {
 					outputData(data);
 					return;
 				}
-				const d = data as any;
+				// { available, period, totalPageViews, totalRequests, totalErrors,
+				// uniqueVisitors (null: not tracked), topPaths, timeline, latestAt }
+				const d = (data ?? {}) as any;
 				log("");
-				log(colors.bold(`Visitor Stats: ${app.name}`));
-				if (d.totalVisitors !== undefined)
-					log(`  Total Visitors:  ${colors.cyan(String(d.totalVisitors))}`);
-				if (d.uniqueVisitors !== undefined)
-					log(`  Unique Visitors: ${colors.cyan(String(d.uniqueVisitors))}`);
-				if (d.pageViews !== undefined)
-					log(`  Page Views:      ${colors.cyan(String(d.pageViews))}`);
-				if (d.bounceRate !== undefined)
-					log(`  Bounce Rate:     ${d.bounceRate}%`);
+				log(colors.bold(`Visitor Stats: ${app.name} (last ${d.period ?? period})`));
+				log("");
+				if (logNoTelemetry(d, period)) return;
+				log(`  Page views:      ${colors.cyan(formatCount(d.totalPageViews))}`);
+				log(`  Requests:        ${formatCount(d.totalRequests)}`);
+				log(`  Errors:          ${formatCount(d.totalErrors)}`);
+				if (typeof d.uniqueVisitors === "number") {
+					log(`  Unique visitors: ${formatCount(d.uniqueVisitors)}`);
+				}
+				if (d.latestAt) {
+					log(`  Latest event:    ${new Date(d.latestAt).toLocaleString()}`);
+				}
+				logTopPaths(d.topPaths);
 				log("");
 			} catch (err) {
 				failSpinner();
@@ -1481,15 +1568,23 @@ export function registerAppsCommands(program: Command) {
 					outputData(data);
 					return;
 				}
-				const d = data as any;
+				// { appSubdomainStatus, customSubdomainStatus }, each
+				// "pending" | "active" | "failed" | null.
+				const d = (data ?? {}) as any;
+				const sslBadge = (status: unknown) =>
+					status === "active"
+						? colors.success("active")
+						: status === "failed"
+							? colors.error("failed")
+							: status
+								? colors.warn(String(status))
+								: colors.dim("none");
 				log("");
 				log(`SSL Status for ${colors.bold(app.name)}`);
-				log(
-					`  Certificate: ${d.valid || d.hasSSL ? colors.success("valid") : colors.error("invalid/missing")}`,
-				);
-				if (d.expiresAt)
-					log(`  Expires:     ${new Date(d.expiresAt).toLocaleDateString()}`);
-				if (d.issuer) log(`  Issuer:      ${d.issuer}`);
+				log(`  Platform subdomain: ${sslBadge(d.appSubdomainStatus)}`);
+				if (d.customSubdomainStatus) {
+					log(`  Custom subdomain:   ${sslBadge(d.customSubdomainStatus)}`);
+				}
 				log("");
 			} catch (err) {
 				failSpinner();
@@ -1522,15 +1617,18 @@ export function registerAppsCommands(program: Command) {
 					outputData(data);
 					return;
 				}
-				const d = data as any;
+				// { status, publicUrl, createdAt, deployed } or null.
+				const d = (data ?? {}) as any;
+				const url = formatAppUrl(d.publicUrl);
 				log("");
 				log(colors.bold(`Deployment Status: ${app.name}`));
 				log(
-					`  Status:   ${d.status === "done" || d.status === "success" ? colors.success(d.status) : d.status === "error" ? colors.error(d.status) : colors.warn(d.status || "-")}`,
+					`  Status:   ${d.status ? getStatusBadge(String(d.status)) : colors.dim("-")}`,
 				);
-				if (d.deployedAt)
-					log(`  Deployed: ${new Date(d.deployedAt).toLocaleString()}`);
-				if (d.buildDuration) log(`  Duration: ${d.buildDuration}s`);
+				log(
+					`  Deployed: ${d.deployed ? "yes" : colors.dim("not deployed yet")}`,
+				);
+				if (url) log(`  URL:      ${colors.cyan(url)}`);
 				log("");
 			} catch (err) {
 				failSpinner();
@@ -1542,11 +1640,18 @@ export function registerAppsCommands(program: Command) {
 	apps
 		.command("observability")
 		.argument("<app>", "Application ID or name")
-		.description("Show observability data (traces, errors) for an application")
-		.option("--period <period>", "Time period (1h, 24h, 7d)", "24h")
+		.description(
+			"Show traffic, uptime and deployment health for an application",
+		)
+		.option(
+			"--period <period>",
+			`Time window (${TELEMETRY_PERIODS.join(", ")})`,
+			"24h",
+		)
 		.action(async (appIdentifier, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
+				const period = parseTelemetryPeriod(options.period, "24h");
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching observability data...");
 				const appsList: AppSummary[] =
@@ -1558,22 +1663,75 @@ export function registerAppsCommands(program: Command) {
 				}
 				const data = await client.application.getObservabilityData.query({
 					applicationId: app.applicationId,
-					period: options.period || "24h",
+					period,
 				});
 				succeedSpinner();
 				if (isJsonMode()) {
 					outputData(data);
 					return;
 				}
-				const d = data as any;
+				// { traffic: { hasData, totalRequests, uniqueVisitors,
+				// totalBandwidthBytes, cacheHitRate, statusBreakdown, ... },
+				// uptime: { hasMonitor, currentStatus, uptimePercent,
+				// avgResponseTimeMs, lastCheckAt }, deployments: { stats: { total,
+				// successful, failed, successRate, avgDurationMs }, totalAllTime,
+				// lastSuccess, lastFailure } }
+				const d = (data ?? {}) as any;
+				const traffic = d.traffic ?? {};
+				const uptime = d.uptime ?? {};
+				const deploys = d.deployments ?? {};
+				const stats = deploys.stats ?? {};
 				log("");
-				log(colors.bold(`Observability: ${app.name}`));
-				if (d.errorRate !== undefined) log(`  Error Rate:   ${d.errorRate}%`);
-				if (d.p50 !== undefined) log(`  P50 Latency:  ${d.p50}ms`);
-				if (d.p95 !== undefined) log(`  P95 Latency:  ${d.p95}ms`);
-				if (d.p99 !== undefined) log(`  P99 Latency:  ${d.p99}ms`);
-				if (d.requestCount !== undefined)
-					log(`  Requests:     ${colors.cyan(String(d.requestCount))}`);
+				log(colors.bold(`Observability: ${app.name} (last ${period})`));
+				log("");
+				log(colors.bold("  Traffic"));
+				if (traffic.hasData) {
+					const codes = traffic.statusBreakdown ?? {};
+					log(`    Requests:        ${colors.cyan(formatCount(traffic.totalRequests))}`);
+					log(`    Unique visitors: ${formatCount(traffic.uniqueVisitors)}`);
+					log(`    Bandwidth:       ${formatBytes(Number(traffic.totalBandwidthBytes ?? 0))}`);
+					log(`    Cache hit rate:  ${traffic.cacheHitRate ?? 0}%`);
+					log(
+						`    Status codes:    2xx ${formatCount(codes.s2xx)}  3xx ${formatCount(codes.s3xx)}  4xx ${formatCount(codes.s4xx)}  5xx ${formatCount(codes.s5xx)}`,
+					);
+				} else {
+					log(`    ${colors.dim("No traffic recorded in this window.")}`);
+				}
+				log("");
+				log(colors.bold("  Uptime"));
+				if (uptime.hasMonitor) {
+					log(
+						`    Uptime:          ${uptime.uptimePercent ?? 0}% (${uptime.currentStatus ?? "pending"})`,
+					);
+					log(`    Avg response:    ${formatMs(uptime.avgResponseTimeMs)}`);
+					if (uptime.lastCheckAt) {
+						log(`    Last check:      ${new Date(uptime.lastCheckAt).toLocaleString()}`);
+					}
+				} else {
+					log(`    ${colors.dim("No uptime monitor on this app.")}`);
+				}
+				log("");
+				log(colors.bold("  Deployments"));
+				log(
+					`    Deploys:         ${formatCount(stats.total)} (${formatCount(stats.successful)} succeeded, ${formatCount(stats.failed)} failed)`,
+				);
+				if (stats.total) {
+					log(`    Success rate:    ${stats.successRate ?? 0}%`);
+				}
+				if (stats.avgDurationMs) {
+					log(`    Avg duration:    ${Math.round(stats.avgDurationMs / 1000)}s`);
+				}
+				log(`    All time:        ${formatCount(deploys.totalAllTime)}`);
+				if (deploys.lastSuccess?.createdAt) {
+					log(
+						`    Last success:    ${new Date(deploys.lastSuccess.createdAt).toLocaleString()}`,
+					);
+				}
+				if (deploys.lastFailure?.createdAt) {
+					log(
+						`    Last failure:    ${new Date(deploys.lastFailure.createdAt).toLocaleString()}${deploys.lastFailure.errorMessage ? ` ${colors.dim(`(${String(deploys.lastFailure.errorMessage).split("\n")[0]})`)}` : ""}`,
+					);
+				}
 				log("");
 			} catch (err) {
 				failSpinner();
@@ -1651,11 +1809,11 @@ export function registerAppsCommands(program: Command) {
 			}
 		});
 
-	// ── Check Coolify live status ─────────────────────────────────────────────────
+	// ── Check live runtime status ─────────────────────────────────────────────────
 	apps
 		.command("live-status")
 		.argument("<app>", "Application ID or name")
-		.description("Check real-time Coolify status for an application")
+		.description("Check the real-time runtime status of an application")
 		.action(async (appIdentifier) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
@@ -1668,7 +1826,10 @@ export function registerAppsCommands(program: Command) {
 					failSpinner();
 					throw new NotFoundError("Application", appIdentifier);
 				}
-				const data = await client.application.checkCoolifyLiveStatus.query({
+				// checkLiveStatus is the provider-neutral alias of the same
+				// procedure; it returns only { status }, and "unknown" when the app
+				// has not been placed on a host yet.
+				const data = await client.application.checkLiveStatus.query({
 					applicationId: app.applicationId,
 				});
 				succeedSpinner();
@@ -1676,14 +1837,23 @@ export function registerAppsCommands(program: Command) {
 					outputData(data);
 					return;
 				}
-				const d = data as any;
+				const d = (data ?? {}) as any;
 				log("");
 				log(colors.bold(`Live Status: ${app.name}`));
-				log(
-					`  Status:  ${d.status === "running" ? colors.success(d.status) : d.status === "error" ? colors.error(d.status) : colors.warn(d.status || "-")}`,
-				);
-				if (d.health) log(`  Health:  ${d.health}`);
-				if (d.uptime) log(`  Uptime:  ${d.uptime}`);
+				// The platform's runtime vocabulary: "done" = up and serving,
+				// "running" = starting or restarting, "idle" = stopped.
+				const liveLabels: Record<string, string> = {
+					done: colors.success("serving (done)"),
+					running: colors.warn("starting (running)"),
+					idle: colors.dim("stopped (idle)"),
+					error: colors.error("error"),
+					unknown: colors.dim("unknown (not deployed yet)"),
+				};
+				const liveStatus = String(d.status ?? "");
+				log(`  Status:  ${liveLabels[liveStatus] ?? (liveStatus || "-")}`);
+				if (liveStatus === "unknown") {
+					log(`  ${colors.dim(`Deploy it with: tarout deploy ${appIdentifier}`)}`);
+				}
 				log("");
 			} catch (err) {
 				failSpinner();
@@ -1960,10 +2130,12 @@ export function registerAppsCommands(program: Command) {
 			}
 		});
 
-	// Get create options (frameworks, runtimes, etc.)
+	// Which app tiers the organization can create right now.
 	apps
 		.command("create-options")
-		.description("List available frameworks and runtimes for new applications")
+		.description(
+			"Show which app tiers (FREE, SHARED, DEDICATED) you can create right now",
+		)
 		.action(async () => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
@@ -1975,17 +2147,33 @@ export function registerAppsCommands(program: Command) {
 					outputData(opts);
 					return;
 				}
-				const o = opts as any;
+				// { subscriptionPlanKey, isPaid, tiers: [{ tier, total, used,
+				// available }], dedicatedHostReady, defaultTier }
+				const o = (opts ?? {}) as any;
 				log("");
 				log(colors.bold("Application Create Options"));
-				if (o.frameworks) {
+				log(
+					`  Plan:         ${o.subscriptionPlanKey ?? colors.dim("none")}${o.isPaid ? "" : colors.dim(" (free)")}`,
+				);
+				log(`  Default tier: ${o.defaultTier ?? colors.dim("none available")}`);
+				if (o.dedicatedHostReady === false) {
 					log(
-						colors.dim("Frameworks: ") + (o.frameworks as string[]).join(", "),
+						`  ${colors.warn("Dedicated host is not ready yet: DEDICATED apps cannot be placed until it is.")}`,
 					);
 				}
-				if (o.buildTypes) {
-					log(
-						colors.dim("Build types: ") + (o.buildTypes as string[]).join(", "),
+				const tiers = Array.isArray(o.tiers) ? o.tiers : [];
+				if (tiers.length > 0) {
+					log("");
+					table(
+						["TIER", "USED", "TOTAL", "AVAILABLE"],
+						tiers.map((t: any) => [
+							String(t.tier),
+							formatCount(t.used),
+							formatCount(t.total),
+							t.available > 0
+								? colors.success(formatCount(t.available))
+								: colors.dim("0"),
+						]),
 					);
 				}
 				log("");
@@ -2048,7 +2236,9 @@ export function registerAppsCommands(program: Command) {
 				log(`  URL: ${colors.cyan(r.uploadUrl || r.url || "-")}`);
 				if (r.objectName)
 					log(`  Object: ${colors.dim(r.objectName)} (pass to complete-upload)`);
-				if (r.expiresAt) log(`  Expires: ${r.expiresAt}`);
+				// getDropUploadUrl returns expiresIn (seconds), not a timestamp.
+				if (typeof r.expiresIn === "number")
+					log(`  Expires in: ${r.expiresIn}s`);
 				log("");
 			} catch (err) {
 				handleError(err);
@@ -2068,7 +2258,9 @@ export function registerAppsCommands(program: Command) {
 			Number.parseInt(v, 10),
 		)
 		.option("--build-path <path>", "Build path within the archive", "/")
-		.description("Finalize a drag-and-drop upload and trigger deployment")
+		.description(
+			"Save an uploaded archive as the app's source (then run `tarout deploy <app> --source configured`)",
+		)
 		.action(async (appIdentifier, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
@@ -2091,8 +2283,26 @@ export function registerAppsCommands(program: Command) {
 					fileSize: options.fileSize,
 					dropBuildPath: options.buildPath || "/",
 				} as any);
-				succeedSpinner("Upload complete — deployment triggered!");
-				if (isJsonMode()) outputData(result);
+				// completeDropUpload only records the archive as the app's source;
+				// it queues nothing. The build starts on the next deploy.
+				succeedSpinner("Upload saved as the app's source.");
+				if (isJsonMode()) {
+					outputData(result);
+					return;
+				}
+				const saved = (result ?? {}) as any;
+				log("");
+				if (saved.filename) log(`  File:   ${saved.filename}`);
+				if (typeof saved.sizeBytes === "number")
+					log(`  Size:   ${formatBytes(saved.sizeBytes)}`);
+				if (saved.sha256) log(`  SHA256: ${colors.dim(saved.sha256)}`);
+				log("");
+				// `--source configured` builds the saved archive; a plain
+				// `tarout deploy` on an upload-sourced app re-uploads the cwd.
+				log(
+					`Nothing is deployed yet. Deploy it with: ${colors.dim(`tarout deploy ${appIdentifier} --source configured`)}`,
+				);
+				log("");
 			} catch (err) {
 				handleError(err);
 			}
@@ -2110,6 +2320,107 @@ function findApp(apps: AppSummary[], identifier: string) {
 			app.name.toLowerCase() === lowerIdentifier ||
 			app.appName?.toLowerCase() === lowerIdentifier,
 	);
+}
+
+/**
+ * Why the platform would refuse `url` as a custom Git source, or null when it
+ * is acceptable. The server clones custom remotes over HTTPS only and refuses
+ * credentials embedded in the URL (application.saveGitProvider).
+ */
+export function httpsGitUrlProblem(url: string): string | null {
+	const privateHint =
+		"For a private repository, connect it with `tarout apps git github` or `tarout apps git gitlab` instead.";
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		return `"${url}" is not an HTTPS URL. Custom Git sources must look like https://git.example.com/org/repo.git (SSH remotes such as git@host:org/repo are not supported). ${privateHint}`;
+	}
+	if (parsed.protocol !== "https:") {
+		return `Custom Git sources must use HTTPS (got ${parsed.protocol.replace(/:$/, "")}). ${privateHint}`;
+	}
+	if (parsed.username || parsed.password) {
+		return `Remove the credentials from the URL: the platform refuses user:password@ in Git URLs. ${privateHint}`;
+	}
+	return null;
+}
+
+/**
+ * Human lines for an app's configured source, read from the columns
+ * `application.one` returns. Every app is created with `sourceType: github`
+ * before any source is chosen, so the type alone means nothing: an empty
+ * result means "not configured".
+ */
+export function describeAppSource(app: Record<string, any>): string[] {
+	const type = typeof app.sourceType === "string" ? app.sourceType : "";
+	const joinRepo = (owner: unknown, repo: unknown) =>
+		owner ? `${owner}/${repo}` : String(repo);
+	const branch = (value: unknown) => (value ? [`Branch: ${value}`] : []);
+	switch (type) {
+		case "github":
+			return app.repository
+				? [
+						"Type: github",
+						`Repository: ${joinRepo(app.owner, app.repository)}`,
+						...branch(app.branch),
+					]
+				: [];
+		case "gitlab":
+			return app.gitlabRepository
+				? [
+						"Type: gitlab",
+						`Repository: ${app.gitlabPathNamespace || joinRepo(app.gitlabOwner, app.gitlabRepository)}`,
+						...branch(app.gitlabBranch),
+					]
+				: [];
+		case "bitbucket":
+			return app.bitbucketRepository
+				? [
+						"Type: bitbucket",
+						`Repository: ${joinRepo(app.bitbucketOwner, app.bitbucketRepository)}`,
+						...branch(app.bitbucketBranch),
+					]
+				: [];
+		case "gitea":
+			return app.giteaRepository
+				? [
+						"Type: gitea",
+						`Repository: ${joinRepo(app.giteaOwner, app.giteaRepository)}`,
+						...branch(app.giteaBranch),
+					]
+				: [];
+		case "git":
+			return app.customGitUrl
+				? [
+						"Type: git",
+						`URL: ${app.customGitUrl}`,
+						...branch(app.customGitBranch),
+					]
+				: [];
+		case "dockerhub":
+			return app.dockerHubImage
+				? ["Type: dockerhub", `Image: ${app.dockerHubImage}`]
+				: [];
+		case "docker":
+			return app.dockerImage
+				? ["Type: docker", `Image: ${app.dockerImage}`]
+				: [];
+		case "drop":
+			return app.dropSourceFilename || app.dropSourceUploadedAt
+				? [
+						"Type: upload",
+						`Upload: ${app.dropSourceFilename ?? "archive"}${
+							app.dropSourceUploadedAt
+								? ` (uploaded ${new Date(app.dropSourceUploadedAt).toLocaleString()})`
+								: ""
+						}`,
+					]
+				: [];
+		case "dockerfileUpload":
+			return ["Type: dockerfile", "Dockerfile: uploaded content"];
+		default:
+			return type ? [`Type: ${type}`] : [];
+	}
 }
 
 function formatDomain(domain: AppSummary["domain"]): string {
@@ -2152,6 +2463,51 @@ function formatLogLevel(level: string | null | undefined): string {
 		default:
 			return colors.dim(`[${level}]`);
 	}
+}
+
+function formatCount(value: unknown): string {
+	const n = typeof value === "number" ? value : Number(value ?? 0);
+	return Number.isFinite(n) ? n.toLocaleString("en-US") : "0";
+}
+
+/** Periods accepted by getMetrics / getVisitorStats / getObservabilityData. */
+const TELEMETRY_PERIODS = ["1h", "6h", "24h", "7d", "30d"] as const;
+
+function parseTelemetryPeriod(value: unknown, fallback: string): string {
+	const period = String(value ?? fallback).trim();
+	if (!(TELEMETRY_PERIODS as readonly string[]).includes(period)) {
+		throw new InvalidArgumentError(
+			`Invalid --period "${period}". Use one of: ${TELEMETRY_PERIODS.join(", ")}.`,
+		);
+	}
+	return period;
+}
+
+function formatMs(value: unknown): string {
+	return typeof value === "number" ? `${value}ms` : "-";
+}
+
+/**
+ * Print the first-party request telemetry shared by `apps metrics` and
+ * `apps visitors` (application-monitor-metrics.ts). Returns false when the
+ * window holds no events, after saying so.
+ */
+function logNoTelemetry(d: any, period: string): boolean {
+	if (d?.available) return false;
+	log(
+		`  ${colors.dim(`No telemetry recorded in the last ${d?.period ?? period}. Traffic appears here once the deployed app serves requests.`)}`,
+	);
+	log("");
+	return true;
+}
+
+function logTopPaths(paths: unknown): void {
+	if (!Array.isArray(paths) || paths.length === 0) return;
+	log("");
+	table(
+		["PATH", "COUNT"],
+		paths.map((p: any) => [String(p.path), formatCount(p.count)]),
+	);
 }
 
 function formatBytes(bytes: number): string {

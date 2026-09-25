@@ -4,11 +4,11 @@
  * withAuth() and resolve the target application via resolveAppRef() so agents
  * can address apps by name OR id.
  *
- * `app_list` returns a trimmed shape (id / name / status / plan / url) —
- * agents should call `app_info` for the full application object. The `url`
- * field falls back through `deployedUrl → url → null`; when the server
- * payload uses a different field name this is null and the caller can
- * fetch the full object.
+ * `app_list` returns a trimmed shape (id / name / status / plan / url /
+ * lastDeployment); agents should call `app_info` for the full application
+ * object. `status` is the router's `applicationStatus` and `url` is its
+ * `liveUrl` (custom domain, else the platform subdomain) as an https URL, or
+ * null when the app has never been deployed.
  *
  * Annotations:
  * - readOnlyHint on app_list / app_info / app_logs
@@ -20,6 +20,7 @@ import { z } from "zod";
 import { toAppNameSlug } from "../../lib/app-name.js";
 import { getCurrentProfile } from "../../lib/config.js";
 import { resolveAppRef } from "../../lib/env-core.js";
+import { formatAppUrl } from "../../utils/url.js";
 import { errorResult, withAuth } from "../runtime.js";
 
 const app = z.string().describe("Application name or id.");
@@ -30,7 +31,7 @@ export function registerAppsTools(server: McpServer): void {
 		{
 			title: "List applications in the active organization",
 			description:
-				"Wraps application.allByOrganization; returns trimmed fields.",
+				"Wraps application.allByOrganization; returns id, name, status (applicationStatus), plan, url (live URL or null when never deployed) and lastDeployment.",
 			inputSchema: {},
 			annotations: { readOnlyHint: true },
 		},
@@ -45,9 +46,12 @@ export function registerAppsTools(server: McpServer): void {
 					apps: all.map((a) => ({
 						id: a.applicationId,
 						name: a.name,
-						status: a.status,
-						plan: a.plan,
-						url: a.deployedUrl ?? a.url ?? null,
+						status: a.applicationStatus ?? null,
+						plan: a.plan ?? null,
+						url: formatAppUrl(
+							typeof a.liveUrl === "string" ? a.liveUrl : null,
+						),
+						lastDeployment: a.lastDeployment ?? null,
 					})),
 				};
 			}),

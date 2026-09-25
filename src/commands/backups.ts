@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { getApiClient } from "../lib/api.js";
 import { isLoggedIn } from "../lib/config.js";
 import { AuthError, CliError, handleError } from "../lib/errors.js";
+import { formatBytes } from "../lib/managed-db.js";
 import {
 	colors,
 	isJsonMode,
@@ -14,6 +15,94 @@ import {
 import { ExitCode } from "../utils/exit-codes.js";
 import { confirm, input, select } from "../utils/prompts.js";
 import { startSpinner, succeedSpinner } from "../utils/spinner.js";
+
+/**
+ * The platform requires a prefix on every backup schedule (validations/
+ * backup.ts: `prefix: z.string().min(1)`). Files land at
+ * `<prefix>/<database>/<database>-<timestamp>.<ext>` in the destination.
+ */
+export const DEFAULT_BACKUP_PREFIX = "tarout-backups";
+
+// One cron field: digits, names (mon, jan), and the * / , - ? L W # operators.
+const CRON_FIELD_RE = /^[0-9A-Za-z*/,?#-]+$/;
+
+/**
+ * Shape check for a backup cron schedule. The platform stores any string and
+ * evaluates it later with cron-parser; an unparseable one never fires and is
+ * only logged server-side. Accept the 5-field form (and cron-parser's 6-field
+ * form with a leading seconds field) so a typo fails here, loudly.
+ */
+export function assertCronSchedule(raw: unknown): string {
+	const value = String(raw ?? "").trim();
+	const fields = value.split(/\s+/).filter(Boolean);
+	if (
+		value.length > 120 ||
+		(fields.length !== 5 && fields.length !== 6) ||
+		!fields.every((field) => CRON_FIELD_RE.test(field))
+	) {
+		throw new CliError(
+			`"${value}" is not a valid cron schedule. Use five fields (minute hour day-of-month month day-of-week), for example "0 2 * * *" for 02:00 every day or "0 */6 * * *" for every 6 hours.`,
+			ExitCode.INVALID_ARGUMENTS,
+		);
+	}
+	return fields.join(" ");
+}
+
+/** `keepLatestCount` must be a positive integer (`z.number().int().min(1)`). */
+export function parseKeepCount(raw: unknown): number {
+	const value = String(raw ?? "").trim();
+	const count = Number(value);
+	if (!/^\d+$/.test(value) || !Number.isSafeInteger(count) || count < 1) {
+		throw new CliError(
+			`--keep must be a positive whole number (the number of backups to keep); got "${value}".`,
+			ExitCode.INVALID_ARGUMENTS,
+		);
+	}
+	return count;
+}
+
+type BackupDatabaseType = "postgres" | "mysql";
+
+/** The engine a sanitized `backup.one` record belongs to. */
+function backupDatabaseType(backup: any): BackupDatabaseType {
+	if (backup?.databaseType === "mysql" || backup?.databaseType === "postgres") {
+		return backup.databaseType;
+	}
+	return backup?.mysqlId || backup?.mysql ? "mysql" : "postgres";
+}
+
+/**
+ * `backup.listBackupFiles` and `backup.getBackupDownloadUrl` need the
+ * database id, its engine and the destination, and the platform only serves
+ * files that a schedule for that database + destination covers. A schedule
+ * carries all three, so resolve them from `backup.one`.
+ */
+async function resolveBackupFileScope(
+	client: ReturnType<typeof getApiClient>,
+	backupId: string,
+): Promise<{
+	databaseId: string;
+	databaseType: BackupDatabaseType;
+	destinationId: string;
+}> {
+	const backup: any = await client.backup.one.query({ backupId });
+	const databaseType = backupDatabaseType(backup);
+	const databaseId =
+		databaseType === "mysql" ? backup?.mysqlId : backup?.postgresId;
+	if (!databaseId) {
+		throw new CliError(
+			`Backup schedule "${backupId}" is not linked to a database.`,
+			ExitCode.INVALID_ARGUMENTS,
+		);
+	}
+	if (!backup?.destinationId) {
+		throw new CliError(
+			`Backup schedule "${backupId}" has no destination, so it has no files. Set one with \`tarout backups update ${backupId} --destination-id <id>\`.`,
+			ExitCode.INVALID_ARGUMENTS,
+		);
+	}
+	return { databaseId, databaseType, destinationId: backup.destinationId };
+}
 
 export function registerBackupsCommands(program: Command) {
 	const backups = program
@@ -28,17 +117,29 @@ export function registerBackupsCommands(program: Command) {
 		.option("--mysql-id <id>", "MySQL database ID")
 		.option("--destination-id <id>", "Backup destination ID")
 		.option("--schedule <cron>", "Cron schedule (e.g., 0 2 * * *)", "0 2 * * *")
-		.option("--database <name>", "Database name to back up")
-		.option("--prefix <prefix>", "Backup file prefix")
+		.option(
+			"--database <name>",
+			"Database name to back up (defaults to the database's own name)",
+		)
+		.option(
+			"--prefix <prefix>",
+			`Folder for backup files in the destination (default: ${DEFAULT_BACKUP_PREFIX})`,
+		)
 		.option("--keep <n>", "Number of backups to keep", "7")
 		.option("--enabled", "Enable the backup schedule", true)
 		.action(async (options) => {
 			try {
+				// Validate what the user typed before any prompt or API call.
+				const schedule = assertCronSchedule(options.schedule || "0 2 * * *");
+				const keepLatestCount = parseKeepCount(options.keep ?? "7");
+				const prefix =
+					String(options.prefix ?? "").trim() || DEFAULT_BACKUP_PREFIX;
+
 				if (!isLoggedIn()) throw new AuthError();
 
 				const client = getApiClient();
 
-				let dbType: string;
+				let dbType: BackupDatabaseType;
 				let dbId: string;
 
 				if (options.postgresId) {
@@ -78,28 +179,37 @@ export function registerBackupsCommands(program: Command) {
 					});
 				}
 
-				const database =
-					options.database ||
-					(await input("Database name to back up:", undefined, {
-						field: "database",
-						flag: "--database",
-					}));
+				// Default to the database's real name, as the dashboard does,
+				// instead of prompting for something the platform already knows.
+				let database: string | undefined = options.database;
+				if (!database) {
+					const details: any =
+						dbType === "postgres"
+							? await client.postgres.one.query({ postgresId: dbId })
+							: await client.mysql.one.query({ mysqlId: dbId });
+					database =
+						details?.databaseName ||
+						(await input("Database name to back up:", undefined, {
+							field: "database",
+							flag: "--database",
+						}));
+				}
 
 				const _spinner = startSpinner("Creating backup schedule...");
 
-				const payload: Record<string, unknown> = {
-					databaseType: dbType,
-					database,
+				const common = {
+					database: database as string,
 					destinationId,
-					schedule: options.schedule || "0 2 * * *",
-					prefix: options.prefix,
-					keepLatestCount: Number.parseInt(options.keep) || 7,
+					schedule,
+					prefix,
+					keepLatestCount,
 					enabled: options.enabled !== false,
 				};
-				if (dbType === "postgres") payload.postgresId = dbId;
-				else payload.mysqlId = dbId;
-
-				await client.backup.create.mutate(payload as any);
+				await client.backup.create.mutate(
+					dbType === "postgres"
+						? { ...common, databaseType: "postgres", postgresId: dbId }
+						: { ...common, databaseType: "mysql", mysqlId: dbId },
+				);
 
 				succeedSpinner("Backup schedule created!");
 
@@ -139,19 +249,38 @@ export function registerBackupsCommands(program: Command) {
 					return;
 				}
 
+				// A sanitized backup record: schedule fields, the database it
+				// belongs to (postgresId / mysqlId + relation) and its destination.
+				// It has no createdAt.
 				const b = backup as any;
+				const type = backupDatabaseType(b);
+				const databaseId = type === "mysql" ? b.mysqlId : b.postgresId;
+				const databaseName = (type === "mysql" ? b.mysql : b.postgres)?.name;
 				quietOutput(String(b.backupId || backupId));
 				log("");
 				log(colors.bold(`Backup: ${b.backupId || backupId}`));
 				log("");
-				log(`  Database: ${b.database || "-"}`);
+				log(
+					`  Database: ${databaseName ? `${databaseName} ` : ""}${colors.dim(
+						`(${type === "mysql" ? "MySQL" : "PostgreSQL"} ${databaseId || "-"})`,
+					)}`,
+				);
+				log(`  Backs up: ${b.database || "-"}`);
+				log(
+					`  Destination: ${
+						b.destination?.name ? `${b.destination.name} ` : ""
+					}${colors.dim(`(${b.destinationId || "none"})`)}`,
+				);
 				log(`  Schedule: ${b.schedule || "-"}`);
-				log(`  Keep: ${b.keepLatestCount || "-"} backups`);
+				log(
+					`  Keep: ${b.keepLatestCount ? `${b.keepLatestCount} backups` : "all backups"}`,
+				);
 				log(
 					`  Enabled: ${b.enabled ? colors.success("yes") : colors.dim("no")}`,
 				);
-				if (b.prefix) log(`  Prefix: ${b.prefix}`);
-				log(`  Created: ${formatDate(b.createdAt)}`);
+				log(`  Prefix: ${b.prefix || "-"}`);
+				log("");
+				log(colors.dim(`Files: tarout backups files ${b.backupId || backupId}`));
 				log("");
 			} catch (err) {
 				handleError(err);
@@ -170,32 +299,47 @@ export function registerBackupsCommands(program: Command) {
 		.option("--destination-id <id>", "New destination ID")
 		.action(async (backupId, options) => {
 			try {
+				// backup.update is a partial update: send backupId plus only the
+				// fields the user asked to change. Echoing the stored row back sent
+				// nulls (keepLatestCount, enabled, destinationId are nullable
+				// columns) that the update schema rejects.
+				if (options.enable && options.disable) {
+					throw new CliError(
+						"Pass either --enable or --disable, not both.",
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+				const updates: {
+					backupId: string;
+					schedule?: string;
+					keepLatestCount?: number;
+					enabled?: boolean;
+					destinationId?: string;
+				} = { backupId };
+				if (options.schedule !== undefined) {
+					updates.schedule = assertCronSchedule(options.schedule);
+				}
+				if (options.keep !== undefined) {
+					updates.keepLatestCount = parseKeepCount(options.keep);
+				}
+				if (options.enable) updates.enabled = true;
+				if (options.disable) updates.enabled = false;
+				if (options.destinationId) {
+					updates.destinationId = String(options.destinationId);
+				}
+				if (Object.keys(updates).length === 1) {
+					throw new CliError(
+						"Nothing to update. Pass --schedule, --keep, --enable, --disable or --destination-id.",
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+
 				if (!isLoggedIn()) throw new AuthError();
 
 				const client = getApiClient();
-				const _spinner = startSpinner("Fetching backup...");
-
-				const existing = await client.backup.one.query({ backupId });
-				const e = existing as any;
-
-				const updates: Record<string, unknown> = {
-					backupId,
-					databaseType: e.postgres ? "postgres" : "mysql",
-					database: e.database,
-					destinationId: options.destinationId || e.destinationId,
-					schedule: options.schedule || e.schedule,
-					prefix: e.prefix,
-					keepLatestCount: options.keep
-						? Number.parseInt(options.keep)
-						: e.keepLatestCount,
-					enabled: options.enable ? true : options.disable ? false : e.enabled,
-				};
-				if (e.postgresId) updates.postgresId = e.postgresId;
-				if (e.mysqlId) updates.mysqlId = e.mysqlId;
-
 				const _updateSpinner = startSpinner("Updating backup...");
 
-				await client.backup.update.mutate(updates as any);
+				await client.backup.update.mutate(updates);
 
 				succeedSpinner("Backup updated!");
 
@@ -253,7 +397,7 @@ export function registerBackupsCommands(program: Command) {
 			}
 		});
 
-	// Trigger manual backup — PostgreSQL
+	// Trigger a manual backup
 	backups
 		.command("run")
 		.argument("<backup-id>", "Backup ID to run now")
@@ -265,11 +409,12 @@ export function registerBackupsCommands(program: Command) {
 
 				const client = getApiClient();
 
-				let dbType = "postgres";
+				let dbType: BackupDatabaseType = "postgres";
 				if (!options.mysql) {
 					try {
 						const b = await client.backup.one.query({ backupId });
-						dbType = (b as any).mysql ? "mysql" : "postgres";
+						// databaseType is the authoritative engine on the record.
+						dbType = backupDatabaseType(b);
 					} catch {
 						// default to postgres
 					}
@@ -299,21 +444,22 @@ export function registerBackupsCommands(program: Command) {
 			}
 		});
 
-	// List backup files in a destination
+	// List the files a backup schedule has written
 	backups
 		.command("files")
-		.argument("<destination-id>", "Backup destination ID")
-		.description("List backup files in a destination")
-		.option("-s, --search <path>", "Search path or prefix", "")
-		.action(async (destinationId, options) => {
+		.argument("<backup-id>", "Backup schedule ID (from `tarout db backups <db>`)")
+		.description("List the backup files a backup schedule has written")
+		.option("-s, --search <path>", "Only files whose path contains this", "")
+		.action(async (backupId, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
 				const client = getApiClient();
 				const _spinner = startSpinner("Listing backup files...");
 
+				const scope = await resolveBackupFileScope(client, backupId);
 				const files = await client.backup.listBackupFiles.query({
-					destinationId,
+					...scope,
 					search: options.search || "",
 				});
 
@@ -324,7 +470,7 @@ export function registerBackupsCommands(program: Command) {
 					return;
 				}
 
-				const list = Array.isArray(files) ? files : [];
+				const list: any[] = Array.isArray(files) ? files : [];
 
 				if (!list.length) {
 					log("");
@@ -333,15 +479,21 @@ export function registerBackupsCommands(program: Command) {
 				}
 
 				log("");
+				// Path is the full object key: `download-url` needs it verbatim.
 				table(
-					["NAME", "SIZE", "TYPE"],
+					["PATH", "SIZE", "TYPE"],
 					list.map((f: any) => [
-						f.Name || f.Path || "",
+						f.Path || f.Name || "",
 						f.IsDir ? colors.dim("DIR") : formatBytes(f.Size || 0),
 						f.IsDir ? colors.dim("directory") : "file",
 					]),
 				);
 				log("");
+				log(
+					colors.dim(
+						`Download one with: tarout backups download-url ${backupId} <path>`,
+					),
+				);
 			} catch (err) {
 				handleError(err);
 			}
@@ -350,18 +502,19 @@ export function registerBackupsCommands(program: Command) {
 	// Get download URL for a backup file
 	backups
 		.command("download-url")
-		.argument("<destination-id>", "Backup destination ID")
-		.argument("<backup-file>", "Backup file path")
+		.argument("<backup-id>", "Backup schedule ID (from `tarout db backups <db>`)")
+		.argument("<backup-file>", "Backup file path (from `tarout backups files`)")
 		.description("Get a signed download URL for a backup file")
-		.action(async (destinationId, backupFile) => {
+		.action(async (backupId, backupFile) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
 				const client = getApiClient();
 				const _spinner = startSpinner("Generating download URL...");
 
+				const scope = await resolveBackupFileScope(client, backupId);
 				const result = await client.backup.getBackupDownloadUrl.mutate({
-					destinationId,
+					...scope,
 					backupFile,
 				});
 
@@ -385,29 +538,19 @@ export function registerBackupsCommands(program: Command) {
 			}
 		});
 
-	// Trigger web server backup
+	// Web server backups. `backup.manualBackupWebServer` always throws ("not
+	// supported in cloud-native mode"), so answer here instead of sending a
+	// request that can only fail with an opaque server error.
 	backups
 		.command("backup-web")
-		.argument("<backup-id>", "Backup configuration ID")
-		.description("Manually trigger a web server / app backup")
-		.action(async (backupId) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-				const client = getApiClient();
-				const _spinner = startSpinner("Triggering web server backup...");
-				const result = await client.backup.manualBackupWebServer.mutate({
-					backupId,
-				} as any);
-				succeedSpinner("Web server backup triggered!");
-				if (isJsonMode()) outputData(result);
-				else {
-					log("");
-					log(colors.success("Backup job started. Check logs for progress."));
-					log("");
-				}
-			} catch (err) {
-				handleError(err);
-			}
+		.argument("[backup-id]", "Backup configuration ID")
+		.description("No longer applies: web server backups are not supported")
+		.action(() => {
+			handleError(
+				new CliError(
+					"Web server backups are not supported on Tarout. To back up a database now, run `tarout backups run <backup-id>`.",
+				),
+			);
 		});
 
 	// Restore a backup.
@@ -416,39 +559,21 @@ export function registerBackupsCommands(program: Command) {
 	// (`backup.restoreBackupWithLogs`, streamed for live logs). The CLI talks to
 	// the API over `httpBatchLink`, which cannot consume subscriptions, so there
 	// is no transport that can drive a restore from here today. Rather than emit
-	// a cryptic "no mutation procedure" error (the old code called `.mutate()` on
-	// a subscription, with the wrong input shape too), fail with clear guidance.
+	// a cryptic "no mutation procedure" error, fail with clear guidance.
 	//
 	// TODO(platform): expose a non-subscription restore endpoint (mutation that
-	// enqueues the job and returns a jobId) so the CLI can offer restore. Tracked
-	// in the CLI/dashboard consistency work.
+	// enqueues the job and returns a jobId) so the CLI can offer restore.
 	backups
 		.command("restore")
 		.argument("<backup-id>", "Backup configuration ID")
 		.argument("<backup-file>", "Backup file name to restore")
-		.description("Restore a backup (currently dashboard-only)")
+		.description("Restore a backup (from the dashboard's Backups tab)")
 		.action(async (_backupId, _backupFile) => {
 			handleError(
 				new CliError(
-					"Backup restore isn't available from the CLI yet — the platform only exposes it as a streaming endpoint. Restore from the Tarout dashboard for now.",
+					"Backup restore is not available from the CLI: the platform runs it as a streaming job this client cannot drive. Restore from the Backups tab of the database in the Tarout dashboard.",
 					ExitCode.GENERAL_ERROR,
 				),
 			);
 		});
-}
-
-function formatDate(date: string | Date | null | undefined): string {
-	if (!date) return colors.dim("-");
-	return new Date(date).toLocaleDateString("en-US", {
-		month: "short",
-		day: "numeric",
-		year: "numeric",
-	});
-}
-
-function formatBytes(bytes: number): string {
-	if (!bytes || bytes === 0) return "0 B";
-	const units = ["B", "KB", "MB", "GB", "TB"];
-	const i = Math.floor(Math.log(bytes) / Math.log(1024));
-	return `${(bytes / 1024 ** i).toFixed(1)} ${units[i]}`;
 }

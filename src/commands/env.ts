@@ -411,7 +411,10 @@ export function registerEnvCommands(program: Command) {
 		.argument("<app>", "Application ID or name")
 		.description("Upload environment variables from .env file")
 		.option("-i, --input <file>", "Input file path", ".env")
-		.option("--replace", "Replace all existing variables (default: merge)")
+		.option(
+			"--replace",
+			"Replace all existing variables (default: merge). Requires --restart",
+		)
 		.option(
 			"--restart",
 			"Restart the app to apply now (default: apply on next restart)",
@@ -419,6 +422,15 @@ export function registerEnvCommands(program: Command) {
 		.action(async (appIdentifier, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
+
+				// The platform refuses a replace-all import without a restart
+				// (apiImportEnvVariables: it must confirm a healthy replacement
+				// workload), so say why here instead of after the round trip.
+				if (options.replace && !options.restart) {
+					throw new InvalidArgumentError(
+						"--replace deletes every variable missing from the file, so the platform only accepts it together with --restart (the app restarts to confirm it is healthy with the new set). Re-run with --replace --restart, or drop --replace to merge.",
+					);
+				}
 
 				// Read the file
 				if (!existsSync(options.input)) {
@@ -458,8 +470,14 @@ export function registerEnvCommands(program: Command) {
 					outputData(result);
 				} else {
 					quietOutput(String(result.imported));
+					// `skipped` counts entries the platform refused as invalid
+					// (bad key name or oversized value), not existing keys.
 					if (result.skipped > 0) {
-						log(colors.dim(`Skipped ${result.skipped} (already exist)`));
+						log(
+							colors.dim(
+								`Skipped ${result.skipped} invalid entr${result.skipped === 1 ? "y" : "ies"} (keys use letters, digits and underscores and cannot start with a digit; values are limited to 64 KB)`,
+							),
+						);
 					}
 					if (!options.restart)
 						log(

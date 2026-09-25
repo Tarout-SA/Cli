@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import type { Command } from "commander";
+import { type Command, Option } from "commander";
 import { getApiClient } from "../lib/api.js";
 import { toAppNameSlug } from "../lib/app-name.js";
 import { isLoggedIn } from "../lib/config.js";
@@ -33,7 +33,7 @@ import {
 	table,
 } from "../lib/output.js";
 import { ExitCode, exit } from "../utils/exit-codes.js";
-import { confirm, input, select } from "../utils/prompts.js";
+import { confirm, input } from "../utils/prompts.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
 import {
 	emitNeedsUpgrade,
@@ -43,6 +43,15 @@ import {
 	resolveDatabasePlanOrExit,
 } from "./deploy.js";
 import { requireProfile } from "../lib/auth-profile.js";
+import {
+	consoleSqlProblem,
+	EXTERNAL_ACCESS_MAX_CIDRS,
+	EXTERNAL_ACCESS_TLS_MESSAGE,
+	EXTERNAL_POOLER_DEFAULT_PORT,
+	formatBytes,
+	MANAGED_DB_LIFECYCLE_MESSAGE,
+	MYSQL_CREATE_UNAVAILABLE_MESSAGE,
+} from "../lib/managed-db.js";
 
 type DatabaseType = "postgres" | "mysql";
 
@@ -246,7 +255,9 @@ export function registerDbCommands(program: Command) {
 				table(
 					["ID", "NAME", "TYPE", "STATUS", "CREATED"],
 					databases.map((db) => [
-						colors.cyan(db.id.slice(0, 8)),
+						// The full id: every other command (and MCP's exact-match
+						// resolveDbRef) needs it, and a prefix can be ambiguous.
+						colors.cyan(db.id),
 						db.name,
 						getTypeLabel(db.type),
 						getStatusBadge(db.status),
@@ -267,8 +278,12 @@ export function registerDbCommands(program: Command) {
 	// Create database
 	db.command("create")
 		.argument("[name]", "Database name")
-		.description("Create a new database")
-		.option("-t, --type <type>", "Database type (postgres, mysql)", "postgres")
+		.description("Create a new PostgreSQL database")
+		.option(
+			"-t, --type <type>",
+			"Database engine (only postgres is available)",
+			"postgres",
+		)
 		.option(
 			"-p, --plan <plan>",
 			"Database plan: free, starter, standard, or pro (defaults to this project's entitled tier)",
@@ -280,34 +295,37 @@ export function registerDbCommands(program: Command) {
 		)
 		.action(async (name, options) => {
 			try {
+				// Only PostgreSQL can be created: mysql.create always throws
+				// PRECONDITION_FAILED on the platform. Refuse before any auth or
+				// API call so the answer is the same logged in or not.
+				const dbType = String(options.type ?? "postgres")
+					.trim()
+					.toLowerCase();
+				if (dbType === "mysql") {
+					throw new CliError(
+						`${MYSQL_CREATE_UNAVAILABLE_MESSAGE} Create one with \`tarout db create <name>\`.`,
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+				if (dbType !== "postgres") {
+					throw new CliError(
+						`Unsupported database type "${options.type}". Only postgres is available.`,
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+
 				if (!isLoggedIn()) throw new AuthError();
 
 				const profile = await requireProfile();
 
 				// Interactive mode if no name provided
 				let dbName = name || options.name;
-				let dbType = options.type as DatabaseType;
 
 				if (!dbName) {
 					dbName = await input("Database name:", undefined, {
 						field: "db_name",
 						flag: "--name",
 					});
-				}
-
-				if (!options.type && !shouldSkipConfirmation()) {
-					dbType = await select(
-						"Database type:",
-						[
-							{ name: "PostgreSQL", value: "postgres" },
-							{ name: "MySQL", value: "mysql" },
-						],
-						{
-							field: "db_type",
-							flag: "--type",
-							context: { name: dbName },
-						},
-					);
 				}
 
 				// Generate appName (URL-safe slug)
@@ -321,43 +339,22 @@ export function registerDbCommands(program: Command) {
 				// db.standard (or other) slot. An explicit --plan always wins.
 				const plan = await resolveDbPlan(client, options.plan);
 
-				const _spinner = startSpinner(`Creating ${dbType} database...`);
+				const _spinner = startSpinner("Creating PostgreSQL database...");
 
-				let database: any;
-
-				switch (dbType) {
-					case "postgres":
-						database = await client.postgres.create.mutate({
-							name: dbName,
-							appName: slug,
-							dockerImage: "postgres:17",
-							organizationId: profile.organizationId,
-							description: options.description,
-							plan,
-						});
-						break;
-					case "mysql":
-						database = await client.mysql.create.mutate({
-							name: dbName,
-							appName: slug,
-							dockerImage: "mysql:8",
-							organizationId: profile.organizationId,
-							description: options.description,
-							plan,
-						});
-						break;
-					default:
-						throw new CliError(
-							`Unsupported database type: ${dbType}`,
-							ExitCode.INVALID_ARGUMENTS,
-						);
-				}
+				const database: any = await client.postgres.create.mutate({
+					name: dbName,
+					appName: slug,
+					dockerImage: "postgres:17",
+					organizationId: profile.organizationId,
+					description: options.description,
+					plan,
+				});
 
 				succeedSpinner("Database created!");
 
-				// create now returns postgresId/mysqlId (plus env/project). Guard
-				// against an unexpectedly missing id so we never crash on .slice().
-				const dbId = database.postgresId || database.mysqlId;
+				// create returns postgresId (plus project). Guard against an
+				// unexpectedly missing id rather than printing "undefined".
+				const dbId: string | undefined = database.postgresId;
 
 				if (isJsonMode()) {
 					outputData(database);
@@ -369,13 +366,13 @@ export function registerDbCommands(program: Command) {
 				box("Database Created", [
 					`ID: ${colors.cyan(dbId ?? "(pending)")}`,
 					`Name: ${database.name ?? dbName}`,
-					`Type: ${getTypeLabel(dbType)}`,
+					`Type: ${getTypeLabel("postgres")}`,
 				]);
 
 				log("Next steps:");
 				if (dbId) {
 					log(
-						`  View connection info: ${colors.dim(`tarout db info ${dbId.slice(0, 8)}`)}`,
+						`  View connection info: ${colors.dim(`tarout db info ${dbId}`)}`,
 					);
 				}
 				log("");
@@ -582,6 +579,11 @@ export function registerDbCommands(program: Command) {
 					log(
 						`  ${colors.dim("External access is disabled or unavailable. Private infrastructure addresses are not exposed.")}`,
 					);
+					if (dbSummary.type === "postgres") {
+						log(
+							`  ${colors.dim(`Enable it with: tarout db external-access ${dbSummary.id} --enable --public (or --cidrs <ip>/32)`)}`,
+						);
+					}
 				}
 				log("");
 
@@ -619,121 +621,21 @@ export function registerDbCommands(program: Command) {
 			}
 		});
 
-	// Restart database
-	db.command("restart")
-		.argument("<db>", "Database ID or name")
-		.description("Restart a database")
-		.action(async (dbIdentifier) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-
-				const client = getApiClient();
-
-				const _spinner = startSpinner("Finding database...");
-				const allDbs = await getAllDatabases(client);
-				const dbInfo = findDatabase(allDbs, dbIdentifier);
-
-				if (!dbInfo) {
-					failSpinner();
-					const suggestions = findSimilar(
-						dbIdentifier,
-						allDbs.map((d) => d.name),
-					);
-					throw new NotFoundError("Database", dbIdentifier, suggestions);
-				}
-
-				const _restartSpinner = startSpinner(`Restarting ${dbInfo.name}...`);
-
-				switch (dbInfo.type) {
-					case "postgres":
-						await client.postgres.changeStatus.mutate({
-							postgresId: dbInfo.id,
-							applicationStatus: "running",
-						});
-						break;
-					case "mysql":
-						await client.mysql.changeStatus.mutate({
-							mysqlId: dbInfo.id,
-							applicationStatus: "running",
-						});
-						break;
-				}
-
-				succeedSpinner(`${dbInfo.name} restarting`);
-
-				if (isJsonMode()) {
-					outputData({ restarted: true, id: dbInfo.id });
-				}
-			} catch (err) {
-				handleError(err);
-			}
-		});
-
-	// Stop database
-	db.command("stop")
-		.argument("<db>", "Database ID or name")
-		.description("Stop a database")
-		.action(async (dbIdentifier) => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-
-				const client = getApiClient();
-
-				const _spinner = startSpinner("Finding database...");
-				const allDbs = await getAllDatabases(client);
-				const dbInfo = findDatabase(allDbs, dbIdentifier);
-
-				if (!dbInfo) {
-					failSpinner();
-					const suggestions = findSimilar(
-						dbIdentifier,
-						allDbs.map((d) => d.name),
-					);
-					throw new NotFoundError("Database", dbIdentifier, suggestions);
-				}
-
-				if (!shouldSkipConfirmation()) {
-					const confirmed = await confirm(
-						`Stop database "${dbInfo.name}"?`,
-						false,
-						{
-							field: "confirm_stop_db",
-							flag: "--yes",
-							context: { id: dbInfo.id, name: dbInfo.name, type: dbInfo.type },
-						},
-					);
-					if (!confirmed) {
-						log("Cancelled.");
-						return;
-					}
-				}
-
-				const _stopSpinner = startSpinner(`Stopping ${dbInfo.name}...`);
-
-				switch (dbInfo.type) {
-					case "postgres":
-						await client.postgres.changeStatus.mutate({
-							postgresId: dbInfo.id,
-							applicationStatus: "stopped",
-						});
-						break;
-					case "mysql":
-						await client.mysql.changeStatus.mutate({
-							mysqlId: dbInfo.id,
-							applicationStatus: "stopped",
-						});
-						break;
-				}
-
-				succeedSpinner(`${dbInfo.name} stopped`);
-
-				if (isJsonMode()) {
-					outputData({ stopped: true, id: dbInfo.id });
-				}
-			} catch (err) {
-				handleError(err);
-			}
-		});
+	// Restart / stop a database. Both used to call changeStatus, which only
+	// writes a status column: nothing is stopped or restarted, FREE databases
+	// are refused, and a paid database would read "stopped" while it keeps
+	// running. Keep the commands so old scripts get a clear answer, and never
+	// touch the API (same pattern as `servers cancel-vm-subscription`).
+	for (const verb of ["restart", "stop"] as const) {
+		db.command(verb)
+			.argument("[db]", "Database ID or name")
+			.description(
+				"No longer applies: managed databases cannot be stopped, started or restarted",
+			)
+			.action(() => {
+				handleError(new CliError(MANAGED_DB_LIFECYCLE_MESSAGE));
+			});
+	}
 
 	// List database backups
 	db.command("backups")
@@ -788,10 +690,12 @@ export function registerDbCommands(program: Command) {
 				log("");
 				log(`Backup schedules for ${colors.cyan(dbInfo.name)}:`);
 				log("");
+				// listByDatabase returns { backupId, schedule, enabled } only.
+				// Print the full id: `tarout backups <cmd> <backup-id>` needs it.
 				table(
 					["ID", "SCHEDULE", "ENABLED"],
 					backups.map((b: any) => [
-						colors.cyan((b.backupId || b.id || "").slice(0, 8)),
+						colors.cyan(String(b.backupId ?? "-")),
 						b.schedule || colors.dim("-"),
 						b.enabled ? colors.success("yes") : colors.dim("no"),
 					]),
@@ -800,6 +704,11 @@ export function registerDbCommands(program: Command) {
 				log(
 					colors.dim(
 						`${backups.length} schedule${backups.length === 1 ? "" : "s"}`,
+					),
+				);
+				log(
+					colors.dim(
+						"Details: tarout backups info <id>   Files: tarout backups files <id>",
 					),
 				);
 			} catch (err) {
@@ -1226,10 +1135,35 @@ export function registerDbCommands(program: Command) {
 		)
 		.option("--public", "Allow the whole internet (0.0.0.0/0)")
 		.option("--private", "Restrict to the CIDR allowlist (disable public)")
-		.option("--require-ssl", "Require SSL/TLS")
-		.option("--allow-insecure", "Do not require SSL/TLS")
+		// TLS is always required for external access (the platform refuses
+		// enabled without it). --require-ssl is accepted as a no-op so old
+		// scripts keep working; --allow-insecure fails with an explanation.
+		.addOption(new Option("--require-ssl").hideHelp())
+		.addOption(new Option("--allow-insecure").hideHelp())
 		.action(async (dbIdentifier, options) => {
 			try {
+				const requestedCidrs: string[] | undefined = options.cidrs
+					? String(options.cidrs)
+							.split(",")
+							.map((c: string) => c.trim())
+							.filter(Boolean)
+					: undefined;
+				if (
+					requestedCidrs &&
+					requestedCidrs.length > EXTERNAL_ACCESS_MAX_CIDRS
+				) {
+					throw new CliError(
+						`External access takes at most ${EXTERNAL_ACCESS_MAX_CIDRS} CIDRs; got ${requestedCidrs.length}. Use --public to allow every address instead.`,
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+				if (options.allowInsecure && !options.disable) {
+					throw new CliError(
+						EXTERNAL_ACCESS_TLS_MESSAGE,
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
 				const _spinner = startSpinner("Finding database...");
@@ -1258,22 +1192,23 @@ export function registerDbCommands(program: Command) {
 					: options.disable
 						? false
 						: (current.externalAccessEnabled ?? false);
-				const allowedCidrs = options.cidrs
-					? options.cidrs
-							.split(",")
-							.map((c: string) => c.trim())
-							.filter(Boolean)
-					: (current.externalAllowedCidrs ?? []);
+				const allowedCidrs =
+					requestedCidrs ?? current.externalAllowedCidrs ?? [];
 				const isPublic = options.public
 					? true
 					: options.private
 						? false
 						: (current.externalPublicAccess ?? false);
-				const requireSsl = options.requireSsl
-					? true
-					: options.allowInsecure
-						? false
-						: (current.externalSslRequired ?? false);
+				// Never preserve a stored `externalSslRequired: false`: rows created
+				// before the always-on rollout carry it, and the platform refuses
+				// enabled && !requireSsl. When disabling, the flag is ignored.
+				if (enabled && options.allowInsecure) {
+					throw new CliError(
+						EXTERNAL_ACCESS_TLS_MESSAGE,
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+				const requireSsl = true;
 				const _updateSpinner = startSpinner("Updating external access...");
 				await client.postgres.updateExternalAccess.mutate({
 					postgresId: dbSummary.id,
@@ -1281,7 +1216,7 @@ export function registerDbCommands(program: Command) {
 					allowedCidrs,
 					public: isPublic,
 					requireSsl,
-				} as any);
+				});
 				succeedSpinner("External access updated.");
 				if (isJsonMode())
 					outputData({
@@ -1333,15 +1268,20 @@ export function registerDbCommands(program: Command) {
 					return;
 				}
 				log("");
+				// listTables returns { schema, name, estimatedRows, totalBytes }.
+				// estimatedRows is the planner estimate (pg_class.reltuples): -1
+				// means the table was never analyzed, so the count is unknown.
 				table(
-					["SCHEMA", "TABLE", "ROWS"],
+					["SCHEMA", "TABLE", "ROWS", "SIZE"],
 					list.map((t: any) => [
 						t.schema || "public",
-						colors.cyan(t.name || t.table || "-"),
-						String(t.rowCount || t.rows || "-"),
+						colors.cyan(t.name || "-"),
+						formatEstimatedRows(t.estimatedRows),
+						typeof t.totalBytes === "number" ? formatBytes(t.totalBytes) : "-",
 					]),
 				);
 				log("");
+				log(colors.dim("ROWS is the planner's estimate; '-' means not analyzed yet."));
 			} catch (err) {
 				handleError(err);
 			}
@@ -1353,9 +1293,18 @@ export function registerDbCommands(program: Command) {
 		.argument("<table>", "Table name")
 		.description("Preview rows from a PostgreSQL table")
 		.option("--schema <schema>", "Schema name", "public")
-		.option("-n, --limit <n>", "Number of rows to preview", "20")
+		.option("-n, --limit <n>", "Number of rows to preview (1-100)", "20")
 		.action(async (dbIdentifier, tableName, options) => {
 			try {
+				// previewTable takes an integer limit of 1-100.
+				const rawLimit = String(options.limit ?? "20").trim();
+				const limit = Number(rawLimit);
+				if (!/^\d+$/.test(rawLimit) || limit < 1 || limit > 100) {
+					throw new CliError(
+						`--limit must be a whole number from 1 to 100; got "${rawLimit}".`,
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
 				const _spinner = startSpinner("Finding database...");
@@ -1376,8 +1325,8 @@ export function registerDbCommands(program: Command) {
 					postgresId: dbSummary.id,
 					schema: options.schema || "public",
 					table: tableName,
-					limit: Number.parseInt(options.limit || "20"),
-				} as any);
+					limit,
+				});
 				succeedSpinner();
 				if (isJsonMode()) {
 					outputData(result);
@@ -1409,9 +1358,15 @@ export function registerDbCommands(program: Command) {
 	db.command("sql")
 		.argument("<db>", "Postgres database ID or name")
 		.argument("<query>", "SQL query to execute")
-		.description("Execute a SQL query on a PostgreSQL database")
+		.description(
+			"Execute a SQL query on a PostgreSQL database (at most 10,000 characters)",
+		)
 		.action(async (dbIdentifier, sql) => {
 			try {
+				const problem = consoleSqlProblem(sql);
+				if (problem) {
+					throw new CliError(problem, ExitCode.INVALID_ARGUMENTS);
+				}
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
 				const _spinner = startSpinner("Finding database...");
@@ -1430,8 +1385,8 @@ export function registerDbCommands(program: Command) {
 				const _sqlSpinner = startSpinner("Executing SQL...");
 				const result = await client.postgres.executeSql.mutate({
 					postgresId: dbSummary.id,
-					sql,
-				} as any);
+					sql: sql.trim(),
+				});
 				succeedSpinner();
 				if (isJsonMode()) {
 					outputData(result);
@@ -1464,10 +1419,41 @@ export function registerDbCommands(program: Command) {
 		.argument("<db>", "Postgres database ID or name")
 		.argument("<file>", "Path to a local .sql file to execute")
 		.description(
-			"Import/restore a PostgreSQL database from a local .sql dump (runs it as SQL)",
+			"Run a local .sql file against a PostgreSQL database through the SQL console (at most 10,000 characters; no COPY ... FROM stdin, GRANT, REVOKE or role statements)",
 		)
 		.action(async (dbIdentifier, filePath) => {
 			try {
+				// Read and check the file before touching the API. The whole file
+				// goes to postgres.executeSql in one call, and the console caps it
+				// at 10,000 characters, blocks GRANT/REVOKE/role/database-level
+				// statements and cannot feed COPY ... FROM stdin. Explain those
+				// here instead of surfacing an opaque server error.
+				let rawSql: string;
+				try {
+					rawSql = readFileSync(filePath, "utf8");
+				} catch (readErr) {
+					throw new CliError(
+						`Could not read SQL file "${filePath}": ${
+							readErr instanceof Error ? readErr.message : String(readErr)
+						}`,
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+				const sql = rawSql.trim();
+				if (!sql) {
+					throw new CliError(
+						`SQL file "${filePath}" is empty.`,
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+				const problem = consoleSqlProblem(sql);
+				if (problem) {
+					throw new CliError(
+						`Cannot import "${filePath}". ${problem}`,
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+
 				if (!isLoggedIn()) throw new AuthError();
 				const client = getApiClient();
 				const _spinner = startSpinner("Finding database...");
@@ -1489,30 +1475,11 @@ export function registerDbCommands(program: Command) {
 					);
 				}
 				succeedSpinner();
-				// Read the whole dump and send it as one executeSql call, mirroring
-				// `db sql` (the server caps SQL length and rejects an over-large dump).
-				let sql: string;
-				try {
-					sql = readFileSync(filePath, "utf8");
-				} catch (readErr) {
-					throw new CliError(
-						`Could not read SQL file "${filePath}": ${
-							readErr instanceof Error ? readErr.message : String(readErr)
-						}`,
-						ExitCode.INVALID_ARGUMENTS,
-					);
-				}
-				if (!sql.trim()) {
-					throw new CliError(
-						`SQL file "${filePath}" is empty.`,
-						ExitCode.INVALID_ARGUMENTS,
-					);
-				}
 				const _importSpinner = startSpinner("Importing SQL...");
 				const result = await client.postgres.executeSql.mutate({
 					postgresId: dbSummary.id,
 					sql,
-				} as any);
+				});
 				succeedSpinner("SQL imported.");
 				if (isJsonMode()) {
 					outputData(result);
@@ -1538,7 +1505,7 @@ export function registerDbCommands(program: Command) {
 					log(
 						`Import complete${command ? ` (${command})` : ""}${
 							typeof affected === "number"
-								? ` — ${affected} row${affected === 1 ? "" : "s"} affected`
+								? `, ${affected} row${affected === 1 ? "" : "s"} affected`
 								: ""
 						}.`,
 					);
@@ -1571,22 +1538,45 @@ export function registerDbCommands(program: Command) {
 					);
 				}
 				const _analyticsSpinner = startSpinner("Fetching analytics...");
-				const data = await client.postgres.getAnalytics.query({
+				// getAnalytics returns { databaseSize, tableCount, connectionCount,
+				// rowCount, cacheHitRate, tables[{ name, rowCount, size }] }, or
+				// null when the tenant could not be read (the platform logs why).
+				const data: any = await client.postgres.getAnalytics.query({
 					postgresId: dbSummary.id,
-				} as any);
+				});
 				succeedSpinner();
 				if (isJsonMode()) {
 					outputData(data);
 					return;
 				}
-				const d = data as any;
+				if (!data) {
+					log("");
+					log("Analytics are not available for this database right now. Try again in a minute.");
+					log("");
+					return;
+				}
 				log("");
 				log(colors.bold("Database Analytics"));
-				if (d.connections !== undefined)
-					log(`  Connections:     ${colors.cyan(String(d.connections))}`);
-				if (d.dbSize) log(`  Size:            ${d.dbSize}`);
-				if (d.cacheHitRatio !== undefined)
-					log(`  Cache Hit Ratio: ${d.cacheHitRatio}%`);
+				log(`  Size:            ${data.databaseSize ?? "-"}`);
+				log(`  Tables:          ${formatCount(data.tableCount)}`);
+				log(`  Rows (approx.):  ${formatCount(data.rowCount)}`);
+				log(`  Connections:     ${formatCount(data.connectionCount)}`);
+				log(
+					`  Cache hit rate:  ${typeof data.cacheHitRate === "number" ? `${data.cacheHitRate}%` : "-"}`,
+				);
+				const tables: any[] = Array.isArray(data.tables) ? data.tables : [];
+				if (tables.length > 0) {
+					log("");
+					log(colors.bold("Largest tables"));
+					table(
+						["TABLE", "ROWS", "SIZE"],
+						tables.map((t) => [
+							colors.cyan(String(t.name ?? "-")),
+							formatCount(t.rowCount),
+							String(t.size ?? "-"),
+						]),
+					);
+				}
 				log("");
 			} catch (err) {
 				handleError(err);
@@ -1609,30 +1599,57 @@ export function registerDbCommands(program: Command) {
 					throw new NotFoundError("Database", dbIdentifier);
 				}
 				const _statsSpinner = startSpinner("Fetching stats...");
+				// sharedStats returns { activeConnections, maxConnections,
+				// storageUsedBytes, storageLimitBytes, storageGb, plan, isReadOnly,
+				// readOnlyReason }, or null for a database it cannot measure.
 				let data: any;
 				if (dbSummary.type === "postgres") {
 					data = await client.postgres.sharedStats.query({
 						postgresId: dbSummary.id,
-					} as any);
+					});
 				} else {
 					data = await client.mysql.sharedStats.query({
 						mysqlId: dbSummary.id,
-					} as any);
+					});
 				}
 				succeedSpinner();
 				if (isJsonMode()) {
 					outputData(data);
 					return;
 				}
-				const s = data as any;
+				if (!data) {
+					log("");
+					log("Stats are not available for this database right now.");
+					log("");
+					return;
+				}
+				const used =
+					typeof data.storageUsedBytes === "number"
+						? formatBytes(data.storageUsedBytes)
+						: "-";
+				const limit =
+					typeof data.storageLimitBytes === "number" &&
+					data.storageLimitBytes > 0
+						? ` / ${formatBytes(data.storageLimitBytes)}`
+						: "";
+				const maxConnections =
+					typeof data.maxConnections === "number" && data.maxConnections > 0
+						? ` / ${data.maxConnections}`
+						: "";
 				log("");
 				log(colors.bold("Database Stats"));
-				if (s.usedStorage !== undefined)
-					log(`  Used Storage:  ${s.usedStorage}`);
-				if (s.storageLimit !== undefined)
-					log(`  Storage Limit: ${s.storageLimit}`);
-				if (s.connections !== undefined)
-					log(`  Connections:   ${s.connections}`);
+				log(`  Plan:          ${data.plan ?? "-"}`);
+				log(`  Connections:   ${formatCount(data.activeConnections)}${maxConnections}`);
+				log(`  Storage:       ${used}${limit}`);
+				log(
+					`  Read-only:     ${
+						data.isReadOnly
+							? colors.warn(
+									`yes${data.readOnlyReason ? ` (${data.readOnlyReason})` : ""}`,
+								)
+							: "no"
+					}`,
+				);
 				log("");
 			} catch (err) {
 				handleError(err);
@@ -1702,21 +1719,57 @@ function getTypeLabel(type: DatabaseType): string {
 	return labels[type] || type;
 }
 
+/** A count with thousands separators, or "-" when the platform sent none. */
+function formatCount(value: unknown): string {
+	return typeof value === "number" && Number.isFinite(value)
+		? value.toLocaleString("en-US")
+		: "-";
+}
+
+/**
+ * `listTables` rows carry `estimatedRows` from pg_class.reltuples, which is -1
+ * when the table has never been analyzed: the count is unknown, not negative.
+ */
+function formatEstimatedRows(value: unknown): string {
+	return typeof value === "number" && value >= 0 ? formatCount(value) : "-";
+}
+
+/** host / port parsed from the platform's `externalConnectionString`. */
+function parseExternalConnectionString(
+	value: unknown,
+): { host: string; port: number | null } | null {
+	if (typeof value !== "string" || !value) return null;
+	try {
+		const url = new URL(value);
+		if (!url.hostname) return null;
+		const port = url.port ? Number(url.port) : null;
+		return { host: url.hostname, port: Number.isInteger(port) ? port : null };
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * The customer-reachable endpoint, read from what `postgres.one` returns:
+ * `externalPoolerHost` / `externalPoolerPort`, falling back to the host and
+ * port inside `externalConnectionString`. The default port is the pooler's
+ * 6432; external clients never reach a backend on 5432.
+ */
 function getExternalDatabaseEndpoint(
 	type: DatabaseType,
 	details: any,
 ): { host: string; port: number } | null {
-	if (
-		type !== "postgres" ||
-		details.externalAccessEnabled !== true ||
-		!details.externalPoolerHost
-	) {
+	if (type !== "postgres" || details.externalAccessEnabled !== true) {
 		return null;
 	}
+	const parsed = parseExternalConnectionString(details.externalConnectionString);
+	const host = details.externalPoolerHost || parsed?.host;
+	if (!host) return null;
 
 	return {
-		host: details.externalPoolerHost,
-		port: details.externalPoolerPort || 5432,
+		host,
+		port:
+			details.externalPoolerPort || parsed?.port || EXTERNAL_POOLER_DEFAULT_PORT,
 	};
 }
 
@@ -1728,7 +1781,9 @@ function requireExternalDatabaseEndpoint(
 	if (endpoint) return endpoint;
 
 	throw new CliError(
-		"External access is disabled or unavailable. Enable it in the Tarout dashboard and allowlist this machine's IP before connecting.",
+		type === "postgres"
+			? "External access is disabled or unavailable. Enable it with `tarout db external-access <db> --enable --cidrs <this-machine-ip>/32` (or --public), then connect again."
+			: "External access is not available for MySQL databases.",
 		ExitCode.GENERAL_ERROR,
 	);
 }
@@ -1740,7 +1795,9 @@ export function getConnectionString(type: DatabaseType, details: any): string {
 
 	switch (type) {
 		case "postgres": {
-			return `postgresql://${user}:****@${endpoint.host}:${endpoint.port}/${dbName}`;
+			// Same shape as the platform's externalConnectionString, which always
+			// carries sslmode=require: external access is TLS-only.
+			return `postgresql://${user}:****@${endpoint.host}:${endpoint.port}/${dbName}?sslmode=require`;
 		}
 		case "mysql": {
 			return `mysql://${user}:****@${endpoint.host}:${endpoint.port}/${dbName}`;
@@ -1775,9 +1832,11 @@ export function getConnectCommand(
 					"-d",
 					dbName,
 				],
+				// The external pooler never accepts plaintext, whatever a legacy
+				// row's externalSslRequired says, so TLS is always required.
 				env: {
 					PGPASSWORD: password,
-					...(details.externalSslRequired ? { PGSSLMODE: "require" } : {}),
+					PGSSLMODE: "require",
 				},
 			};
 		case "mysql":

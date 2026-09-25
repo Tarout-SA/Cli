@@ -41,6 +41,10 @@ const fakeClient = {
 		executeSql: {
 			mutate: vi.fn().mockResolvedValue({ rows: [{ n: 1 }] }),
 		},
+		changeStatus: { mutate: vi.fn().mockResolvedValue({}) },
+		updateExternalAccess: {
+			mutate: vi.fn().mockResolvedValue({ enabled: true }),
+		},
 	},
 	mysql: {
 		allByOrganization: {
@@ -68,6 +72,7 @@ const fakeClient = {
 			mutate: vi.fn().mockResolvedValue({ mysqlId: "my_2", name: "cache" }),
 		},
 		remove: { mutate: vi.fn().mockResolvedValue({ ok: true }) },
+		changeStatus: { mutate: vi.fn().mockResolvedValue({}) },
 	},
 };
 
@@ -100,8 +105,10 @@ beforeEach(() => {
 		engine.one.query.mockClear();
 		engine.create.mutate.mockClear();
 		engine.remove.mutate.mockClear();
+		engine.changeStatus.mutate.mockClear();
 	}
 	fakeClient.postgres.executeSql.mutate.mockClear();
+	fakeClient.postgres.updateExternalAccess.mutate.mockClear();
 });
 
 describe("db tools", () => {
@@ -137,21 +144,61 @@ describe("db tools", () => {
 		expect(fakeClient.mysql.create.mutate).not.toHaveBeenCalled();
 	});
 
-	it("db_create routes to mysql.create when type=mysql", async () => {
+	it("db_create refuses type=mysql without calling the API (MySQL creation is disabled on the platform)", async () => {
 		const r = await invoke("db_create", {
 			type: "mysql",
 			name: "cache",
 			plan: "STANDARD",
 		});
-		expect(r.isError).toBeUndefined();
-		expect(fakeClient.mysql.create.mutate).toHaveBeenCalledWith({
-			name: "cache",
-			appName: "cache",
-			dockerImage: "mysql:8",
-			organizationId: "org_1",
-			description: undefined,
-			plan: "STANDARD",
+		expect(r.isError).toBe(true);
+		const body = JSON.parse(r.content[0].text) as {
+			code: string;
+			error: string;
+		};
+		expect(body.code).toBe("PRECONDITION_FAILED");
+		expect(body.error).toContain("Only PostgreSQL");
+		expect(fakeClient.mysql.create.mutate).not.toHaveBeenCalled();
+		expect(fakeClient.postgres.create.mutate).not.toHaveBeenCalled();
+	});
+
+	it("db_create accepts the FREE plan", async () => {
+		// invoke() calls the handler directly, which skips the tool's own input
+		// schema; that schema is what refused FREE, so check it explicitly.
+		const server = new McpServer(
+			{ name: "t", version: "0" },
+			{ capabilities: { tools: {} } },
+		);
+		registerDbTools(server);
+		// biome-ignore lint/suspicious/noExplicitAny: RegisteredTool fields are private-ish.
+		const schema = (server as any)._registeredTools.db_create.inputSchema;
+		for (const plan of ["FREE", "STARTER", "STANDARD", "PRO"]) {
+			expect(
+				schema.safeParse({ type: "postgres", name: "scratch", plan }).success,
+				plan,
+			).toBe(true);
+		}
+
+		const r = await invoke("db_create", {
+			type: "postgres",
+			name: "scratch",
+			plan: "FREE",
 		});
+		expect(r.isError).toBeUndefined();
+		expect(fakeClient.postgres.create.mutate).toHaveBeenCalledWith(
+			expect.objectContaining({ plan: "FREE", name: "scratch" }),
+		);
+	});
+
+	it("db_create does not advertise MySQL creation", async () => {
+		const server = new McpServer(
+			{ name: "t", version: "0" },
+			{ capabilities: { tools: {} } },
+		);
+		registerDbTools(server);
+		// biome-ignore lint/suspicious/noExplicitAny: RegisteredTool fields are private-ish.
+		const reg = (server as any)._registeredTools.db_create;
+		expect(`${reg.title} ${reg.description}`).not.toMatch(/mysql\.create/i);
+		expect(`${reg.title}`).not.toMatch(/mysql/i);
 	});
 
 	it("db_info resolves postgres by name and calls postgres.one", async () => {
@@ -295,5 +342,150 @@ describe("db tools", () => {
 		expect(r.isError).toBe(true);
 		const body = JSON.parse(r.content[0].text) as { code: string };
 		expect(body.code).toBe("NOT_FOUND");
+	});
+});
+
+describe("db tools: platform contract fixes", () => {
+	it("db_credentials falls back to the pooler port 6432 and returns the platform connection string", async () => {
+		fakeClient.postgres.one.query.mockResolvedValueOnce({
+			postgresId: "pg_1",
+			name: "prod",
+			externalAccessEnabled: true,
+			externalPoolerHost: "pg.external",
+			externalPoolerPort: null,
+			externalConnectionString:
+				"postgresql://prod_owner:s3cret@pg.external:6432/prod_db?sslmode=require",
+			databaseName: "prod_db",
+			databaseUser: "prod_owner",
+			databasePassword: "s3cret",
+		});
+
+		const r = await invoke("db_credentials", { type: "postgres", db: "prod" });
+
+		expect(r.isError).toBeUndefined();
+		const body = JSON.parse(r.content[0].text) as {
+			port: number;
+			connectionString: string;
+			sslmode: string;
+		};
+		expect(body.port).toBe(6432);
+		expect(body.sslmode).toBe("require");
+		expect(body.connectionString).toContain("sslmode=require");
+	});
+
+	it("db_credentials points at db_external_access, not a dashboard toggle, when access is off", async () => {
+		fakeClient.postgres.one.query.mockResolvedValueOnce({
+			postgresId: "pg_1",
+			name: "prod",
+			externalAccessEnabled: false,
+			externalPoolerHost: null,
+			externalPoolerPort: null,
+			databaseName: "prod_db",
+			databaseUser: "prod_owner",
+			databasePassword: "s3cret",
+		});
+
+		const r = await invoke("db_credentials", { type: "postgres", db: "prod" });
+
+		expect(r.isError).toBe(true);
+		const body = JSON.parse(r.content[0].text) as { remediation: string };
+		expect(body.remediation).toContain("db_external_access");
+		expect(body.remediation).toContain("tarout db external-access");
+		expect(body.remediation).not.toMatch(/dashboard/i);
+	});
+
+	it("db_external_access always sends requireSsl: true when enabling, even on a legacy row", async () => {
+		fakeClient.postgres.one.query.mockResolvedValueOnce({
+			postgresId: "pg_1",
+			externalAccessEnabled: false,
+			externalAllowedCidrs: [],
+			externalPublicAccess: false,
+			externalSslRequired: false,
+		});
+
+		const r = await invoke("db_external_access", {
+			type: "postgres",
+			db: "prod",
+			enabled: true,
+			public: true,
+		});
+
+		expect(r.isError).toBeUndefined();
+		expect(fakeClient.postgres.updateExternalAccess.mutate).toHaveBeenCalledWith({
+			postgresId: "pg_1",
+			enabled: true,
+			allowedCidrs: [],
+			public: true,
+			requireSsl: true,
+		});
+	});
+
+	it("db_external_access refuses requireSsl: false while enabling", async () => {
+		const r = await invoke("db_external_access", {
+			type: "postgres",
+			db: "prod",
+			enabled: true,
+			public: true,
+			requireSsl: false,
+		});
+
+		expect(r.isError).toBe(true);
+		const body = JSON.parse(r.content[0].text) as { code: string; error: string };
+		expect(body.code).toBe("INVALID_ARGUMENTS");
+		expect(body.error).toContain("External access always requires TLS");
+		expect(fakeClient.postgres.updateExternalAccess.mutate).not.toHaveBeenCalled();
+	});
+
+	for (const tool of ["db_restart", "db_stop"]) {
+		it(`${tool} refuses without calling changeStatus`, async () => {
+			const r = await invoke(tool, { type: "postgres", db: "prod" });
+
+			expect(r.isError).toBe(true);
+			const body = JSON.parse(r.content[0].text) as { code: string; error: string };
+			expect(body.code).toBe("PRECONDITION_FAILED");
+			expect(body.error).toContain("cannot be stopped, started or restarted");
+			expect(fakeClient.postgres.changeStatus.mutate).not.toHaveBeenCalled();
+			expect(fakeClient.postgres.allByOrganization.query).not.toHaveBeenCalled();
+		});
+	}
+
+	it("db_restore points at the dashboard Backups tab", async () => {
+		const r = await invoke("db_restore", {
+			type: "postgres",
+			db: "prod",
+			databaseName: "prod_db",
+			backupFile: "x.dump",
+		});
+
+		expect(r.isError).toBe(true);
+		const body = JSON.parse(r.content[0].text) as { remediation: string };
+		expect(body.remediation).toContain("Backups tab");
+	});
+
+	it("db_import refuses SQL over the 10,000-character console cap", async () => {
+		const r = await invoke("db_import", {
+			type: "postgres",
+			db: "prod",
+			sql: "INSERT INTO t VALUES (1);\n".repeat(500),
+		});
+
+		expect(r.isError).toBe(true);
+		const body = JSON.parse(r.content[0].text) as { code: string; error: string };
+		expect(body.code).toBe("INVALID_ARGUMENTS");
+		expect(body.error).toContain("10,000");
+		expect(fakeClient.postgres.executeSql.mutate).not.toHaveBeenCalled();
+	});
+
+	it("db_import refuses COPY ... FROM stdin", async () => {
+		const r = await invoke("db_import", {
+			type: "postgres",
+			db: "prod",
+			sql: "COPY public.users (id) FROM stdin;\n1\n\\.\n",
+		});
+
+		expect(r.isError).toBe(true);
+		const body = JSON.parse(r.content[0].text) as { error: string };
+		expect(body.error).toContain("FROM stdin");
+		expect(fakeClient.postgres.executeSql.mutate).not.toHaveBeenCalled();
 	});
 });

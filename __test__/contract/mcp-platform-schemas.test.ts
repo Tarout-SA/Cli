@@ -296,13 +296,16 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 				),
 				expectValid: true,
 			},
+			// db_create no longer reaches mysql.create: the platform refuses every
+			// MySQL create (mysql.ts, PRECONDITION_FAILED), so the tool refuses
+			// locally. The FREE tier is the payload worth pinning instead.
 			{
-				id: "db_create.mysql",
-				schema: "apiCreateMySql",
+				id: "db_create.postgres.free",
+				schema: "apiCreatePostgres",
 				payload: await capture(
 					"db_create",
-					{ type: "mysql", name: "My DB", plan: "STANDARD" },
-					"mysql.create",
+					{ type: "postgres", name: "Scratch DB", plan: "FREE" },
+					"postgres.create",
 				),
 				expectValid: true,
 			},
@@ -476,8 +479,8 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 				"app_create",
 				"billing_upgrade.plan+quantity",
 				"billing_upgrade.planQuantity",
-				"db_create.mysql",
 				"db_create.postgres",
+				"db_create.postgres.free",
 				"env_push",
 				"env_set",
 				"env_unset.multi",
@@ -500,7 +503,7 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 		"app_logs",
 		"app_create",
 		"db_create.postgres",
-		"db_create.mysql",
+		"db_create.postgres.free",
 		"env_set",
 		"env_push",
 		"env_unset.single",

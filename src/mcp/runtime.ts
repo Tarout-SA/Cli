@@ -209,6 +209,12 @@ export function toEnvelope(err: unknown, procedurePath?: string): Envelope {
 	if (err instanceof NotFoundError) {
 		return { error: err.message, code: "NOT_FOUND" };
 	}
+	if (err instanceof CliError && err.code === ExitCode.INVALID_ARGUMENTS) {
+		// Same readable code the tools' own argument checks return, so an agent
+		// can key off INVALID_ARGUMENTS whichever layer refused the call (an
+		// ambiguous app name or id prefix, for example).
+		return { error: err.message, code: "INVALID_ARGUMENTS", details: err.details };
+	}
 	if (err instanceof CliError) {
 		// CliError.code is a numeric ExitCode; the envelope carries string codes so
 		// downstream consumers can key off the same identifier the tRPC/agent side

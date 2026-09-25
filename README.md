@@ -283,22 +283,23 @@ tarout env my-app push
 | Command | Description |
 |---------|-------------|
 | `tarout db list` | List all databases |
-| `tarout db create [name]` | Create a new database |
+| `tarout db create [name]` | Create a new PostgreSQL database |
 | `tarout db delete <db>` | Delete a database |
 | `tarout db info <db>` | Show connection details |
 | `tarout db connect <db>` | Open database shell |
+| `tarout db external-access <db>` | Turn external access on or off (always TLS) |
 
 ```bash
-# Create PostgreSQL database
-tarout db create mydb --type postgres
-
-# Create MySQL database
-tarout db create mydb --type mysql
+# Create a PostgreSQL database (the only engine that can be created)
+tarout db create mydb
 
 # Get connection string
 tarout db info mydb
 
-# Connect directly (opens psql/mysql client)
+# Allow external connections from anywhere (TLS is always required)
+tarout db external-access mydb --enable --public
+
+# Connect directly (opens psql)
 tarout db connect mydb
 ```
 

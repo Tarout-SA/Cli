@@ -10,13 +10,21 @@ vi.mock("../../src/lib/config", () => ({
 const fakeClient = {
 	application: {
 		allByOrganization: {
+			// The real application.allByOrganization row (routers/application.ts):
+			// `applicationStatus` and a bare-host `liveUrl`, no status/url fields.
 			query: vi.fn().mockResolvedValue([
 				{
 					applicationId: "app_1",
 					name: "web",
-					status: "running",
+					appName: "web-x1y2",
+					description: null,
+					applicationStatus: "done",
 					plan: "SHARED",
-					deployedUrl: "https://web.tarout.sh",
+					region: "me-central2",
+					createdAt: "2026-09-01T00:00:00.000Z",
+					domain: null,
+					liveUrl: "web-x1y2.tarout.app",
+					lastDeployment: { status: "done", at: "2026-09-20T10:00:00.000Z" },
 				},
 			]),
 		},
@@ -112,22 +120,19 @@ describe("apps tools", () => {
 		expect(r.isError).toBeUndefined();
 		const body = JSON.parse(r.content[0].text) as {
 			count: number;
-			apps: Array<{
-				id: string;
-				name: string;
-				status: string;
-				plan: string;
-				url: string | null;
-			}>;
+			apps: Array<Record<string, unknown>>;
 		};
 		expect(body.count).toBe(1);
 		expect(body.apps).toHaveLength(1);
+		// status/url used to read `status` and `deployedUrl ?? url`, which the
+		// router never sends, so every app looked undeployed to agents.
 		expect(body.apps[0]).toEqual({
 			id: "app_1",
 			name: "web",
-			status: "running",
+			status: "done",
 			plan: "SHARED",
-			url: "https://web.tarout.sh",
+			url: "https://web-x1y2.tarout.app",
+			lastDeployment: { status: "done", at: "2026-09-20T10:00:00.000Z" },
 		});
 	});
 
@@ -215,6 +220,22 @@ describe("apps tools", () => {
 		expect(body.deleted).toBe(true);
 		expect(body.applicationId).toBe("app_1");
 		expect(body.name).toBe("web");
+	});
+
+	it("app_delete refuses an ambiguous id prefix with INVALID_ARGUMENTS", async () => {
+		fakeClient.application.allByOrganization.query.mockResolvedValueOnce([
+			{ applicationId: "Vq3kPz81xYbT0nLm4sRwE", name: "web" },
+			{ applicationId: "Vq3kZZZZZZZZZZZZZZZZZ", name: "api" },
+		]);
+		const r = await invoke("app_delete", { app: "Vq3k" });
+		expect(r.isError).toBe(true);
+		const body = JSON.parse(r.content[0].text) as {
+			code: string;
+			error: string;
+		};
+		expect(body.code).toBe("INVALID_ARGUMENTS");
+		expect(body.error).toContain("Vq3kPz81xYbT0nLm4sRwE");
+		expect(fakeClient.application.delete.mutate).not.toHaveBeenCalled();
 	});
 
 	it("app_info returns NOT_FOUND envelope when app cannot be resolved", async () => {

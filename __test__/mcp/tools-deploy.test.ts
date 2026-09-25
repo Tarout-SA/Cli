@@ -9,7 +9,11 @@ import { describe, expect, it, vi } from "vitest";
 // against pure in-process mocks and never touches the filesystem, the `zip`
 // binary, or the network. Task 14's read-only specs don't need these — but
 // Task 15's deploy tool does, and vi.mock is hoisted so it applies here too.
-vi.mock("../../src/commands/deploy", () => ({
+vi.mock("../../src/commands/deploy", async (importOriginal) => ({
+	// The real guard, so these specs pin the same rule `tarout up` enforces.
+	shouldRefuseUploadOverGitSource: (
+		await importOriginal<typeof import("../../src/commands/deploy")>()
+	).shouldRefuseUploadOverGitSource,
 	inspectCurrentProject: vi.fn(() => ({
 		database: null,
 		storage: null,
@@ -55,18 +59,41 @@ const fakeClient = {
 		allByOrganization: {
 			query: vi.fn().mockResolvedValue([{ applicationId: "app_1", name: "web" }]),
 		},
+		// Real application.getDeploymentStatus shape (routers/application.ts).
 		getDeploymentStatus: {
-			query: vi
-				.fn()
-				.mockResolvedValue({ status: "done", latestDeploymentId: "dep_1" }),
+			query: vi.fn().mockResolvedValue({
+				status: "done",
+				publicUrl: "https://web-x1y2.tarout.app",
+				createdAt: "2026-09-01T00:00:00.000Z",
+				deployed: true,
+			}),
+		},
+		// A reused app's real source. `sourceType: github` with no repository
+		// is how every app starts, so it must still upload.
+		one: {
+			query: vi.fn().mockResolvedValue({
+				applicationId: "app_1",
+				name: "web",
+				sourceType: "github",
+				owner: null,
+				repository: null,
+			}),
 		},
 	},
 	deployment: {
 		one: {
 			query: vi.fn().mockResolvedValue({ deploymentId: "dep_1", status: "done" }),
 		},
+		// Real deployment.getDeploymentLogs shape: { lines, totalLines, hasMore }.
 		getDeploymentLogs: {
-			query: vi.fn().mockResolvedValue({ logs: [{ line: "hi" }], nextOffset: 1 }),
+			query: vi.fn().mockResolvedValue({
+				deploymentId: "dep_1",
+				status: "done",
+				lines: ["hi"],
+				totalLines: 1,
+				offset: 0,
+				hasMore: false,
+			}),
 		},
 	},
 	subscription: {
@@ -123,8 +150,8 @@ describe("deployment_status", () => {
 describe("deployment_logs", () => {
 	it("returns log lines for a deployment id", async () => {
 		const r = await invoke("deployment_logs", { deploymentId: "dep_1" });
-		const body = JSON.parse(r.content[0].text) as { logs: unknown[] };
-		expect(body.logs).toHaveLength(1);
+		const body = JSON.parse(r.content[0].text) as { lines: unknown[] };
+		expect(body.lines).toEqual(["hi"]);
 	});
 });
 
@@ -283,6 +310,134 @@ describe("deploy tool", () => {
 		expect(body.code).toBe("PERMISSION_DENIED");
 		expect(body.details?.entitlementKey).toBe("app.free.slots");
 		expect(body.details?.remedy?.command).toContain("tarout billing");
+	});
+
+	it("deploys a Git-sourced app from its repository instead of uploading over it", async () => {
+		const { uploadCurrentDirectorySource } = await import(
+			"../../src/commands/deploy"
+		);
+		const upload = uploadCurrentDirectorySource as ReturnType<typeof vi.fn>;
+		upload.mockClear();
+		fakeClient.application.one.query.mockResolvedValueOnce({
+			applicationId: "app_1",
+			name: "web",
+			sourceType: "github",
+			owner: "acme",
+			repository: "web",
+			branch: "main",
+		});
+		const deployToCloud = vi
+			.fn()
+			.mockResolvedValue({ deploymentId: "dep_git" });
+		// biome-ignore lint/suspicious/noExplicitAny: augmenting fake for this test only.
+		(fakeClient.application as any).deployToCloud = { mutate: deployToCloud };
+
+		const r = await invoke("deploy", {
+			path: "/tmp/tarout-git-app",
+			name: "web",
+			wait: false,
+			createIfMissing: false,
+		});
+
+		// completeDropUpload clears the Git source, so an upload here would
+		// have silently stopped push-to-deploy.
+		expect(upload).not.toHaveBeenCalled();
+		expect(deployToCloud).toHaveBeenCalledWith({ applicationId: "app_1" });
+		expect(r.isError).toBeUndefined();
+		const body = JSON.parse(r.content[0].text) as {
+			deploymentId: string;
+			source: string;
+			note: string;
+		};
+		expect(body.deploymentId).toBe("dep_git");
+		expect(body.source).toBe("git");
+		expect(body.note).toMatch(/push/i);
+	});
+
+	it("uploads over a Git source only when replaceGitSource is set", async () => {
+		const { uploadCurrentDirectorySource } = await import(
+			"../../src/commands/deploy"
+		);
+		const upload = uploadCurrentDirectorySource as ReturnType<typeof vi.fn>;
+		upload.mockClear();
+		fakeClient.application.one.query.mockResolvedValue({
+			applicationId: "app_1",
+			name: "web",
+			sourceType: "github",
+			owner: "acme",
+			repository: "web",
+		});
+		// biome-ignore lint/suspicious/noExplicitAny: augmenting fake for this test only.
+		(fakeClient.application as any).deployToCloud = {
+			mutate: vi.fn().mockResolvedValue({ deploymentId: "dep_replace" }),
+		};
+
+		const r = await invoke("deploy", {
+			path: "/tmp/tarout-git-app",
+			name: "web",
+			wait: false,
+			createIfMissing: false,
+			replaceGitSource: true,
+		});
+
+		expect(r.isError).toBeUndefined();
+		expect(upload).toHaveBeenCalledWith(
+			expect.anything(),
+			"app_1",
+			"web",
+			"/tmp/tarout-git-app",
+		);
+		fakeClient.application.one.query.mockResolvedValue({
+			applicationId: "app_1",
+			name: "web",
+			sourceType: "github",
+			owner: null,
+			repository: null,
+		});
+	});
+
+	it("fills appUrl from the app's public URL and logsTail from the last log lines", async () => {
+		const all = Array.from({ length: 100 }, (_, i) => `line ${i}`);
+		fakeClient.deployment.getDeploymentLogs.query.mockImplementation(
+			async (input: { offset?: number; limit?: number }) => {
+				const offset = input.offset ?? 0;
+				const limit = input.limit ?? 1000;
+				return {
+					deploymentId: "dep_ok",
+					status: "done",
+					lines: all.slice(offset, offset + limit),
+					totalLines: all.length,
+					offset,
+					hasMore: offset + limit < all.length,
+				};
+			},
+		);
+		fakeClient.deployment.one.query.mockResolvedValue({
+			deploymentId: "dep_ok",
+			status: "done",
+		});
+		// biome-ignore lint/suspicious/noExplicitAny: augmenting fake for this test only.
+		(fakeClient.application as any).deployToCloud = {
+			mutate: vi.fn().mockResolvedValue({ deploymentId: "dep_ok" }),
+		};
+
+		const r = await invoke("deploy", {
+			path: "/tmp/tarout-ok-app",
+			name: "web",
+			wait: true,
+			createIfMissing: false,
+			timeoutSeconds: 30,
+		});
+
+		expect(r.isError).toBeUndefined();
+		const body = JSON.parse(r.content[0].text) as {
+			status: string;
+			appUrl: string;
+			logsTail: string[];
+		};
+		expect(body.status).toBe("done");
+		expect(body.appUrl).toBe("https://web-x1y2.tarout.app");
+		expect(body.logsTail).toEqual(all.slice(-80));
 	});
 
 	it("returns AUTH_ERROR envelope when profile is missing and createIfMissing", async () => {

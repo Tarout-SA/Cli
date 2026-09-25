@@ -656,7 +656,7 @@ export function registerUpCommand(program: Command): void {
 						})
 					) {
 						throw new InvalidArgumentError(
-							`${app.name} deploys from its connected ${app.sourceType} repository, and \`tarout up\` would replace that with an upload of this folder, stopping push-to-deploy.\n` +
+							`${app.name} deploys from its connected ${sourceDetail.sourceType ?? "Git"} repository, and \`tarout up\` would replace that with an upload of this folder, stopping push-to-deploy.\n` +
 								`  • Redeploy it as-is:        tarout deploy ${app.name} --wait\n` +
 								`  • Or push to the branch it is connected to.\n` +
 								`  • Really replace the source: tarout up --source upload`,

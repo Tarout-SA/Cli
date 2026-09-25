@@ -5,6 +5,131 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] - 2026-09-25
+
+### Added
+
+- **`tarout db tables` has a SIZE column** (the table's on-disk size,
+  indexes included), and `tarout db analytics` lists the largest tables.
+
+### Changed
+
+- **`tarout backups files` and `tarout backups download-url` take a backup
+  schedule id** (from `tarout db backups <db>`) instead of a destination id:
+  `backups files <backup-id>` and `backups download-url <backup-id> <path>`.
+  The platform needs the database, its engine and the destination, and a
+  schedule carries all three. The old form could not work (every call was
+  rejected), so no working script changes. The file list now prints the full
+  object path that `download-url` needs.
+- **`tarout db restart` and `tarout db stop` (and the MCP `db_restart` /
+  `db_stop` tools) now say that managed databases run on shared hosts and
+  cannot be stopped, started or restarted, and exit non-zero without calling
+  the API.** They called `changeStatus`, which only writes a status column: a
+  free database was refused, and a paid one was shown as stopped while it kept
+  running.
+- **Only PostgreSQL can be created.** `tarout db create --type mysql` and the
+  MCP `db_create` tool with `type: "mysql"` say so before calling the API (the
+  platform refuses every MySQL create). Listing, inspecting, backing up and
+  deleting existing MySQL databases still work.
+- **External access always uses TLS.** `tarout db external-access` and the MCP
+  `db_external_access` tool always send `requireSsl: true`; `--allow-insecure`
+  (or `requireSsl: false`) fails fast with an explanation. `--require-ssl` is
+  still accepted and no longer needed.
+- **`tarout backups create` defaults `--prefix` to `tarout-backups`** (the
+  platform requires one), defaults `--database` to the database's own name
+  instead of prompting, and checks `--schedule` (5 cron fields, or 6 with
+  seconds) and `--keep` (a positive whole number) before sending.
+- **`tarout db import`, `tarout db sql` and the MCP `db_import` / `db_sql`
+  tools explain the SQL console's limits before sending**: at most 10,000
+  characters per call, no `COPY ... FROM stdin`, and no GRANT, REVOKE, role or
+  database-level statements. The message suggests `pg_dump --inserts
+  --no-owner --no-privileges`, or loading the file with psql over external
+  access (`tarout db connect <db> < dump.sql`). Surrounding whitespace is
+  trimmed before sending, as the platform does.
+- **`tarout backups backup-web` explains that web server backups are not
+  supported** instead of calling an endpoint that always fails.
+- **Hints about external access point at `tarout db external-access`** (or the
+  MCP `db_external_access` tool); there is no dashboard toggle for it. Restore
+  hints point at the database's Backups tab in the dashboard.
+- **`tarout apps git docker-hub` requires a public image pinned to a digest.** The platform deploys only `image@sha256:<digest>` and refuses private images, but the prompt suggested `nginx:latest` and the command offered `--private`, `--username` and `--token`. A tag is now refused before the request (with how to find the digest), the private-image flags are refused with the reason, and a new `--port` sets the container port (the platform default is 3000).
+- **`tarout apps git url` is HTTPS only.** The platform clones custom Git remotes over HTTPS and never used the SSH key. The prompt no longer offers `git@...`; SSH and `http://` URLs, and URLs with embedded credentials, are refused up front; and `--ssh-key` is refused with a pointer to `apps git github` / `apps git gitlab` for private repositories.
+- **`tarout apps metrics` help describes what it shows.** It advertised CPU and memory, but the platform reports request telemetry. `metrics`, `visitors` and `observability` take `--period` (1h, 6h, 24h, 7d, 30d), checked before the request.
+- **`tarout apps analytics --days` is ignored.** The platform reports all-time counts plus a fixed 7-day window. The flag is still accepted (hidden) so existing scripts keep working.
+- **`tarout apps live-status` help no longer names the infrastructure provider,** and the status is labeled by what it means: serving, starting, stopped, or not deployed yet.
+- **MCP tools report refused arguments as `INVALID_ARGUMENTS`.** An argument refused inside the CLI layer (such as an ambiguous app name or id prefix, or a domain that was never added) came back with the numeric code `"2"`; it now uses the same `INVALID_ARGUMENTS` code as the tools' own checks.
+- **MCP `deploy` takes `replaceGitSource`.** Set it to `true` to upload the directory over a connected repository on purpose (this stops push-to-deploy, as `tarout up --source upload` does).
+- **`tarout storage create --plan` is ignored.** The platform picks the bucket plan from the project's subscription. The interactive plan prompt is gone; the flag is still accepted so existing scripts keep working, and passing it prints a note.
+- **`tarout storage create` hints print the full bucket id.** The follow-up commands (`storage files`, `storage attach`) now carry the full id instead of an 8-character prefix.
+- **MCP `storage_credentials` says it is for custom buckets only.** Its description now points managed buckets at `storage_access_key_create`.
+- **`tarout domains transfer-in --auth-code` is no longer sent.** The platform never accepted it (support requests the EPP code over a secure channel after verifying ownership, and the ticket must not hold it). The flag is still accepted for compatibility, and the command now says the code was not sent.
+- **`tarout domains register` help no longer names Name.com.** Registrations go through Tarout's managed registrar.
+
+### Fixed
+
+- **`tarout db analytics` reads the platform's real fields** (size, tables,
+  rows, connections, cache hit rate, largest tables) and says "Analytics are
+  not available for this database right now" when the platform has none,
+  instead of crashing on `null`.
+- **`tarout db stats` reads the platform's real fields** (plan, connections
+  against the plan's limit, storage used against the limit, read-only state
+  and reason) and handles `null`. It printed nothing before.
+- **`tarout db tables` reads `estimatedRows`**; a table that was never
+  analyzed shows `-` instead of a wrong count.
+- **Every table that prints an id prints it in full**: `tarout db list`,
+  `tarout db backups` and the next-step hint after `tarout db create`. The
+  8-character prefixes did not work with `tarout backups <cmd>` or MCP tools,
+  which match exact ids.
+- **`tarout db connect` falls back to the pooler port 6432, not 5432**, reads
+  the host and port the platform returns (including from
+  `externalConnectionString`), and always sets `PGSSLMODE=require`. The
+  connection string `tarout db info` prints now ends in `?sslmode=require`,
+  like the platform's. MCP `db_credentials` uses the same 6432 fallback and
+  also returns the platform's `connectionString`.
+- **`tarout backups update` sends only the fields you change.** It echoed the
+  stored row back, so a schedule with no retention, a null `enabled` or no
+  destination sent `null`, which the platform rejects.
+- **`tarout backups info` no longer prints an always-empty `Created` line** (a
+  backup schedule has no creation date); it shows the database, destination
+  and retention instead. `tarout backups run` picks the engine from the
+  schedule's `databaseType`.
+- **`tarout db preview --limit` is checked against the platform's 1-100 range**
+  before sending.
+- **MCP `db_create` accepts the FREE plan**, which the platform supports.
+- **MCP `app_list` reports deployed apps as deployed.** It read `status` and `deployedUrl` / `url`, which the platform never sends, so every app came back with no status and no URL and agents concluded nothing was deployed. It now returns the app's `applicationStatus` as `status`, its live URL as `url` (null only when never deployed), and `lastDeployment`.
+- **MCP `deploy` no longer disconnects an app's Git repository.** It always uploaded the directory, which replaced a connected repository with the upload and silently stopped push-to-deploy. An existing app with a connected repository is now deployed from that repository (the result carries `source: "git"` and a note to push first), the same rule `tarout up` enforces.
+- **MCP `deploy` fills `appUrl` and `logsTail`.** It read a `url` field deployments do not have and a `logs` field the log endpoint does not return (and fetched the first 200 lines, not the last). It now returns the app's public URL and the last 80 build-log lines.
+- **Deployment ids are printed in full.** `tarout deploy:list`, the `deploy:rollback` summary and the `deploy:logs` hints printed 8-character prefixes, but `deploy:logs` looks a deployment up by its exact id, so the printed id never worked. `deploy:retry --deployment` and `deploy:rollback --to` now accept a unique prefix and refuse an ambiguous one instead of taking the first match.
+- **MCP tools resolve app ids of any shape, and unique id prefixes.** App references in the MCP tools matched an id only when it started with `app_`, but app ids are plain 21-character ids, so passing an id failed with NOT_FOUND. Exact ids, names, slugs and unique id prefixes (4+ characters) now resolve; a name or prefix that matches several apps is refused with the matching ids, so a destructive tool never guesses.
+- **`tarout apps sync` works.** It called the status sync as a mutation; the platform exposes it as a query, so the command always failed. It now prints the synced status.
+- **`tarout apps info` shows the connected source.** It read nested `github` / `gitlab` objects the platform strips from the response, so the repository and branch never printed. It now shows the repository and branch, custom Git URL, Docker image or uploaded archive from the app itself.
+- **`tarout deploy:status` no longer prints `Provider: undefined` and `Updated: Invalid Date`.** It now prints whether the app is deployed, its region and its latest deployment.
+- **`tarout apps deploy-status` prints the real status.** It showed only a status line; it now also shows whether the app is deployed and its URL.
+- **`tarout apps ssl-status` reports the real certificate state.** It read `valid` / `hasSSL`, which the platform never returns, and printed "invalid/missing" for every app. It now shows the platform subdomain (and custom subdomain) status: active, pending or failed.
+- **`tarout apps analytics`, `metrics`, `visitors`, `observability` and `create-options` print their data.** Each printed only a header because it read fields the platform does not return. `analytics` shows deployment counts, success rate, the last deploy and domains; `metrics` and `visitors` show requests, page views, errors, latency, status codes and top paths; `observability` shows traffic, uptime and deployment health; `create-options` shows the app tiers you can create and the slots left in each.
+- **`tarout apps complete-upload` no longer claims a deployment started.** Completing an upload only saves the archive as the app's source and queues nothing. The command now says so and points at `tarout deploy <app> --source configured`, which builds the saved archive.
+- **`tarout apps upload-url` shows when the URL expires.** It read `expiresAt`; the platform returns `expiresIn` (seconds).
+- **`tarout env push --replace` without `--restart` is refused up front, with the reason.** The platform always rejected it, because a replace-all import must restart the app to confirm the new set is healthy. The CLI now says so before uploading anything.
+- **`tarout env push` describes skipped entries correctly.** "Skipped N (already exist)" was wrong: skipped entries are ones the platform refused as invalid (a bad key name or a value over 64 KB).
+- **`tarout apps create` points at the real source commands.** Its "Connect a source" step named `tarout apps info`, which only reads the app. It now names `tarout apps git github` (and `gitlab`, `url`, `docker-hub`).
+- **`tarout up` names the source type when it refuses to replace a Git source,** instead of "connected undefined repository".
+- **`tarout storage info` shows real usage.** It read `usedBytes` / `fileCount`, which the platform never sends, so every bucket showed 0 B used and 0 files. It now reads `storageUsed` / `filesCount`.
+- **`tarout storage create` prints what the platform created.** The summary no longer shows `Name: undefined`, and `Plan:` is the plan the platform actually assigned instead of the one you picked.
+- **`tarout storage create` no longer recommends `tarout storage credentials`.** That command is refused for every managed bucket. The next step now points at `tarout storage attach <bucket-id> <app-id>`, which gives the app a scoped key and the S3 env vars.
+- **`tarout storage credentials` explains the managed-bucket refusal.** On a managed bucket it now says direct credentials are only for custom buckets and names the `tarout storage attach` command, instead of a bare FORBIDDEN.
+- **`tarout storage complete-upload` no longer requires `--expected-size`.** The platform ignores it (and `--size`) and reads the real size itself. Both flags are now optional; the success line shows the stored size.
+- **Bucket references no longer pick the wrong bucket when names collide.** Bucket names are not unique. The CLI and the MCP storage tools (including `storage_delete`) now refuse a name or id prefix that matches more than one bucket and list the matching ids; an exact id still works.
+- **MCP `storage_create` no longer requires `plan`.** The platform ignores it, so it is optional and is not sent.
+- **MCP `domain_link` works again.** It called `domain.create` without a registered domain, which the platform refuses for every hostname. It now follows the same plan as `tarout domains link`: a hostname already added as an external domain is attached with `domain.linkToApplication`, and a subdomain of a domain registered through Tarout is created under it. A hostname nobody added returns a clear error that names the add, verify and link steps.
+- **MCP `domain_verify` with `wait` polls the right record.** It polled `domain.one` with a registered-domain id (always NOT_FOUND) and read a `verified` field that procedure never returns. It now polls `domainRegistrar.getById` until the domain's DNS status is `active`, accepts the domain name as well as its id, and on timeout returns the first check's reasons and required records.
+- **`tarout domains register` no longer says every domain is unavailable.** It read an `available` field the platform never sends; it now reads `purchasable`, shows the platform's reason when a domain is taken, defaults to the registry's minimum term (for example two years for `.ai`), and refuses a shorter `--years` before any payment.
+- **`tarout domains register` stops early for `.sa` domains.** Those need a Saudi registry application and a supporting document that the CLI cannot collect, so it now points to the dashboard instead of failing after the contact prompts.
+- **`tarout domains search` and `search-multiple` show real availability and prices.** They read `available` and `price`, which the platform never sends, so every row read "no" with no price. They now read `purchasable` and `purchasePrice`, and show the minimum term when a TLD sells in multi-year blocks.
+- **`tarout domains verify` shows the records you actually need.** Every domain used to fall into a "Nameserver change not yet detected" message with no records, because the fields it branched on are no longer returned. It now prints the platform's reasons plus the exact A or CNAME record, any ownership TXT record, and the CAA record to add when a CAA policy blocks the certificate.
+- **`tarout domains list` fills the DNS column.** The `CF ZONE` column was always empty; it is now `DNS`, read from the returned `dnsZoneStatus`.
+- **`tarout domains info` shows privacy and expiry correctly.** It read `privacyEnabled` and `expiresAt` (never returned), so privacy always read "disabled" and expiry "-". It now reads `whoisPrivacy` and `expiryDate`, shows DNS and SSL status, lists the hostnames under the domain, and hides registrar-only rows for external domains.
+- **`tarout domains ssl` no longer reports a pending certificate as "invalid/missing".** It now prints the returned status, the platform's message and the activation date.
+- **`tarout domains registrar-status` reports readiness correctly.** It read a `ready` field that does not exist and always printed "no".
+
 ## [1.12.0]
 
 ### Added

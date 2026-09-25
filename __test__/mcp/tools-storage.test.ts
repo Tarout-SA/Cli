@@ -27,17 +27,30 @@ const fakeClient = {
 				description: "static assets",
 			}),
 		},
+		// storage.create's real response: no `name`, and the plan the platform
+		// derived from the subscription (the input plan is ignored).
 		create: {
-			mutate: vi
-				.fn()
-				.mockResolvedValue({ bucketId: "buk_2", name: "logs", plan: "STANDARD" }),
+			mutate: vi.fn().mockResolvedValue({
+				bucketId: "buk_2",
+				tenantPrefix: "t/buk2/",
+				bucketName: "tarout-shared-starter",
+				plan: "STARTER",
+				publicAccess: false,
+				endpoint: "https://storage.tarout.sa",
+				publicUrl: null,
+			}),
 		},
+		// storage.getCredentials only answers for CUSTOM buckets, in this shape.
 		getCredentials: {
 			query: vi.fn().mockResolvedValue({
-				accessKeyId: "AKIA",
+				accessKeyId: "GOOG1EXAMPLE",
+				authMode: "hmac",
 				secretAccessKey: "SEC",
-				endpoint: "https://s3.tarout.sa",
-				bucket: "assets",
+				endpoint: "https://storage.googleapis.com",
+				bucket: "customer-bucket",
+				prefix: "t/byo/",
+				region: "me-central2",
+				providerType: "GCS",
 			}),
 		},
 		getFiles: {
@@ -101,7 +114,7 @@ describe("storage tools", () => {
 		expect(body.buckets[0]?.publicAccess).toBe(false);
 	});
 
-	it("storage_create calls storage.create.mutate with the input", async () => {
+	it("storage_create does not forward the ignored plan and returns the server's plan", async () => {
 		const r = await invoke("storage_create", {
 			name: "logs",
 			plan: "STANDARD",
@@ -111,8 +124,22 @@ describe("storage tools", () => {
 		expect(r.isError).toBeUndefined();
 		expect(fakeClient.storage.create.mutate).toHaveBeenCalledWith({
 			name: "logs",
-			plan: "STANDARD",
 			description: "log archive",
+			publicAccess: false,
+		});
+		const body = JSON.parse(r.content[0].text) as { plan: string };
+		expect(body.plan).toBe("STARTER");
+	});
+
+	it("storage_create works without a plan", async () => {
+		const r = await invoke("storage_create", {
+			name: "logs",
+			publicAccess: false,
+		});
+		expect(r.isError).toBeUndefined();
+		expect(fakeClient.storage.create.mutate).toHaveBeenCalledWith({
+			name: "logs",
+			description: undefined,
 			publicAccess: false,
 		});
 	});
@@ -137,22 +164,42 @@ describe("storage tools", () => {
 		});
 	});
 
-	it("storage_credentials resolves by name and returns HMAC keys", async () => {
-		const r = await invoke("storage_credentials", { bucket: "assets" });
+	it("storage_credentials resolves a CUSTOM bucket by name and returns HMAC keys", async () => {
+		fakeClient.storage.allByOrganization.query.mockResolvedValueOnce([
+			{ bucketId: "buk_9", name: "byo", plan: "CUSTOM", publicAccess: false },
+		]);
+		const r = await invoke("storage_credentials", { bucket: "byo" });
 		expect(r.isError).toBeUndefined();
 		const body = JSON.parse(r.content[0].text) as {
 			accessKeyId: string;
 			secretAccessKey: string;
 			endpoint: string;
 			bucket: string;
+			prefix: string;
 		};
-		expect(body.accessKeyId).toBe("AKIA");
+		expect(body.accessKeyId).toBe("GOOG1EXAMPLE");
 		expect(body.secretAccessKey).toBe("SEC");
-		expect(body.endpoint).toBe("https://s3.tarout.sa");
-		expect(body.bucket).toBe("assets");
+		expect(body.endpoint).toBe("https://storage.googleapis.com");
+		expect(body.bucket).toBe("customer-bucket");
+		expect(body.prefix).toBe("t/byo/");
 		expect(fakeClient.storage.getCredentials.query).toHaveBeenCalledWith({
-			bucketId: "buk_1",
+			bucketId: "buk_9",
 		});
+	});
+
+	it("storage_credentials surfaces the platform's FORBIDDEN for a managed bucket", async () => {
+		fakeClient.storage.getCredentials.query.mockRejectedValueOnce(
+			Object.assign(
+				new Error(
+					"Direct provider credentials are disabled for managed storage. Create a scoped Tarout storage access key instead.",
+				),
+				{ data: { code: "FORBIDDEN" } },
+			),
+		);
+		const r = await invoke("storage_credentials", { bucket: "assets" });
+		expect(r.isError).toBe(true);
+		const body = JSON.parse(r.content[0].text) as { code: string };
+		expect(body.code).toBe("FORBIDDEN");
 	});
 
 	it("storage_files lists files (default invocation)", async () => {
@@ -204,6 +251,35 @@ describe("storage tools", () => {
 		expect(body.deleted).toBe(true);
 		expect(body.bucketId).toBe("buk_1");
 		expect(body.name).toBe("assets");
+	});
+
+	it("storage_delete refuses a name shared by several buckets and lists their ids", async () => {
+		fakeClient.storage.allByOrganization.query.mockResolvedValueOnce([
+			{ bucketId: "buk_1", name: "assets", plan: "STARTER" },
+			{ bucketId: "buk_7", name: "assets", plan: "STARTER" },
+		]);
+		const r = await invoke("storage_delete", { bucket: "assets" });
+		expect(r.isError).toBe(true);
+		const body = JSON.parse(r.content[0].text) as {
+			code: string;
+			error: string;
+		};
+		expect(body.code).toBe("INVALID_ARGUMENTS");
+		expect(body.error).toContain("buk_1");
+		expect(body.error).toContain("buk_7");
+		expect(fakeClient.storage.delete.mutate).not.toHaveBeenCalled();
+	});
+
+	it("storage_delete still resolves an exact id when names collide", async () => {
+		fakeClient.storage.allByOrganization.query.mockResolvedValueOnce([
+			{ bucketId: "buk_1", name: "assets", plan: "STARTER" },
+			{ bucketId: "buk_7", name: "assets", plan: "STARTER" },
+		]);
+		const r = await invoke("storage_delete", { bucket: "buk_7" });
+		expect(r.isError).toBeUndefined();
+		expect(fakeClient.storage.delete.mutate).toHaveBeenCalledWith({
+			bucketId: "buk_7",
+		});
 	});
 
 	it("storage_info returns NOT_FOUND envelope when the bucket cannot be resolved", async () => {

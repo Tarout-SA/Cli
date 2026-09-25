@@ -1,19 +1,23 @@
 /**
  * Curated MCP tools for object storage. Bucket references accept either the
  * platform id (`bucketId`) or the human-readable `name`; resolveBucketRef()
- * lists the org's buckets and matches on either. Every tool wraps one tRPC
- * procedure on the `storage` router — except storage_upload / storage_download,
+ * lists the org's buckets and matches on either. Names are not unique, so a
+ * name shared by several buckets is refused with the candidate ids rather than
+ * resolved to whichever came first. Every tool wraps one tRPC
+ * procedure on the `storage` router, except storage_upload / storage_download,
  * which additionally move the actual bytes over the presigned URL.
  *
  * Bucket-level:
  * - storage_list: storage.allByOrganization; compact
  *   `{id,name,plan,publicAccess}` projection so agents don't have to eyeball
  *   the raw shape.
- * - storage_create: storage.create with the fixed plan enum
- *   (STARTER|STANDARD|PRO) matching the DB tools convention.
+ * - storage_create: storage.create. The platform derives the bucket plan from
+ *   the project's subscription and ignores any plan in the input, so `plan` is
+ *   optional, accepted for compatibility, and never forwarded.
  * - storage_info: storage.findById.
- * - storage_credentials: storage.getCredentials, returned as-is (already
- *   S3-shaped: accessKeyId, secretAccessKey, …) — no field remapping needed.
+ * - storage_credentials: storage.getCredentials, returned as-is. Only CUSTOM
+ *   (bring-your-own) buckets have direct credentials; the platform answers
+ *   FORBIDDEN for managed buckets, which use storage_access_key_create.
  * - storage_files: storage.getFiles (prefix filter).
  * - storage_delete: storage.delete (whole bucket, irreversible).
  *
@@ -36,7 +40,7 @@
  *
  * Access keys (S3 HMAC credential custody):
  * - storage_access_keys: storage.listAccessKeys (never returns secrets).
- * - storage_access_key_create: storage.createAccessKey — returns a ONE-TIME
+ * - storage_access_key_create: storage.createAccessKey; returns a ONE-TIME
  *   secret shown only once.
  * - storage_access_key_revoke: storage.revokeAccessKey.
  *
@@ -59,9 +63,9 @@ const bucketRef = z.string().describe("Bucket name or id.");
 /**
  * Resolves a name-or-id reference to the bucket's `{bucketId, name}` pair by
  * listing all buckets in the organization and matching. Same shape as
- * resolveDbRef() from db.ts — single list-then-find pass covers both keys.
+ * resolveDbRef() from db.ts: a single list-then-find pass covers both keys.
  *
- * Throws `NotFoundError` when no match is found — this maps to `NOT_FOUND`
+ * Throws `NotFoundError` when no match is found; this maps to `NOT_FOUND`
  * in the tool envelope via `toEnvelope()`.
  */
 async function resolveBucketRef(
@@ -71,9 +75,19 @@ async function resolveBucketRef(
 	const buckets = (await client.storage.allByOrganization.query()) as Array<
 		Record<string, unknown>
 	>;
-	const match = buckets.find(
-		(b) => b.bucketId === ref || b.name === ref,
-	);
+	// An exact id always wins. Names are not unique within a project, so a
+	// name that matches several buckets is refused: resolving it to the first
+	// hit would let storage_delete remove the wrong bucket.
+	const byId = buckets.find((b) => b.bucketId === ref);
+	const byName = byId ? [] : buckets.filter((b) => b.name === ref);
+	if (byName.length > 1) {
+		const ids = byName.map((b) => String(b.bucketId)).join(", ");
+		throw codedError(
+			"INVALID_ARGUMENTS",
+			`Bucket name "${ref}" matches ${byName.length} buckets (ids: ${ids}). Pass the bucket id instead.`,
+		);
+	}
+	const match = byId ?? byName[0];
 	if (!match) {
 		throw new NotFoundError("Bucket", ref);
 	}
@@ -90,14 +104,21 @@ async function resolveBucketRef(
 const MAX_INLINE_DOWNLOAD_BYTES = 5 * 1024 * 1024;
 
 /**
- * Builds an Error that `toEnvelope()` maps to a `PRECONDITION_FAILED` code (via
- * its tRPC-shaped `.data.code` branch). Used to refuse an oversized inline
- * download while still handing the signed URL back in the message.
+ * Builds an Error that `toEnvelope()` maps to the given envelope code (via its
+ * tRPC-shaped `.data.code` branch).
+ */
+function codedError(code: string, message: string): Error {
+	const err = new Error(message) as Error & { data: { code: string } };
+	err.data = { code };
+	return err;
+}
+
+/**
+ * A `PRECONDITION_FAILED` error. Used to refuse an oversized inline download
+ * while still handing the signed URL back in the message.
  */
 function preconditionFailed(message: string): Error {
-	const err = new Error(message) as Error & { data: { code: string } };
-	err.data = { code: "PRECONDITION_FAILED" };
-	return err;
+	return codedError("PRECONDITION_FAILED", message);
 }
 
 export function registerStorageTools(server: McpServer): void {
@@ -130,17 +151,28 @@ export function registerStorageTools(server: McpServer): void {
 		"storage_create",
 		{
 			title: "Create a storage bucket",
-			description: "Wraps storage.create.",
+			description:
+				"Wraps storage.create. The platform picks the bucket plan from the project's subscription; the response's `plan` is the one it chose. Managed buckets have no direct credentials: to use one from a Tarout app, attach it (the call tool with storage.attachToApplication, or `tarout storage attach <bucket> <app-id>`), or mint a scoped key with storage_access_key_create.",
 			inputSchema: {
 				name: z.string().min(1),
-				plan: z.enum(["STARTER", "STANDARD", "PRO"]),
+				plan: z
+					.enum(["STARTER", "STANDARD", "PRO"])
+					.optional()
+					.describe(
+						"Ignored: the platform derives the plan from the project's subscription. Accepted for compatibility and not sent.",
+					),
 				description: z.string().optional(),
 				publicAccess: z.boolean().optional().default(false),
 			},
 		},
-		async (input) =>
+		async ({ name, description, publicAccess }) =>
 			withAuth(
-				async (client) => (await client.storage.create.mutate(input)) as unknown,
+				async (client) =>
+					(await client.storage.create.mutate({
+						name,
+						description,
+						publicAccess,
+					})) as unknown,
 			),
 	);
 
@@ -165,8 +197,9 @@ export function registerStorageTools(server: McpServer): void {
 	server.registerTool(
 		"storage_credentials",
 		{
-			title: "S3-compatible HMAC keys for a bucket",
-			description: "Wraps storage.getCredentials.",
+			title: "S3-compatible HMAC keys for a custom bucket",
+			description:
+				"Wraps storage.getCredentials. Only CUSTOM (bring-your-own) buckets have direct provider credentials; for a managed bucket the platform answers FORBIDDEN, so mint a scoped key with storage_access_key_create instead.",
 			inputSchema: { bucket: bucketRef },
 			annotations: { readOnlyHint: true },
 		},

@@ -9,12 +9,12 @@ import {
 	handleError,
 	InvalidArgumentError,
 	NotFoundError,
+	PermissionError,
 } from "../lib/errors.js";
 import {
 	box,
 	colors,
 	isJsonMode,
-	isNonInteractiveMode,
 	isQuietMode,
 	log,
 	outputData,
@@ -22,37 +22,9 @@ import {
 	shouldSkipConfirmation,
 	table,
 } from "../lib/output.js";
-import { confirm, input, select } from "../utils/prompts.js";
+import { confirm, input } from "../utils/prompts.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
-import {
-	loadResourceTiers,
-	pickDefaultResourceTier,
-	type ResourcePlan,
-} from "./deploy.js";
 import { requireProfile } from "../lib/auth-profile.js";
-
-const STORAGE_TIER_LABEL: Record<ResourcePlan, string> = {
-	FREE: "FREE (1 GB)",
-	STARTER: "STARTER (10 GB)",
-	STANDARD: "STANDARD (100 GB)",
-	PRO: "PRO (1 TB)",
-};
-
-function normalizeStoragePlan(
-	value: string | undefined,
-): ResourcePlan | undefined {
-	if (!value) return undefined;
-	const normalized = value.trim().toUpperCase();
-	if (
-		normalized === "FREE" ||
-		normalized === "STARTER" ||
-		normalized === "STANDARD" ||
-		normalized === "PRO"
-	) {
-		return normalized as ResourcePlan;
-	}
-	return undefined;
-}
 
 /**
  * Resolve the `--public` / `--private` pair into the `publicAccess` boolean the
@@ -165,7 +137,7 @@ export function registerStorageCommands(program: Command) {
 		.description("Create a new storage bucket")
 		.option(
 			"-p, --plan <plan>",
-			"Plan: free, starter, standard, or pro (defaults to this project's entitled tier)",
+			"Ignored: the platform picks the bucket plan from this project's subscription (kept so older scripts keep working)",
 		)
 		.option("-d, --description <text>", "Bucket description")
 		.option(
@@ -177,7 +149,7 @@ export function registerStorageCommands(program: Command) {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
-				const profile = await requireProfile();
+				await requireProfile();
 
 				// Default to private: omitting both flags must not change the
 				// behaviour anyone already scripted against.
@@ -191,59 +163,48 @@ export function registerStorageCommands(program: Command) {
 						flag: "--name",
 					});
 				}
+				// storage.create stores `input.name.trim()`; send the same value so
+				// the name printed below is the one the platform kept.
+				const sentName =
+					typeof bucketName === "string" && bucketName.trim()
+						? bucketName.trim()
+						: undefined;
+
+				// storage.create derives the bucket plan from the project's
+				// subscription (managedStoragePlanForPlanKey) and ignores any plan
+				// in the input, so there is nothing to choose here. --plan stays
+				// accepted for old scripts but is not sent.
+				if (options.plan && !isJsonMode()) {
+					log(
+						colors.dim(
+							"Note: --plan is ignored. The platform picks the bucket plan from this project's subscription.",
+						),
+					);
+				}
 
 				const client = getApiClient();
-
-				// Default to the tier the org is actually entitled to instead of
-				// hardcoding FREE — a paid org without a free storage slot would
-				// otherwise hit storage.free.slots: 1/0. Explicit --plan always wins.
-				let plan: ResourcePlan;
-				const explicit = normalizeStoragePlan(options.plan);
-				if (explicit) {
-					plan = explicit;
-				} else {
-					const tiers = await loadResourceTiers(client, "storage");
-					const def = pickDefaultResourceTier(tiers);
-					if (
-						isJsonMode() ||
-						isNonInteractiveMode() ||
-						shouldSkipConfirmation()
-					) {
-						plan = def;
-					} else {
-						const order: ResourcePlan[] = [
-							def,
-							...(
-								["FREE", "STARTER", "STANDARD", "PRO"] as ResourcePlan[]
-							).filter((t) => t !== def),
-						];
-						plan = await select<ResourcePlan>(
-							"Storage plan:",
-							order.map((t) => ({
-								name: `${STORAGE_TIER_LABEL[t]}${t === def ? `  ${colors.dim("recommended")}` : ""}`,
-								value: t,
-							})),
-							{ field: "plan", flag: "--plan" },
-						);
-					}
-				}
 
 				const _spinner = startSpinner("Creating storage bucket...");
 
 				// storage.create takes `publicAccess: z.boolean().default(false)` and
-				// persists it as-is — public buckets are a supported product feature
+				// persists it as-is. Public buckets are a supported product feature
 				// (the gateway answers anonymous reads for them), so pass the user's
 				// choice through instead of hardcoding private.
-				const bucket = await client.storage.create.mutate({
-					name: bucketName,
-					plan,
+				const bucket = (await client.storage.create.mutate({
+					name: sentName,
 					description: options.description,
 					publicAccess,
-				});
+				})) as {
+					bucketId: string;
+					plan?: string;
+					publicAccess?: boolean;
+					publicUrl?: string | null;
+					endpoint?: string | null;
+				};
 
 				succeedSpinner("Storage bucket created!");
 
-				const bucketId = bucket.bucketId || bucket.id;
+				const bucketId = bucket.bucketId;
 
 				if (isJsonMode()) {
 					outputData(bucket);
@@ -252,15 +213,18 @@ export function registerStorageCommands(program: Command) {
 
 				quietOutput(bucketId);
 
-				// Trust the server's echo of publicAccess over the local flag — the
+				// Trust the server's echo of publicAccess over the local flag: the
 				// procedure is the one that decided.
-				const isPublic = Boolean((bucket as any).publicAccess);
-				const publicUrl = (bucket as any).publicUrl as string | null | undefined;
+				const isPublic = Boolean(bucket.publicAccess);
+				const publicUrl = bucket.publicUrl;
 
+				// The create response carries no `name` (only bucketId, plan,
+				// publicAccess, endpoint, publicUrl and provider internals), so the
+				// name line shows what was sent, which the server stores verbatim.
 				box("Storage Bucket Created", [
 					`ID: ${colors.cyan(bucketId)}`,
-					`Name: ${bucket.name}`,
-					`Plan: ${plan}`,
+					...(sentName ? [`Name: ${sentName}`] : []),
+					...(bucket.plan ? [`Plan: ${bucket.plan}`] : []),
 					`Access: ${isPublic ? colors.warn("public (unauthenticated reads)") : "private"}`,
 					...(isPublic && publicUrl ? [`Public URL: ${publicUrl}`] : []),
 				]);
@@ -268,11 +232,12 @@ export function registerStorageCommands(program: Command) {
 				// The box already carries the URL; don't repeat it in the warning.
 				if (isPublic) warnPublicAccess();
 
+				log(`Browse files: ${colors.dim(`tarout storage files ${bucketId}`)}`);
+				// Managed buckets never hand out provider credentials
+				// (storage.getCredentials is FORBIDDEN unless plan is CUSTOM). An app
+				// gets a scoped key and the S3 env vars through attachToApplication.
 				log(
-					`Browse files: ${colors.dim(`tarout storage files ${bucketId.slice(0, 8)}`)}`,
-				);
-				log(
-					`Get credentials: ${colors.dim(`tarout storage credentials ${bucketId.slice(0, 8)}`)}`,
+					`Use it from an app: ${colors.dim(`tarout storage attach ${bucketId} <app-id>`)}`,
 				);
 				log("");
 			} catch (err) {
@@ -414,10 +379,12 @@ export function registerStorageCommands(program: Command) {
 				}
 				log("");
 				log(colors.bold("Storage Usage"));
+				// findById sends `storageUsed` and `filesCount` (the dashboard reads
+				// the same pair). There is no usedBytes/fileCount field.
 				log(
-					`  Used: ${formatBytes(bucket.usedBytes || 0)} / ${formatBytes(bucket.storageLimit || 0)}`,
+					`  Used: ${formatBytes(Number(bucket.storageUsed) || 0)} / ${formatBytes(Number(bucket.storageLimit) || 0)}`,
 				);
-				log(`  Files: ${bucket.fileCount || 0}`);
+				log(`  Files: ${Number(bucket.filesCount) || 0}`);
 				log("");
 				log(colors.bold("Endpoint"));
 				if (bucket.endpoint) {
@@ -426,7 +393,7 @@ export function registerStorageCommands(program: Command) {
 					log(`  ${colors.dim("Not available")}`);
 				}
 				// findById returns `publicUrl` (non-null only for public, non-CUSTOM
-				// buckets). Never build this URL by hand — the server owns the shape.
+				// buckets). Never build this URL by hand: the server owns the shape.
 				const infoPublicUrl = (bucket as any).publicUrl as
 					| string
 					| null
@@ -580,11 +547,16 @@ export function registerStorageCommands(program: Command) {
 			}
 		});
 
-	// Get S3-compatible credentials for a bucket
+	// Direct provider credentials. The platform only hands these out for
+	// CUSTOM (bring-your-own) buckets: storage.getCredentials throws FORBIDDEN
+	// for every managed bucket. Managed buckets reach an app through
+	// `tarout storage attach`, which mints a scoped key and injects the env vars.
 	storage
 		.command("credentials")
 		.argument("<bucket>", "Bucket ID or name")
-		.description("Get S3-compatible credentials for SDK access")
+		.description(
+			"Show direct S3-compatible credentials (custom buckets only; for managed buckets use `tarout storage attach <bucket> <app-id>`)",
+		)
 		.action(async (bucketIdentifier) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
@@ -600,9 +572,22 @@ export function registerStorageCommands(program: Command) {
 					throw new NotFoundError("Storage bucket", bucketIdentifier);
 				}
 
-				const creds = await client.storage.getCredentials.query({
-					bucketId: bucket.bucketId || bucket.id,
-				});
+				const bucketId = bucket.bucketId || bucket.id;
+				let creds: any;
+				try {
+					creds = await client.storage.getCredentials.query({ bucketId });
+				} catch (credErr) {
+					failSpinner();
+					const code =
+						(credErr as { data?: { code?: string } })?.data?.code ??
+						(credErr as { code?: string })?.code;
+					if (code === "FORBIDDEN" && bucket.plan !== "CUSTOM") {
+						throw new PermissionError(
+							`Bucket "${bucket.name}" is managed by Tarout, and managed buckets never expose direct provider credentials. To use it from a Tarout app, run: tarout storage attach ${bucketId} <app-id> (it creates a scoped access key and sets the S3 env vars on the app).`,
+						);
+					}
+					throw credErr;
+				}
 
 				succeedSpinner();
 
@@ -612,11 +597,12 @@ export function registerStorageCommands(program: Command) {
 				}
 
 				box(`Credentials for ${bucket.name}`, [
-					`Access Key ID: ${colors.cyan(creds.accessKeyId || "")}`,
-					`Secret Access Key: ${colors.dim(creds.secretAccessKey || "")}`,
+					`Access Key ID: ${colors.cyan(creds.accessKeyId || colors.dim("none (workload identity)"))}`,
+					`Secret Access Key: ${colors.dim(creds.secretAccessKey || "none")}`,
 					`Region: ${creds.region || "auto"}`,
 					`Endpoint: ${creds.endpoint || ""}`,
 					`Bucket: ${creds.bucket || bucket.name}`,
+					...(creds.prefix ? [`Prefix: ${creds.prefix}`] : []),
 				]);
 
 				log("These are S3-compatible credentials. Keep them secure.");
@@ -890,8 +876,14 @@ export function registerStorageCommands(program: Command) {
 		.argument("<bucket>", "Bucket name or ID")
 		.argument("<filename>", "Uploaded file name")
 		.description("Notify the platform that a file upload completed")
-		.option("--size <bytes>", "Size that existed before this upload, in bytes", "0")
-		.option("--expected-size <bytes>", "Expected uploaded size in bytes")
+		.option(
+			"--size <bytes>",
+			"Optional and ignored by the platform (legacy: size before this upload, in bytes)",
+		)
+		.option(
+			"--expected-size <bytes>",
+			"Optional and ignored by the platform (legacy: expected uploaded size in bytes)",
+		)
 		.option(
 			"--reservation-token <token>",
 			"Durable reservation token returned by upload-url",
@@ -899,6 +891,21 @@ export function registerStorageCommands(program: Command) {
 		.action(async (bucketIdentifier, fileName, options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
+				// storage.completeUpload resolves the durable reservation by
+				// token (or by object name) and reads the real size from the
+				// provider. expectedSizeBytes / existingSizeBytes are accepted but
+				// ignored, so they are optional here; when given they still have to
+				// match the server's schema (positive / non-negative integers).
+				const expectedSizeBytes = parseOptionalBytes(
+					options.expectedSize,
+					"--expected-size",
+					1,
+				);
+				const existingSizeBytes = parseOptionalBytes(
+					options.size,
+					"--size",
+					0,
+				);
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching buckets...");
 				const buckets = await client.storage.allByOrganization.query();
@@ -908,27 +915,27 @@ export function registerStorageCommands(program: Command) {
 					throw new NotFoundError("Storage bucket", bucketIdentifier);
 				}
 				const bucketId = bucket.bucketId || bucket.id;
-				// completeUpload requires a positive expectedSizeBytes; existing
-				// (pre-upload) size may be 0.
-				const expectedSizeBytes = options.expectedSize
-					? Number.parseInt(options.expectedSize)
-					: Number.NaN;
-				if (!Number.isInteger(expectedSizeBytes) || expectedSizeBytes <= 0) {
-					failSpinner();
-					throw new CliError(
-						"A positive --expected-size <bytes> is required to complete an upload.",
-					);
-				}
 				const _completeSpinner = startSpinner("Completing upload...");
-				await client.storage.completeUpload.mutate({
+				const completed = (await client.storage.completeUpload.mutate({
 					bucketId,
 					reservationToken: options.reservationToken,
 					fileName,
-					expectedSizeBytes,
-					existingSizeBytes: Number.parseInt(options.size || "0"),
-				} as any);
-				succeedSpinner("Upload completed.");
-				if (isJsonMode()) outputData({ completed: true, fileName });
+					...(expectedSizeBytes !== undefined ? { expectedSizeBytes } : {}),
+					...(existingSizeBytes !== undefined ? { existingSizeBytes } : {}),
+				} as any)) as {
+					sizeBytes?: number;
+					contentType?: string | null;
+					lastModified?: string;
+					generation?: string;
+				} | null;
+				succeedSpinner(
+					typeof completed?.sizeBytes === "number"
+						? `Upload completed (${formatBytes(completed.sizeBytes)}).`
+						: "Upload completed.",
+				);
+				if (isJsonMode()) {
+					outputData({ completed: true, fileName, ...(completed ?? {}) });
+				}
 			} catch (err) {
 				failSpinner();
 				handleError(err);
@@ -1352,13 +1359,46 @@ export function registerStorageCommands(program: Command) {
 		});
 }
 
+/**
+ * Resolve a bucket reference: an exact id first, then an exact
+ * (case-insensitive) name, then a unique id prefix. Bucket names are NOT
+ * unique within a project, so a name or prefix that matches several buckets
+ * is refused with the candidate ids instead of silently picking the first
+ * (which, on `delete`, would remove the wrong bucket).
+ */
 function findBucket(buckets: any[], identifier: string) {
+	const idOf = (b: any) => String(b?.bucketId || b?.id || "");
+	const exact = buckets.find((b: any) => idOf(b) === identifier);
+	if (exact) return exact;
+
 	const lower = identifier.toLowerCase();
-	return buckets.find(
-		(b: any) =>
-			(b.bucketId || b.id) === identifier ||
-			(b.bucketId || b.id || "").startsWith(identifier) ||
-			b.name.toLowerCase() === lower,
+	const byName = buckets.filter(
+		(b: any) => String(b?.name ?? "").toLowerCase() === lower,
+	);
+	if (byName.length === 1) return byName[0];
+	if (byName.length > 1) throw ambiguousBucket(identifier, "name", byName);
+
+	if (!identifier) return undefined;
+	const byPrefix = buckets.filter((b: any) => {
+		const id = idOf(b);
+		return id !== "" && id.startsWith(identifier);
+	});
+	if (byPrefix.length === 1) return byPrefix[0];
+	if (byPrefix.length > 1) throw ambiguousBucket(identifier, "id prefix", byPrefix);
+	return undefined;
+}
+
+function ambiguousBucket(
+	identifier: string,
+	kind: "name" | "id prefix",
+	matches: any[],
+): InvalidArgumentError {
+	failSpinner();
+	const ids = matches
+		.map((b: any) => `${b.bucketId || b.id} (${b.name})`)
+		.join(", ");
+	return new InvalidArgumentError(
+		`Bucket ${kind} "${identifier}" matches ${matches.length} buckets: ${ids}. Pass the full bucket id instead.`,
 	);
 }
 
@@ -1376,6 +1416,25 @@ function formatBytes(bytes: number): string {
 	const units = ["B", "KB", "MB", "GB", "TB"];
 	const i = Math.floor(Math.log(bytes) / Math.log(1024));
 	return `${(bytes / 1024 ** i).toFixed(1)} ${units[i]}`;
+}
+
+/**
+ * Parse an optional byte-count flag. Absent stays `undefined` so it is not
+ * sent at all; present must be an integer of at least `min`.
+ */
+function parseOptionalBytes(
+	value: string | undefined,
+	flag: string,
+	min: number,
+): number | undefined {
+	if (value === undefined) return undefined;
+	const n = Number(value);
+	if (!Number.isInteger(n) || n < min) {
+		throw new InvalidArgumentError(
+			`${flag} must be ${min === 0 ? "a non-negative" : "a positive"} whole number of bytes (got "${value}").`,
+		);
+	}
+	return n;
 }
 
 /**

@@ -15,13 +15,16 @@
  *   - db_analytics ....... postgres.getAnalytics (postgres-only)
  *   - db_stats ........... postgres.sharedStats / mysql.sharedStats
  *   - db_backups ......... backup.listByDatabase (schedules)
- *   - db_backup_download . backup.getBackupDownloadUrl (signed URL — read-only)
- *  CONTROL (mutating, not destructive — no hint):
- *   - db_create .......... postgres.create / mysql.create
+ *   - db_backup_download . backup.getBackupDownloadUrl (signed URL, read-only)
+ *  CONTROL (mutating, not destructive, no hint):
+ *   - db_create .......... postgres.create (PostgreSQL only; MySQL creation is
+ *                          disabled on the platform, so type "mysql" is refused
+ *                          locally)
  *   - db_sql ............. postgres.executeSql (postgres-only)
  *   - db_import .......... postgres.executeSql from `sql` or a local `file` (postgres-only)
- *   - db_restart ......... postgres/mysql.changeStatus → "running"
- *   - db_stop ............ postgres/mysql.changeStatus → "stopped"
+ *   - db_restart ......... refuses locally: changeStatus only writes a status
+ *   - db_stop ............ column, so managed databases cannot be stopped,
+ *                          started or restarted
  *   - db_reactivate ...... postgres/mysql.reactivate
  *   - db_update .......... postgres/mysql.update (name / description)
  *   - db_attach .......... postgres/mysql.attachToApplication
@@ -53,10 +56,13 @@
  * db_restore is present with the full apiRestoreBackup input shape and a
  * destructiveHint, but the platform exposes restore ONLY as a streaming tRPC
  * subscription (backup.restoreBackupWithLogs). The httpBatchLink transport used
- * here (and by the CLI) cannot drive a subscription, so — exactly like
- * `tarout backups restore` — the tool refuses with clear guidance instead of
- * firing a doomed request. Swap in a mutation-based restore endpoint if one is
- * added platform-side.
+ * here (and by the CLI) cannot drive a subscription, so, exactly like
+ * `tarout backups restore`, the tool refuses and points at the dashboard's
+ * Backups tab instead of firing a doomed request. Swap in a mutation-based
+ * restore endpoint if one is added platform-side.
+ *
+ * Refusals shared with the CLI (lifecycle, MySQL create, TLS, SQL console
+ * limits) live in lib/managed-db.ts so both surfaces say the same thing.
  */
 import { readFileSync } from "node:fs";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -64,17 +70,21 @@ import { z } from "zod";
 import { toAppNameSlug } from "../../lib/app-name.js";
 import { getCurrentProfile } from "../../lib/config.js";
 import { NotFoundError } from "../../lib/errors.js";
+import {
+	consoleSqlProblem,
+	EXTERNAL_ACCESS_TLS_MESSAGE,
+	EXTERNAL_POOLER_DEFAULT_PORT,
+	MANAGED_DB_LIFECYCLE_MESSAGE,
+	MYSQL_CREATE_UNAVAILABLE_MESSAGE,
+} from "../../lib/managed-db.js";
 import { errorResult, type TrpcClient, withAuth } from "../runtime.js";
 
 const dbType = z.enum(["postgres", "mysql"]).describe("Database engine.");
 const dbRef = z.string().describe("Database name or id.");
 
-// Default images per engine, matching commands/db.ts. postgres.create /
-// mysql.create both require `dockerImage`.
-const DEFAULT_DOCKER_IMAGE = {
-	postgres: "postgres:17",
-	mysql: "mysql:8",
-} as const;
+// Default image, matching commands/db.ts. postgres.create requires
+// `dockerImage`.
+const DEFAULT_POSTGRES_IMAGE = "postgres:17";
 
 /**
  * Resolves a name-or-id reference to the database's `{id, name}` pair by
@@ -140,20 +150,31 @@ export function registerDbTools(server: McpServer): void {
 	server.registerTool(
 		"db_create",
 		{
-			title: "Create a database",
+			title: "Create a PostgreSQL database",
 			description:
-				"Creates a Postgres or MySQL database with the given plan. Uses postgres.create / mysql.create.",
+				"Creates a PostgreSQL database with the given plan (FREE, STARTER, STANDARD or PRO). Uses postgres.create. Only PostgreSQL can be created; pass type \"postgres\".",
 			inputSchema: {
-				type: dbType,
+				type: dbType.describe(
+					'Database engine. Must be "postgres": only PostgreSQL can be created.',
+				),
 				name: z.string().min(1),
-				plan: z.enum(["STARTER", "STANDARD", "PRO"]),
+				plan: z.enum(["FREE", "STARTER", "STANDARD", "PRO"]),
 				description: z.string().optional(),
 			},
 		},
 		async ({ type, name, plan, description }) => {
-			// postgres.create / mysql.create require `appName` (slug),
-			// `dockerImage`, and `organizationId`; the tRPC input schema does not
-			// inject them. Mirror the CLI command.
+			// mysql.create always throws PRECONDITION_FAILED on the platform.
+			// Refuse before auth so the answer does not depend on credentials.
+			if (type !== "postgres") {
+				return errorResult({
+					error: MYSQL_CREATE_UNAVAILABLE_MESSAGE,
+					code: "PRECONDITION_FAILED",
+					remediation: 'Call db_create with type "postgres".',
+				});
+			}
+			// postgres.create requires `appName` (slug), `dockerImage`, and
+			// `organizationId`; the tRPC input schema does not inject them.
+			// Mirror the CLI command.
 			const profile = getCurrentProfile();
 			if (!profile) {
 				return errorResult({
@@ -164,11 +185,10 @@ export function registerDbTools(server: McpServer): void {
 				});
 			}
 			return withAuth(async (client) => {
-				const router = type === "postgres" ? client.postgres : client.mysql;
-				const created = (await router.create.mutate({
+				const created = (await client.postgres.create.mutate({
 					name,
 					appName: toAppNameSlug(name),
-					dockerImage: DEFAULT_DOCKER_IMAGE[type],
+					dockerImage: DEFAULT_POSTGRES_IMAGE,
 					organizationId: profile.organizationId,
 					description,
 					plan,
@@ -201,7 +221,7 @@ export function registerDbTools(server: McpServer): void {
 		{
 			title: "External connection credentials for a database",
 			description:
-				"Returns an externally reachable connection object (host / port / user / password / database). Private infrastructure addresses are never returned.",
+				"Returns an externally reachable connection object (host / port / user / password / database / connectionString, TLS required). Private infrastructure addresses are never returned.",
 			inputSchema: { type: dbType, db: dbRef },
 			annotations: { readOnlyHint: true },
 		},
@@ -234,7 +254,7 @@ export function registerDbTools(server: McpServer): void {
 					unavailable = {
 						error: "External database access is disabled or unavailable.",
 						remediation:
-							"Enable public database access in the Tarout dashboard, then retry this tool.",
+							"Enable it with the db_external_access tool (enabled: true, plus public: true or allowedCidrs), or run `tarout db external-access <db> --enable --public`, then retry this tool.",
 					};
 					return null;
 				}
@@ -242,10 +262,14 @@ export function registerDbTools(server: McpServer): void {
 				return {
 					type,
 					host: info.externalPoolerHost,
-					port: info.externalPoolerPort ?? 5432,
+					// The pooler port; external clients never reach a backend on 5432.
+					port: info.externalPoolerPort ?? EXTERNAL_POOLER_DEFAULT_PORT,
 					database: info.databaseName ?? info.database ?? null,
 					user: info.databaseUser ?? info.user ?? null,
 					password: info.databasePassword ?? info.password ?? null,
+					// External access is TLS-only; the platform's string says so.
+					sslmode: "require",
+					connectionString: info.externalConnectionString ?? null,
 				};
 			});
 
@@ -288,11 +312,15 @@ export function registerDbTools(server: McpServer): void {
 					isError: true,
 				};
 			}
+			const problem = consoleSqlProblem(sql);
+			if (problem) {
+				return errorResult({ error: problem, code: "INVALID_ARGUMENTS" });
+			}
 			return withAuth(async (client) => {
 				const { id } = await resolveDbRef(client, db, "postgres");
 				const result = (await client.postgres.executeSql.mutate({
 					postgresId: id,
-					sql,
+					sql: sql.trim(),
 				})) as unknown;
 				return result;
 			});
@@ -304,7 +332,7 @@ export function registerDbTools(server: McpServer): void {
 		{
 			title: "Import/restore a Postgres database from SQL (Postgres only)",
 			description:
-				"Runs a SQL dump against a Postgres database via postgres.executeSql — the 'upload/restore a database' path. Provide the SQL inline as `sql`, OR a local `file` path the MCP server reads from disk. MySQL is not supported — use `call` for mysql-specific ops.",
+				"Runs a SQL dump against a Postgres database via postgres.executeSql (the 'upload/restore a database' path). Provide the SQL inline as `sql`, OR a local `file` path the MCP server reads from disk. The SQL console takes at most 10,000 characters per call and cannot run COPY ... FROM stdin, GRANT, REVOKE or role/database-level statements. MySQL is not supported; use `call` for mysql-specific ops.",
 			inputSchema: {
 				type: dbType,
 				db: dbRef,
@@ -347,11 +375,17 @@ export function registerDbTools(server: McpServer): void {
 					code: "INVALID_ARGUMENTS",
 				});
 			}
+			// The console caps SQL at 10,000 characters, blocks GRANT/REVOKE/
+			// role/database-level statements and cannot feed COPY ... FROM stdin.
+			const problem = consoleSqlProblem(sqlText);
+			if (problem) {
+				return errorResult({ error: problem, code: "INVALID_ARGUMENTS" });
+			}
 			return withAuth(async (client) => {
 				const { id } = await resolveDbRef(client, db, "postgres");
 				const result = (await client.postgres.executeSql.mutate({
 					postgresId: id,
-					sql: sqlText,
+					sql: sqlText.trim(),
 				})) as unknown;
 				return result;
 			});
@@ -527,55 +561,29 @@ export function registerDbTools(server: McpServer): void {
 
 	// ── CONTROL (mutating, not destructive) ────────────────────────────────────
 
-	server.registerTool(
-		"db_restart",
-		{
-			title: "Restart a database",
-			description:
-				'postgres/mysql.changeStatus with applicationStatus "running".',
-			inputSchema: { type: dbType, db: dbRef },
-		},
-		async ({ type, db }) =>
-			withAuth(async (client) => {
-				const { id, name } = await resolveDbRef(client, db, type);
-				const result =
-					type === "postgres"
-						? await client.postgres.changeStatus.mutate({
-								postgresId: id,
-								applicationStatus: "running",
-							})
-						: await client.mysql.changeStatus.mutate({
-								mysqlId: id,
-								applicationStatus: "running",
-							});
-				return { type, id, name, restarted: true, result };
-			}),
-	);
-
-	server.registerTool(
-		"db_stop",
-		{
-			title: "Stop a database",
-			description:
-				'postgres/mysql.changeStatus with applicationStatus "stopped".',
-			inputSchema: { type: dbType, db: dbRef },
-		},
-		async ({ type, db }) =>
-			withAuth(async (client) => {
-				const { id, name } = await resolveDbRef(client, db, type);
-				const result =
-					type === "postgres"
-						? await client.postgres.changeStatus.mutate({
-								postgresId: id,
-								applicationStatus: "stopped",
-							})
-						: await client.mysql.changeStatus.mutate({
-								mysqlId: id,
-								applicationStatus: "stopped",
-							});
-				return { type, id, name, stopped: true, result };
-			}),
-	);
+	// changeStatus only writes a status column: nothing is stopped or
+	// restarted, FREE databases are refused, and a paid database would be
+	// shown as stopped while it keeps running. Both tools stay registered so
+	// agents get a clear answer, and neither touches the API.
+	for (const [tool, verb] of [
+		["db_restart", "Restart"],
+		["db_stop", "Stop"],
+	] as const) {
+		server.registerTool(
+			tool,
+			{
+				title: `${verb} a database (not supported)`,
+				description:
+					"Managed databases run on shared hosts and cannot be stopped, started or restarted. This tool always refuses; it is kept so callers get a clear answer.",
+				inputSchema: { type: dbType, db: dbRef },
+			},
+			async () =>
+				errorResult({
+					error: MANAGED_DB_LIFECYCLE_MESSAGE,
+					code: "PRECONDITION_FAILED",
+				}),
+		);
+	}
 
 	server.registerTool(
 		"db_reactivate",
@@ -677,7 +685,7 @@ export function registerDbTools(server: McpServer): void {
 		{
 			title: "Configure external access for a Postgres database",
 			description:
-				"postgres.updateExternalAccess. Postgres-only. The server REPLACES the stored config, so this loads the current row and preserves any field left unset.",
+				"postgres.updateExternalAccess. Postgres-only. The server REPLACES the stored config, so this loads the current row and preserves any field left unset. TLS is always required: requireSsl is always sent as true.",
 			inputSchema: {
 				type: dbType,
 				db: dbRef,
@@ -693,16 +701,32 @@ export function registerDbTools(server: McpServer): void {
 					.boolean()
 					.optional()
 					.describe("Allow the whole internet (0.0.0.0/0)."),
-				requireSsl: z.boolean().optional().describe("Require SSL/TLS."),
+				requireSsl: z
+					.boolean()
+					.optional()
+					.describe(
+						"Must be true or omitted: external access always requires TLS.",
+					),
 			},
 		},
 		async ({ type, db, enabled, allowedCidrs, public: isPublic, requireSsl }) => {
 			if (type !== "postgres") return postgresOnlyRejection("db_external_access");
+			// The platform refuses enabled && !requireSsl. Turning TLS off is
+			// only meaningful while enabling, so refuse it unless disabling.
+			if (requireSsl === false && enabled !== false) {
+				return errorResult({
+					error: EXTERNAL_ACCESS_TLS_MESSAGE,
+					code: "INVALID_ARGUMENTS",
+					remediation: "Omit requireSsl (or pass true) and retry.",
+				});
+			}
 			return withAuth(async (client) => {
 				const { id } = await resolveDbRef(client, db, "postgres");
 				// Load-merge: the server wipes any omitted field to its default, so
-				// preserve the current value for anything the caller didn't override —
-				// matching commands/db.ts external-access.
+				// preserve the current value for anything the caller didn't
+				// override, matching commands/db.ts external-access. requireSsl is
+				// never preserved: legacy rows store false, which the platform
+				// refuses whenever access is enabled.
 				const current = (await client.postgres.one.query({
 					postgresId: id,
 				})) as Record<string, unknown>;
@@ -713,8 +737,7 @@ export function registerDbTools(server: McpServer): void {
 					allowedCidrs:
 						allowedCidrs ?? (current.externalAllowedCidrs as string[]) ?? [],
 					public: isPublic ?? (current.externalPublicAccess as boolean) ?? false,
-					requireSsl:
-						requireSsl ?? (current.externalSslRequired as boolean) ?? false,
+					requireSsl: true,
 				})) as unknown;
 				return { type, id, externalAccess: result };
 			});
@@ -751,7 +774,7 @@ export function registerDbTools(server: McpServer): void {
 		{
 			title: "Restore a database from a backup (overwrites data)",
 			description:
-				"Restore maps to backup.restoreBackupWithLogs, which the platform exposes ONLY as a streaming tRPC subscription. The batch-only MCP transport cannot drive it, so — like `tarout backups restore` — this refuses with guidance instead of firing a doomed request. Restore from the Tarout dashboard.",
+				"Restore maps to backup.restoreBackupWithLogs, which the platform exposes ONLY as a streaming tRPC subscription. The batch-only MCP transport cannot drive it, so, like `tarout backups restore`, this refuses with guidance instead of firing a doomed request. Restore from the Backups tab of the database in the Tarout dashboard.",
 			inputSchema: {
 				type: dbType,
 				db: dbRef,
@@ -770,9 +793,10 @@ export function registerDbTools(server: McpServer): void {
 		async () =>
 			errorResult({
 				error:
-					"Backup restore isn't available over MCP — the platform exposes it only as a streaming subscription (backup.restoreBackupWithLogs) that the batch transport can't drive.",
+					"Backup restore is not available over MCP: the platform exposes it only as a streaming subscription (backup.restoreBackupWithLogs) that the batch transport cannot drive.",
 				code: "PRECONDITION_FAILED",
-				remediation: "Restore from the Tarout dashboard.",
+				remediation:
+					"Restore from the Backups tab of the database in the Tarout dashboard.",
 			}),
 	);
 }

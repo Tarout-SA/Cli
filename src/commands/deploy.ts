@@ -2879,7 +2879,7 @@ async function deployResolvedTarget(
 					`Check status: ${colors.dim(`tarout deploy:status ${app.applicationId.slice(0, 8)}`)}`,
 				);
 				log(
-					`View logs: ${colors.dim(`tarout deploy:logs ${result.deploymentId.slice(0, 8)}`)}`,
+					`View logs: ${colors.dim(`tarout deploy:logs ${result.deploymentId}`)}`,
 				);
 				log("");
 			}
@@ -4865,10 +4865,25 @@ export function registerDeployCommands(program: Command) {
 					log(`URL: ${colors.cyan(appUrl)}`);
 				}
 
+				// getDeploymentStatus returns { status, publicUrl, createdAt,
+				// deployed } (or null); it has no provider/region/updatedAt.
 				if (cloudStatus) {
-					log(`Provider: ${cloudStatus.provider}`);
-					log(`Region: ${cloudStatus.region}`);
-					log(`Updated: ${new Date(cloudStatus.updatedAt).toLocaleString()}`);
+					log(
+						`Deployed: ${cloudStatus.deployed ? "yes" : colors.dim("not deployed yet")}`,
+					);
+				}
+				if (app.region) log(`Region: ${app.region}`);
+				try {
+					const [latest] = (await client.deployment.all.query({
+						applicationId: appSummary.applicationId,
+					})) as DeploymentSummary[];
+					if (latest) {
+						log(
+							`Last deployment: ${getStatusBadge(latest.status)} ${colors.dim(`${formatDate(latest.createdAt)} (${latest.deploymentId})`)}`,
+						);
+					}
+				} catch {
+					// Optional detail; the status above already answered.
 				}
 
 				log("");
@@ -4975,8 +4990,9 @@ export function registerDeployCommands(program: Command) {
 				log("");
 				table(
 					["ID", "STATUS", "TITLE", "CREATED"],
+					// Full ids: deploy:logs and deployment.one match exactly.
 					limitedDeployments.map((d: any) => [
-						colors.cyan(d.deploymentId.slice(0, 8)),
+						colors.cyan(d.deploymentId),
 						getStatusBadge(d.status),
 						d.title || colors.dim("-"),
 						formatDate(d.createdAt),
@@ -5015,9 +5031,12 @@ export function registerDeployCommands(program: Command) {
 				try {
 					deployment = await client.deployment.one.query({ deploymentId });
 				} catch {
-					// Deployment not found
+					// Deployment not found. The lookup is exact, so a short id
+					// copied from an older `deploy:list` never matches.
 					failSpinner();
-					throw new NotFoundError("Deployment", deploymentId);
+					throw new NotFoundError("Deployment", deploymentId, [
+						"Pass the full deployment id: tarout deploy:list <app>",
+					]);
 				}
 
 				succeedSpinner();
@@ -5219,18 +5238,12 @@ export function registerDeployCommands(program: Command) {
 				let targetDeploymentId: string;
 
 				if (options.to) {
-					// Use specific deployment ID
-					const targetDeployment = successfulDeployments.find(
-						(d) =>
-							d.deploymentId === options.to ||
-							d.deploymentId.startsWith(options.to),
+					// Use specific deployment ID (a unique prefix is accepted)
+					targetDeploymentId = resolveDeploymentRef(
+						successfulDeployments,
+						options.to,
+						"successful deployment",
 					);
-
-					if (!targetDeployment) {
-						throw new NotFoundError("Deployment", options.to);
-					}
-
-					targetDeploymentId = targetDeployment.deploymentId;
 				} else if (options.previous) {
 					// Use the second most recent successful deployment (first is current)
 					if (successfulDeployments.length < 2) {
@@ -5333,14 +5346,14 @@ export function registerDeployCommands(program: Command) {
 					quietOutput(result.deploymentId);
 					log("");
 					log(`Deployment ID: ${colors.cyan(result.deploymentId)}`);
-					log(`Rolling back to: ${colors.dim(targetDeploymentId.slice(0, 8))}`);
+					log(`Rolling back to: ${colors.dim(targetDeploymentId)}`);
 					log("");
 					log("Rollback is running in the background.");
 					log(
 						`Check status: ${colors.dim(`tarout deploy:status ${appSummary.applicationId.slice(0, 8)}`)}`,
 					);
 					log(
-						`View logs: ${colors.dim(`tarout deploy:logs ${result.deploymentId.slice(0, 8)}`)}`,
+						`View logs: ${colors.dim(`tarout deploy:logs ${result.deploymentId}`)}`,
 					);
 					log("");
 				}
@@ -5392,7 +5405,9 @@ export function registerDeployCommands(program: Command) {
 					});
 				succeedSpinner();
 
-				let targetDeploymentId: string | undefined = options.deployment;
+				let targetDeploymentId: string | undefined = options.deployment
+					? resolveDeploymentRef(deployments, options.deployment, "deployment")
+					: undefined;
 				if (!targetDeploymentId) {
 					// Most recent failure. `deployment.all` is newest-first, and the
 					// server rejects anything that isn't actually failed, so a wrong
@@ -5438,7 +5453,7 @@ export function registerDeployCommands(program: Command) {
 					log("");
 					log(`Deployment ID: ${colors.cyan(result.deploymentId)}`);
 					log(
-						`Reusing the image from: ${colors.dim(targetDeploymentId.slice(0, 8))}`,
+						`Reusing the image from: ${colors.dim(targetDeploymentId)}`,
 					);
 					log("");
 					log("No rebuild needed — only the deploy step runs again.");
@@ -5571,6 +5586,37 @@ export function registerLogsCommand(program: Command) {
 }
 
 // Helper functions
+/**
+ * Resolve a deployment id, or a unique prefix of one, against `deployments`.
+ * Deployment ids are exact-match on the server, and the CLI used to print
+ * 8-character prefixes, so accept a prefix but refuse one that is ambiguous
+ * rather than acting on whichever row happened to come first.
+ */
+export function resolveDeploymentRef(
+	deployments: Array<{ deploymentId: string }>,
+	ref: string,
+	label = "deployment",
+): string {
+	const wanted = ref.trim();
+	const exact = deployments.find((d) => d.deploymentId === wanted);
+	if (exact) return exact.deploymentId;
+	const matches = wanted
+		? deployments.filter((d) => d.deploymentId.startsWith(wanted))
+		: [];
+	if (matches.length === 1) return matches[0].deploymentId;
+	if (matches.length > 1) {
+		throw new InvalidArgumentError(
+			`"${ref}" matches ${matches.length} deployments (${matches
+				.slice(0, 5)
+				.map((d) => d.deploymentId)
+				.join(", ")}). Pass more characters or the full id.`,
+		);
+	}
+	throw new NotFoundError(label.charAt(0).toUpperCase() + label.slice(1), ref, [
+		"List deployment ids with: tarout deploy:list <app>",
+	]);
+}
+
 export function findApp(apps: AppSummary[], identifier: string) {
 	const lowerIdentifier = identifier.toLowerCase();
 

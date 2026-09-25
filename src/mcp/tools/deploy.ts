@@ -4,10 +4,11 @@
  * This module exposes three tools:
  * - `deployment_status`: latest deployment for an app OR a specific deployment.
  * - `deployment_logs`: build + runtime logs for a specific deployment.
- * - `deploy`: flagship pipeline — inspects the current directory, resolves or
- *   creates an app, uploads a source archive, triggers a cloud deploy, and
- *   (when `wait=true`) polls until terminal. Timeouts are an outcome
- *   (`{status: "in_progress", deploymentId}`), NOT an error.
+ * - `deploy`: flagship pipeline. Inspects the current directory, resolves or
+ *   creates an app, uploads a source archive (or, for an app that deploys
+ *   from a connected Git repository, deploys that repository instead), and
+ *   (when `wait=true`) polls until terminal. A timeout returns
+ *   DEPLOYMENT_TIMEOUT with `stillRunning: true`.
  *
  * Handler policy (from src/mcp/runtime.ts): no process.exit, no CLI output
  * helpers. `withAuth` handles auth checks + error → envelope mapping for the
@@ -18,10 +19,12 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
+	type AppGitSourceDetail,
 	createAppFromCurrentDirectory,
 	extractEntitlementKeyFromError,
 	inspectCurrentProject,
 	isEntitlementError,
+	shouldRefuseUploadOverGitSource,
 	uploadCurrentDirectorySource,
 } from "../../commands/deploy.js";
 import { getProjectConfig } from "../../lib/config.js";
@@ -34,7 +37,11 @@ import { getProjectConfig } from "../../lib/config.js";
 import { unsafeDeployDirectory } from "../../lib/deploy-safety.js";
 import { resolveAppRef } from "../../lib/env-core.js";
 import { resolveEntitlementRemedy } from "../../lib/entitlement-remedy.js";
+import { formatAppUrl } from "../../utils/url.js";
 import { errorResult, okResult, withAuth } from "../runtime.js";
+
+/** How many trailing build-log lines a finished `deploy` returns. */
+const LOGS_TAIL_LINES = 80;
 
 export function registerDeployTools(server: McpServer): void {
 	server.registerTool(
@@ -156,7 +163,7 @@ export function registerDeployTools(server: McpServer): void {
 		{
 			title: "Deploy the current directory to an app",
 			description:
-				"Inspects the given directory, resolves an app (by linked config, `name`, or new), uploads a source archive, triggers a deploy, and (when wait=true) polls until done. On timeout returns { status: 'in_progress', deploymentId }.",
+				"Inspects the given directory, resolves an app (by linked config, `name`, or new), uploads a source archive, triggers a deploy, and (when wait=true) polls until done. An existing app that deploys from a connected Git repository is deployed from that repository instead (push your changes first); pass replaceGitSource=true to upload this directory and disconnect the repository. On timeout returns DEPLOYMENT_TIMEOUT with details.stillRunning=true.",
 			inputSchema: {
 				path: z.string().optional(),
 				name: z.string().optional(),
@@ -170,11 +177,26 @@ export function registerDeployTools(server: McpServer): void {
 					.default(600),
 				createIfMissing: z.boolean().optional().default(true),
 				plan: z.enum(["FREE", "SHARED", "DEDICATED"]).optional(),
+				replaceGitSource: z
+					.boolean()
+					.optional()
+					.default(false)
+					.describe(
+						"Upload this directory even when the app deploys from a connected Git repository. This replaces the repository source and stops push-to-deploy.",
+					),
 			},
 		},
 		// biome-ignore lint/suspicious/noExplicitAny: tRPC client and helper options intentionally untyped here.
 		async (
-			{ path: dir, name, wait, timeoutSeconds, createIfMissing, plan },
+			{
+				path: dir,
+				name,
+				wait,
+				timeoutSeconds,
+				createIfMissing,
+				plan,
+				replaceGitSource,
+			},
 			extra: any,
 		) => {
 			const cwd = dir ?? process.cwd();
@@ -221,10 +243,14 @@ export function registerDeployTools(server: McpServer): void {
 					// 2) Resolve target: linked > name > create.
 					let applicationId: string | undefined;
 					let appName: string | undefined;
+					// True when this run REUSES an existing app. Only a reused app
+					// can already deploy on push; one created below has no source.
+					let reused = false;
 					const linked = getProjectConfig(cwd);
 					if (linked) {
 						applicationId = linked.applicationId;
 						appName = linked.name;
+						reused = true;
 					} else if (name) {
 						const apps =
 							(await client.application.allByOrganization.query()) as Array<{
@@ -237,6 +263,7 @@ export function registerDeployTools(server: McpServer): void {
 						if (match) {
 							applicationId = match.applicationId;
 							appName = match.name;
+							reused = true;
 						}
 					}
 					if (!applicationId) {
@@ -299,13 +326,37 @@ export function registerDeployTools(server: McpServer): void {
 						}
 					}
 
-					// 3) Upload source archive.
-					await uploadCurrentDirectorySource(
-						client,
-						applicationId,
-						appName ?? "app",
-						cwd,
-					);
+					// 3) Upload source archive, unless the app deploys from a
+					// connected Git repository. completeDropUpload clears every
+					// source field, so uploading over a repo silently stopped
+					// push-to-deploy. Same rule as `tarout up`
+					// (shouldRefuseUploadOverGitSource); the app list carries no
+					// repository fields, so read the app's real source first.
+					const sourceDetail: AppGitSourceDetail =
+						reused && !replaceGitSource
+							? ((await client.application.one.query({
+									applicationId,
+								})) as AppGitSourceDetail)
+							: {};
+					const deployFromGit = shouldRefuseUploadOverGitSource({
+						explicitSource: Boolean(replaceGitSource),
+						reused,
+						app: sourceDetail,
+					});
+					const sourceInfo = deployFromGit
+						? {
+								source: "git" as const,
+								note: `${appName ?? "This app"} deploys from its connected ${sourceDetail.sourceType ?? "Git"} repository, so this deployed the repository's branch, not ${cwd}. Push local changes first. To replace the repository with an upload of this directory (stops push-to-deploy), call deploy again with replaceGitSource=true.`,
+							}
+						: { source: "upload" as const };
+					if (!deployFromGit) {
+						await uploadCurrentDirectorySource(
+							client,
+							applicationId,
+							appName ?? "app",
+							cwd,
+						);
+					}
 
 					// 4) Trigger deploy.
 					const started = (await client.application.deployToCloud.mutate({
@@ -315,7 +366,12 @@ export function registerDeployTools(server: McpServer): void {
 
 					// 5) wait=false: return the id.
 					if (!doWait) {
-						return okResult({ status: "started", deploymentId, applicationId });
+						return okResult({
+							status: "started",
+							deploymentId,
+							applicationId,
+							...sourceInfo,
+						});
 					}
 
 					// 6) Poll with progress notifications.
@@ -339,16 +395,17 @@ export function registerDeployTools(server: McpServer): void {
 							});
 						}
 						if (status === "done" || status === "success") {
-							const logs = (await client.deployment.getDeploymentLogs
-								.query({ deploymentId, limit: 200 })
-								.catch(() => ({ logs: [] }))) as {
-								logs?: Array<Record<string, unknown>>;
-							};
+							// deployment.one has no URL; the app's public URL comes
+							// from getDeploymentStatus (appSubdomain once placed).
+							const appStatus = (await client.application.getDeploymentStatus
+								.query({ applicationId })
+								.catch(() => null)) as { publicUrl?: string | null } | null;
 							return okResult({
 								status: "done",
 								deploymentId,
-								appUrl: (last as { url?: string }).url,
-								logsTail: (logs.logs ?? []).slice(-80),
+								appUrl: formatAppUrl(appStatus?.publicUrl ?? null),
+								logsTail: await tailDeploymentLogs(client, deploymentId),
+								...sourceInfo,
 							});
 						}
 						if (status === "error" || status === "failed") {
@@ -392,4 +449,32 @@ export function registerDeployTools(server: McpServer): void {
 			});
 		},
 	);
+}
+
+/**
+ * The last LOGS_TAIL_LINES lines of a deployment's build log.
+ * deployment.getDeploymentLogs pages from the START (`offset`, `limit`) and
+ * returns `{ lines, totalLines, hasMore }`, so read the count, then the tail.
+ * Never throws: logs are a convenience on an already-successful result.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: tRPC proxy client is untyped in the CLI package.
+async function tailDeploymentLogs(client: any, deploymentId: string) {
+	type LogPage = { lines?: unknown[]; totalLines?: number };
+	try {
+		const head = (await client.deployment.getDeploymentLogs.query({
+			deploymentId,
+			offset: 0,
+			limit: LOGS_TAIL_LINES,
+		})) as LogPage;
+		const total = head?.totalLines ?? 0;
+		if (total <= LOGS_TAIL_LINES) return head?.lines ?? [];
+		const tail = (await client.deployment.getDeploymentLogs.query({
+			deploymentId,
+			offset: total - LOGS_TAIL_LINES,
+			limit: LOGS_TAIL_LINES,
+		})) as LogPage;
+		return tail?.lines ?? [];
+	} catch {
+		return [];
+	}
 }

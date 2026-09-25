@@ -5,7 +5,7 @@
  * @module lib/env-core
  */
 
-import { NotFoundError } from "./errors.js";
+import { InvalidArgumentError, NotFoundError } from "./errors.js";
 
 // biome-ignore lint/suspicious/noExplicitAny: tRPC proxy client is untyped in the CLI package.
 type TrpcClient = any;
@@ -71,16 +71,25 @@ export function serializeDotenv(vars: Record<string, string>): string {
 		.join("\n")}\n`;
 }
 
-const ID_SHAPE = /^(app_|[0-9a-f]{8}-)/i;
+/** Shortest id prefix accepted, so a short typo cannot select an app. */
+const MIN_ID_PREFIX = 4;
+
+function candidates(apps: Array<{ applicationId: string; name: string }>) {
+	return apps.map((a) => `${a.name} (${a.applicationId})`).join(", ");
+}
 
 /**
- * Resolves an application reference (id or name) against the caller's
- * organization to a `{ applicationId, name }` tuple.
+ * Resolves an application reference (id, name, slug or unique id prefix)
+ * against the caller's organization to a `{ applicationId, name }` tuple.
  *
- * Recognized id shapes: `app_*` prefix or a UUID-looking `xxxxxxxx-` head.
- * Falls back to a name match if no id match is found.
+ * Order: exact id, exact name, exact slug (`appName`), then a unique id
+ * prefix of at least 4 characters (the CLI prints 8-character prefixes).
+ * Application ids are nanoids with no fixed shape, so an exact id is tried
+ * first whatever it looks like.
  *
- * Throws `NotFoundError` when no application matches.
+ * Throws `InvalidArgumentError` when a name or prefix matches more than one
+ * app (listing the ids, so a destructive tool never guesses), and
+ * `NotFoundError` when nothing matches.
  */
 export async function resolveAppRef(
 	client: TrpcClient,
@@ -89,12 +98,36 @@ export async function resolveAppRef(
 	const apps = (await client.application.allByOrganization.query()) as Array<{
 		applicationId: string;
 		name: string;
+		appName?: string | null;
 	}>;
-	if (ID_SHAPE.test(ref)) {
-		const byId = apps.find((a) => a.applicationId === ref);
-		if (byId) return { applicationId: byId.applicationId, name: byId.name };
+	const wanted = String(ref ?? "").trim();
+	const pick = (a: { applicationId: string; name: string }) => ({
+		applicationId: a.applicationId,
+		name: a.name,
+	});
+
+	const byId = apps.find((a) => a.applicationId === wanted);
+	if (byId) return pick(byId);
+
+	const byName = apps.filter((a) => a.name === wanted);
+	if (byName.length === 1) return pick(byName[0]);
+	if (byName.length > 1) {
+		throw new InvalidArgumentError(
+			`"${ref}" matches ${byName.length} applications by name: ${candidates(byName)}. Pass the application id instead.`,
+		);
 	}
-	const byName = apps.find((a) => a.name === ref);
-	if (byName) return { applicationId: byName.applicationId, name: byName.name };
+
+	const bySlug = apps.find((a) => a.appName && a.appName === wanted);
+	if (bySlug) return pick(bySlug);
+
+	if (wanted.length >= MIN_ID_PREFIX) {
+		const byPrefix = apps.filter((a) => a.applicationId.startsWith(wanted));
+		if (byPrefix.length === 1) return pick(byPrefix[0]);
+		if (byPrefix.length > 1) {
+			throw new InvalidArgumentError(
+				`"${ref}" is a prefix of ${byPrefix.length} application ids: ${candidates(byPrefix)}. Pass more characters or the full id.`,
+			);
+		}
+	}
 	throw new NotFoundError("Application", ref);
 }

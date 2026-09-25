@@ -71,4 +71,52 @@ describe("resolveAppRef", () => {
 			NotFoundError,
 		);
 	});
+
+	// Application ids are 21-char nanoids (services/application.ts), not
+	// `app_*`: an exact id must resolve whatever its shape.
+	it("resolves a full nanoid application id", async () => {
+		const c = client([
+			{ applicationId: "Vq3kPz81xYbT0nLm4sRwE", name: "web" },
+		]);
+		const r = await resolveAppRef(c, "Vq3kPz81xYbT0nLm4sRwE");
+		expect(r).toEqual({ applicationId: "Vq3kPz81xYbT0nLm4sRwE", name: "web" });
+	});
+
+	it("resolves a unique id prefix, as printed by `tarout apps list`", async () => {
+		const c = client([
+			{ applicationId: "Vq3kPz81xYbT0nLm4sRwE", name: "web" },
+			{ applicationId: "Ab9aaaaaaaaaaaaaaaaaa", name: "api" },
+		]);
+		const r = await resolveAppRef(c, "Vq3kPz81");
+		expect(r).toEqual({ applicationId: "Vq3kPz81xYbT0nLm4sRwE", name: "web" });
+	});
+
+	it("refuses an ambiguous id prefix and lists the candidates", async () => {
+		const c = client([
+			{ applicationId: "Vq3kPz81xYbT0nLm4sRwE", name: "web" },
+			{ applicationId: "Vq3kZZZZZZZZZZZZZZZZZ", name: "api" },
+		]);
+		await expect(resolveAppRef(c, "Vq3k")).rejects.toThrow(
+			/Vq3kPz81xYbT0nLm4sRwE.*Vq3kZZZZZZZZZZZZZZZZZ/,
+		);
+	});
+
+	it("refuses a name shared by several apps and lists their ids", async () => {
+		const c = client([
+			{ applicationId: "id_one_aaaaaaaaaaaaaa", name: "web" },
+			{ applicationId: "id_two_bbbbbbbbbbbbbb", name: "web" },
+		]);
+		await expect(resolveAppRef(c, "web")).rejects.toThrow(
+			/id_one_aaaaaaaaaaaaaa.*id_two_bbbbbbbbbbbbbb/,
+		);
+	});
+
+	it("prefers an exact name over an id prefix", async () => {
+		const c = client([
+			{ applicationId: "webhook0000000000000A", name: "hooks" },
+			{ applicationId: "Zz00000000000000000AB", name: "webh" },
+		]);
+		const r = await resolveAppRef(c, "webh");
+		expect(r.applicationId).toBe("Zz00000000000000000AB");
+	});
 });
