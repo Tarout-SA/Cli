@@ -12,13 +12,14 @@
  * the hosted server signs in through the agent's own OAuth flow.
  */
 
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import type { Command } from "commander";
 import { connectAgentFromHandoff } from "../lib/agent-handoff.js";
 import {
 	defaultSetupIO,
 	displayPath,
 	hasPendingChanges,
+	looksLikeTaroutEntry,
 	type McpOutcome,
 	runAgentSetup,
 	type SetupReport,
@@ -123,43 +124,83 @@ function renderSetupReport(report: SetupReport, home: string): void {
 			? `hosted MCP ${report.server} (OAuth)`
 			: `local MCP ${report.server} (stdio)`;
 	log(colors.bold(`Tarout agent setup: ${server}`));
+
+	const found = report.targets.filter((t) => t.detected);
+	const missing = report.targets.filter((t) => !t.detected);
+	log(
+		`Found: ${found.length > 0 ? found.map((t) => `${t.name} ${colors.dim(`(${t.detectedBy})`)}`).join(", ") : "none"}`,
+	);
 	log("");
 
-	for (const target of report.targets.filter((t) => t.detected)) {
-		log(`${colors.bold(target.name)} ${colors.dim(`(${target.detectedBy})`)}`);
+	// Several agents share one skills directory; show each directory once.
+	const skillDirs = new Map<string, { agents: string[]; skills: SkillOutcome[] }>();
+	for (const target of found) {
 		for (const skill of target.skills) {
-			log(`  skill  ${column(skillLabel(skill))}${displayPath(skill.path, home)}`);
-			if (skill.reason) log(`         ${colors.dim(skill.reason)}`);
-		}
-		const mcp = target.mcp;
-		if (mcp) {
-			const where = mcp.command ?? (mcp.path ? displayPath(mcp.path, home) : "");
-			log(`  mcp    ${column(mcpLabel(mcp))}${where}`);
-			if (mcp.status === "would-update" || mcp.status === "updated" || (mcp.status === "skipped" && mcp.before !== undefined && mcp.after !== undefined)) {
-				log(colors.error(`         - "tarout": ${JSON.stringify(mcp.before)}`));
-				log(colors.success(`         + "tarout": ${JSON.stringify(mcp.after)}`));
-			} else if (mcp.status === "would-register") {
-				log(colors.success(`         + "tarout": ${JSON.stringify(mcp.after)}`));
+			const dir = dirname(dirname(skill.path));
+			const entry = skillDirs.get(dir) ?? { agents: [], skills: [] };
+			if (target.id !== "agents" && !entry.agents.includes(target.name)) {
+				entry.agents.push(target.name);
 			}
-			if (mcp.reason) log(`         ${colors.dim(mcp.reason)}`);
-			if (mcp.snippet && mcp.status !== "unchanged") {
+			if (!entry.skills.some((s) => s.skill === skill.skill)) entry.skills.push(skill);
+			skillDirs.set(dir, entry);
+		}
+	}
+	if (skillDirs.size > 0) {
+		log(colors.bold("Skills"));
+		for (const [dir, entry] of skillDirs) {
+			const readers = entry.agents.length > 0 ? entry.agents.join(", ") : "shared";
+			log(`  ${displayPath(dir, home)} ${colors.dim(`(${readers})`)}`);
+			let lastReason: string | undefined;
+			for (const skill of entry.skills) {
+				log(`    ${column(skillLabel(skill))}${skill.skill}`);
+				if (skill.reason && skill.reason !== lastReason) {
+					log(`               ${colors.dim(skill.reason)}`);
+				}
+				lastReason = skill.reason;
+			}
+		}
+		log("");
+	}
+
+	const withMcp = found.filter((t) => t.mcp);
+	if (withMcp.length > 0) {
+		log(colors.bold("MCP server"));
+		for (const target of withMcp) {
+			const mcp = target.mcp as McpOutcome;
+			const where = mcp.command ?? (mcp.path ? displayPath(mcp.path, home) : "");
+			log(`  ${target.name}`);
+			log(`    ${column(mcpLabel(mcp))}${where}`);
+			const replacing =
+				mcp.status === "would-update" ||
+				mcp.status === "updated" ||
+				(mcp.status === "skipped" && looksLikeTaroutEntry(mcp.before));
+			if (replacing && mcp.before !== undefined) {
+				log(colors.error(`               - "tarout": ${JSON.stringify(mcp.before)}`));
+				log(colors.success(`               + "tarout": ${JSON.stringify(mcp.after)}`));
+			} else if (mcp.status === "would-register") {
+				log(colors.success(`               + "tarout": ${JSON.stringify(mcp.after)}`));
+			}
+			if (mcp.reason) log(`               ${colors.dim(mcp.reason)}`);
+			const showSnippet =
+				mcp.status === "snippet" ||
+				mcp.status === "error" ||
+				(mcp.status === "skipped" && !replacing);
+			if (mcp.snippet && showSnippet && mcp.snippet !== where) {
 				for (const line of mcp.snippet.split("\n")) {
-					log(`           ${line}`);
+					log(`                 ${line}`);
 				}
 			}
 		}
+		log("");
 	}
 
-	const missing = report.targets.filter((t) => !t.detected).map((t) => t.name);
 	if (missing.length > 0) {
+		log(colors.dim(`Not found on this machine: ${missing.map((t) => t.name).join(", ")}`));
 		log("");
-		log(colors.dim(`Not found on this machine: ${missing.join(", ")}`));
 	}
 	for (const note of report.notes) {
-		log("");
 		warn(note);
 	}
-	log("");
 }
 
 function renderNextSteps(report: SetupReport): void {
@@ -387,7 +428,18 @@ Examples:
 						return;
 					}
 					renderSetupReport(plan, io.home);
-					success("Everything is already set up; nothing to change.");
+					const needsYes = detected.some(
+						(target) =>
+							target.mcp?.status === "skipped" &&
+							looksLikeTaroutEntry(target.mcp.before),
+					);
+					if (needsYes) {
+						warn(
+							"Nothing else to change. Re-run with --yes to replace the tarout entries shown above.",
+						);
+					} else {
+						success("Everything is already set up; nothing to change.");
+					}
 					renderNextSteps(plan);
 					return;
 				}

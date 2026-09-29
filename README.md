@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/@tarout/cli.svg)](https://www.npmjs.com/package/@tarout/cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-The official command-line interface for [Tarout](https://tarout.sa) — the Saudi cloud platform built for coding agents. Your agent writes code and defines infrastructure; Tarout provisions it instantly.
+The official command-line interface for [Tarout](https://tarout.sa) - the Saudi cloud platform built for coding agents. Your agent writes code and defines infrastructure; Tarout provisions it instantly.
 
 ## Installation
 
@@ -49,7 +49,7 @@ to). In CI, set `TAROUT_TOKEN` to a key from
 ## Call any API (`tarout call`)
 
 Beyond the curated commands, `tarout call` reaches **every** platform procedure
-directly — the same control surface exposed via REST and MCP:
+directly - the same control surface exposed via REST and MCP:
 
 ```bash
 tarout call --list                 # discover all callable procedures + type
@@ -64,6 +64,30 @@ Cursor, Claude Desktop) the CLI's capabilities as first-class tools:
 deploy from the current directory, sync `.env`, run SQL against Postgres,
 schedule cron tasks (`job_*`), switch org/project/env, upgrade billing, and
 more, with a `call` escape hatch covering the entire platform API.
+
+### Set up every agent at once: `tarout agent setup`
+
+```bash
+tarout agent setup             # shows the plan, asks once
+tarout agent setup --dry-run   # only shows the plan and the changes
+```
+
+Finds the coding agents on this machine (Claude Code, Codex, Cursor, VS Code /
+GitHub Copilot, Devin Desktop / Windsurf, OpenCode, Gemini CLI), installs the
+`tarout-deploy` and `tarout-domains` skills, and registers the hosted MCP
+server below. It uses OAuth, so no credential is written to disk and no
+sign-in is needed first; the command then prints each agent's sign-in step
+(`/mcp` in Claude Code, `codex mcp login tarout`, and so on).
+
+- `--local` registers the stdio `tarout-mcp` instead of the hosted URL.
+- `--agents claude,cursor`, `--skills-only` and `--mcp-only` narrow the run.
+- `--yes` applies without asking (required when stdin is not a TTY); `--json`
+  returns one result per agent.
+
+Only agents already installed are touched, other MCP servers are left alone,
+and an existing `tarout` entry with different settings is replaced only with
+`--yes`. Re-running reports `unchanged`. `tarout agent init` is the per-project
+counterpart (CLAUDE.md / AGENTS.md plus the Claude Code permission allowlist).
 
 ### No install: the hosted connector
 
@@ -143,7 +167,7 @@ install the CLI + register the server in one shot.
 | `tarout logout` | Sign this project out (`--global` for the machine-wide login) |
 | `tarout whoami` | Show current user, organization, project, and credential `scope` |
 
-Credentials are **per project** — see [Configuration](#configuration).
+Credentials are **per project** - see [Configuration](#configuration).
 
 ```bash
 # Login with a custom API URL (e.g. staging)
@@ -201,7 +225,7 @@ tarout deploy:status my-app
 
 #### Retrying a failed deployment
 
-A deployment can build a good image and then fail *after* the build — the host
+A deployment can build a good image and then fail *after* the build - the host
 could not pull the image, a registry token went stale, the target server
 hiccuped. Deploying again from scratch re-resolves the commit, re-runs preflight
 and re-enters the builder just to arrive at the identical image.
@@ -212,7 +236,7 @@ tarout deploy:retry my-app --wait
 
 This reuses the image the failed deployment already produced and re-runs only
 the deploy step. It refuses deployments that failed *during* the build, because
-there is no image to reuse — fix the code and run `tarout deploy` instead.
+there is no image to reuse - fix the code and run `tarout deploy` instead.
 
 `tarout deploy` inspects the current folder for database, file storage, and Git signals before it asks questions. A folder with a github.com remote deploys from that repo, so every push redeploys: the CLI binds it when the organization's GitHub connection can read the repo. When it cannot, a terminal run offers to connect GitHub and waits for it; an agent or script run uploads the folder and its result names the fix, `tarout providers github connect --wait --app <app>`, which opens Tarout's GitHub setup page, waits until GitHub can read the repo, and binds the app. A folder with no GitHub remote is uploaded, so users without GitHub can still deploy.
 
@@ -239,7 +263,7 @@ tarout logs my-app --limit 100
 tarout logs my-app --follow
 ```
 
-> `--follow` polls every 3s and prints only new lines — the platform exposes runtime
+> `--follow` polls every 3s and prints only new lines - the platform exposes runtime
 > (container) logs as a snapshot query, not a stream. Under `--json` it emits JSON Lines,
 > one object per line, so agents can consume it incrementally.
 
@@ -258,7 +282,7 @@ tarout logs my-app --follow
 
 This is not cosmetic. Only public-prefixed keys (`NEXT_PUBLIC_*`, `VITE_*`,
 `EXPO_PUBLIC_*`, `PUBLIC_*`, `GATSBY_*`, `NUXT_PUBLIC_*`, `REACT_APP_*`) are
-passed to the build — everything else, including `DATABASE_URL` and every
+passed to the build - everything else, including `DATABASE_URL` and every
 secret, exists only in the running container, so that secrets can never land in
 build logs or image history. A build step that reads a runtime-only variable
 sees nothing, however correctly you set it. If your build genuinely needs one,
@@ -368,7 +392,7 @@ Command tasks may run for up to 15 minutes, so `jobs run` only queues them:
 without `--wait` it reports `queued` and you read the outcome from
 `tarout jobs runs <id>`. HTTP tasks run inline (60s cap) and print their result
 immediately. Each HTTP fire carries `x-tarout-cron-timestamp` and
-`x-tarout-cron-signature` headers — verify them with the task's signing secret
+`x-tarout-cron-signature` headers - verify them with the task's signing secret
 (`tarout jobs info <id>`).
 
 ### Organizations
@@ -384,7 +408,7 @@ immediately. Each HTTP fire carries `x-tarout-cron-timestamp` and
 tarout orgs switch "Acme Corp"
 ```
 
-> Tarout has no separate "environment" (production/staging) concept — apps are
+> Tarout has no separate "environment" (production/staging) concept - apps are
 > scoped to an organization and a project. Use `tarout projects` to separate
 > workloads.
 
@@ -426,6 +450,7 @@ with `--help` for its subcommands and flags):
 | `tarout upgrade` | Upgrade the CLI to the latest published version |
 | `tarout queues` | Background job queues (platform operators only) |
 | `tarout call` | Call any platform procedure directly (see above) |
+| `tarout agent` | Set up coding agents: `setup` (skills + MCP, machine-wide), `init` (per project), `connect` |
 
 ## Global Flags
 
@@ -444,9 +469,9 @@ These flags work with all commands:
 
 Before running any command, the CLI checks npm for a newer `@tarout/cli`; when
 one exists it installs it globally and re-runs your exact command on the new
-version — so the CLI (and any agent driving it) always runs the latest, with no
+version - so the CLI (and any agent driving it) always runs the latest, with no
 action needed. The network check is **throttled** to at most once every 3 hours
-(so ordinary commands stay fast — the throttle window is a single local read);
+(so ordinary commands stay fast - the throttle window is a single local read);
 `tarout up` / `tarout deploy` force an immediate check so a deploy is never on a
 stale CLI. It fails open (offline or npm errors just continue on the current
 version). Opt out per-invocation with `--no-update-check` or permanently with
@@ -493,7 +518,7 @@ APP_ID=$(tarout apps list --json | jq -r '.[0].id')
 | 3 | Authentication error (not logged in) |
 | 4 | Resource not found |
 | 5 | Permission denied |
-| 6 | Needs input — see `needs_input` event below |
+| 6 | Needs input - see `needs_input` event below |
 
 ### JSON Output Format
 
@@ -532,14 +557,14 @@ the same arguments plus the new flag.
 ```
 
 Fields:
-- `field` — stable id (e.g. `name`, `region`, `token`, `source`).
-- `kind` — `"input" | "select" | "confirm" | "password"`.
-- `question` — show verbatim to the user.
-- `choices` — present when `kind: "select"`.
-- `default` — pre-fill suggestion.
-- `flag` — the CLI flag to pass on the next invocation.
-- `sensitive` — `true` for tokens / passwords (mask in UI, omit from logs).
-- `context` — free-form metadata the agent can use to phrase a richer prompt.
+- `field` - stable id (e.g. `name`, `region`, `token`, `source`).
+- `kind` - `"input" | "select" | "confirm" | "password"`.
+- `question` - show verbatim to the user.
+- `choices` - present when `kind: "select"`.
+- `default` - pre-fill suggestion.
+- `flag` - the CLI flag to pass on the next invocation.
+- `sensitive` - `true` for tokens / passwords (mask in UI, omit from logs).
+- `context` - free-form metadata the agent can use to phrase a richer prompt.
 
 Loop pattern for an agent:
 
@@ -558,7 +583,7 @@ Flags currently supported by `tarout up` for skipping the relay:
 ## Configuration
 
 **Credentials are per project.** `tarout login` writes `./.tarout/auth.json`,
-and the CLI finds it by walking **up** from the working directory — so it works
+and the CLI finds it by walking **up** from the working directory - so it works
 from any subfolder, and connecting a key in one project never re-points another
 at a different account.
 
@@ -601,11 +626,11 @@ To go back, run `tarout login --no-commit-token`, then
 `git rm --cached .tarout/auth.json`. A key that was ever pushed stays in the git
 history, so revoke it in the dashboard as well.
 
-### `.tarout/config.json` — the deploy contract
+### `.tarout/config.json` - the deploy contract
 
 Everything else Tarout needs used to be inferred: which database to provision
 came from scanning your dependencies, and "working" meant `/` returned 200.
-Heuristics are a good default and a bad contract — they cannot be reviewed, and
+Heuristics are a good default and a bad contract - they cannot be reviewed, and
 they can differ between the laptop that ran `tarout up` and the CI that runs it
 next. This file is the declaration, and it is committed so it travels with the
 repo.
@@ -640,7 +665,7 @@ Precedence is **manifest > what is already set on the app > detection**. Every
 key is optional; an absent file means absent, not empty.
 
 A malformed manifest fails the command and names the offending field, rather
-than falling back to detection — a contract that silently doesn't apply would
+than falling back to detection - a contract that silently doesn't apply would
 deploy something other than what the file says.
 
 #### Why `smokePaths` matters
@@ -648,7 +673,7 @@ deploy something other than what the file says.
 The container health probe runs on the container's own loopback and asks "is a
 process listening". That is not the same question as "does the app work": an app
 whose `/` returns 200 while every real route 500s passes it. Listing the routes
-that must actually work turns that into a gate — and until you list one, Tarout
+that must actually work turns that into a gate - and until you list one, Tarout
 only warns, because it cannot know which of your routes are supposed to serve.
 
 #### Why `releaseCommand` matters
@@ -665,7 +690,7 @@ serving.
 |---|-------|--------|
 | 1 | `.tarout/auth.json` at or above the cwd | `tarout login` (default) |
 | 2 | Machine-wide profile | `tarout login --global` |
-| 3 | `TAROUT_TOKEN` environment variable | your shell — **lowest** precedence, and ignored entirely whenever 1 or 2 exists |
+| 3 | `TAROUT_TOKEN` environment variable | your shell - **lowest** precedence, and ignored entirely whenever 1 or 2 exists |
 
 `tarout whoami --json` reports which one is in effect as `scope`
 (`project` / `global` / `env` / `none`) plus the `credentialPath`. Pass

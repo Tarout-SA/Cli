@@ -384,7 +384,7 @@ export const AGENT_TARGETS: readonly AgentTarget[] = [
 	},
 	{
 		id: "agents",
-		name: "Shared skills (~/.agents/skills)",
+		name: "Shared skills folder",
 		detectDirs: (host) => [join(host.home, ".agents")],
 		// The cross-client user directory recommended by agentskills.io.
 		skillsDir: sharedSkillsDir,

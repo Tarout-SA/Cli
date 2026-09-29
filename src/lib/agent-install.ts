@@ -781,8 +781,11 @@ function runCodexTarget(io: SetupIO, options: SetupOptions): McpOutcome {
 
 	const readText = (): string | null =>
 		existsSync(configFile) ? readFileSync(configFile, "utf-8") : null;
+	// With no CODEX_HOME there is nothing to read, and running `codex` would
+	// create the directory: a planning read must leave no trace.
 	const readState = (): CodexState =>
-		(cli ? codexStateFromCli(cli, io) : null) ?? scanCodexToml(readText() ?? "");
+		(cli && existsSync(codexHome(io)) ? codexStateFromCli(cli, io) : null) ??
+		scanCodexToml(readText() ?? "");
 
 	// `codex mcp add --url` starts an OAuth login inline and blocks until the
 	// browser flow finishes (observed with Codex 0.157), so the hosted entry is
