@@ -670,7 +670,8 @@ function verifyClaude(
 // ---------------------------------------------------------------------------
 
 type CodexState =
-	| { present: false }
+	/** `inlineTable`: servers are a root inline table, so a header cannot be appended. */
+	| { present: false; inlineTable?: boolean }
 	| { present: true; entry: Record<string, unknown> | null };
 
 const TOML_TAROUT_TABLE =
@@ -694,6 +695,14 @@ function tomlString(value: string): string {
 export function scanCodexToml(text: string): CodexState {
 	const lines = text.split(/\r?\n/);
 	const start = lines.findIndex((line) => TOML_TAROUT_TABLE.test(line));
+	// `mcp_servers = { ... }` at the root: appending [mcp_servers.tarout] would
+	// redefine that table, which is invalid TOML.
+	const inline = lines.find((line) => /^\s*mcp_servers\s*=/.test(line));
+	if (inline !== undefined) {
+		return /\btarout\b/.test(inline)
+			? { present: true, entry: null }
+			: { present: false, inlineTable: true };
+	}
 	if (start === -1) {
 		let inServersTable = false;
 		for (const line of lines) {
@@ -866,6 +875,14 @@ function runCodexTarget(io: SetupIO, options: SetupOptions): McpOutcome {
 	};
 
 	if (!state.present) {
+		if (!viaCli && state.inlineTable) {
+			return {
+				...base,
+				status: "snippet",
+				snippet,
+				reason: `${shownFile} declares mcp_servers as an inline table, so a [mcp_servers.${MCP_SERVER_NAME}] table cannot be appended; add the entry by hand`,
+			};
+		}
 		if (!options.apply) return { ...base, status: "would-register" };
 		return write(base, "registered", readText());
 	}

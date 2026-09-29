@@ -756,6 +756,15 @@ describe("Codex", () => {
 		expect(read(".codex/config.toml")).toBe(original);
 	});
 
+	it("prints a snippet instead of appending under a root inline mcp_servers table", () => {
+		const original = 'mcp_servers = { other = { command = "x" } }\n';
+		write(".codex/config.toml", original);
+		const { io } = makeIO();
+		const report = setup(io, { skills: false });
+		expect(target(report, "codex").mcp?.status).toBe("snippet");
+		expect(read(".codex/config.toml")).toBe(original);
+	});
+
 	it("never replaces an unrelated server named tarout", () => {
 		write(".codex/config.toml", '[mcp_servers.tarout]\nurl = "https://example.com/mcp"\n');
 		const { io } = makeIO({ bins: { codex } });
