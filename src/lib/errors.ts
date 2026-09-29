@@ -154,7 +154,7 @@ const REASON_HINTS: Record<string, string> = {
 	area_not_allowed:
 		"the key is valid but this part of the platform is outside its allowed areas. Ask the user to widen the key's areas at https://tarout.sa/dashboard/agent/keys. Retrying will not help.",
 	needs_approval:
-		"this action is waiting for human approval; it has not failed. Tell the user to approve it under Agent > Approvals in the dashboard, then poll `tarout call approvals.get` with the approval id rather than retrying the action. Do not try to approve it yourself.",
+		"this action is waiting for human approval; it has not failed. Tell the user to approve it under Agent > Approvals in the dashboard, then run `tarout approvals wait <id>` with the approval id rather than retrying the action. Do not try to approve it yourself.",
 	needs_interactive_session:
 		"this action is deliberately unavailable to API keys and must be done by a signed-in human in the dashboard. Re-authenticating will not help, and neither will a different key.",
 	no_project:
@@ -196,9 +196,52 @@ export function rejectionReasonFromMessage(
 	return undefined;
 }
 
+/**
+ * tRPC's answer for a path the server has no procedure at: `No "query"-procedure
+ * on path "x.y"` (v10, what the platform runs) or `No procedure found on path
+ * "x.y"` (v11).
+ */
+const MISSING_PROCEDURE_MESSAGE =
+	/\bno (?:"\w+"-)?procedure(?: found)? on path\b/i;
+
+/**
+ * True when a call failed because the server predates the procedure (an older
+ * platform release), as opposed to the procedure refusing the call. A bare
+ * NOT_FOUND is a missing RESOURCE (an unknown application id) and is
+ * deliberately not matched, so that still fails the command.
+ */
+export function isMissingProcedureError(err: unknown): boolean {
+	if (!err || typeof err !== "object") return false;
+	const e = err as {
+		code?: unknown;
+		message?: unknown;
+		data?: { code?: unknown } | null;
+		shape?: { data?: { code?: unknown } | null } | null;
+	};
+	const code = e.data?.code ?? e.shape?.data?.code ?? e.code;
+	if (code !== undefined && code !== "NOT_FOUND") return false;
+	return (
+		typeof e.message === "string" && MISSING_PROCEDURE_MESSAGE.test(e.message)
+	);
+}
+
 /** `NEEDS_APPROVAL:<pendingActionId>: ...`: the id runs up to the next colon. */
 export function approvalIdFromMessage(message?: string): string | undefined {
 	return message?.match(/\bNEEDS_APPROVAL:\s*([^:\s]+)\s*:/)?.[1];
+}
+
+// Approval ids the platform mints are cuid-like. Agents run `nextCommand`
+// verbatim, so an id parsed out of an error message is pasted into it only
+// when it cannot carry shell syntax; anything else gets the placeholder.
+const SHELL_SAFE_APPROVAL_ID = /^[A-Za-z0-9_-]+$/;
+
+/** The command that waits on a parked approval, safe to run as printed. */
+export function approvalWaitCommand(approvalId?: string): string {
+	const id =
+		approvalId && SHELL_SAFE_APPROVAL_ID.test(approvalId)
+			? approvalId
+			: "<approvalId>";
+	return `tarout approvals wait ${id}`;
 }
 
 /**
@@ -230,15 +273,14 @@ export function staleCredentialGuidance(
 	const credential = activeCredentialDiagnostic();
 	const credentialSuffix = credential ? ` ${describeCredential(credential)}` : "";
 	if (reasonHint && reason === "needs_approval") {
-		// Logging in again approves nothing, so the next step is the poll, not
+		// Logging in again approves nothing, so the next step is the wait, not
 		// `tarout login`.
 		const approvalId = approvalIdFromMessage(message);
-		const idJson = JSON.stringify(approvalId ?? "<approvalId>");
 		return {
 			hint: `${reasonHint}${credentialSuffix}`,
 			details: {
-				hint: "Nothing to re-authenticate: the action is parked for a human to approve or deny in the Tarout dashboard under Agent > Approvals. Poll approvals.get with the approval id until its status is executed, denied or expired. Do not retry the action with different parameters, and do not try to approve it yourself.",
-				nextCommand: `tarout call approvals.get --input '{"id":${idJson}}'`,
+				hint: "Nothing to re-authenticate: the action is parked for a human to approve or deny in the Tarout dashboard under Agent > Approvals. Run nextCommand: it polls the approval until it is executed, denied, expired or failed, and exits 0 only when the action ran. Do not retry the action with different parameters, and do not try to approve it yourself.",
+				nextCommand: approvalWaitCommand(approvalId),
 				reason,
 				...(approvalId ? { approvalId } : {}),
 				...(credential ? { credential } : {}),

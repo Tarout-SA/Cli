@@ -36,6 +36,7 @@ const fakeClient = {
 				.mockResolvedValue([{ projectId: "p1", slug: "web", name: "Web" }]),
 		},
 		getActive: { query: vi.fn().mockResolvedValue({ id: "p1" }) },
+		manifest: { query: vi.fn() },
 		credentialScope: {
 			query: vi.fn().mockResolvedValue({ accountScoped: true }),
 		},
@@ -61,6 +62,7 @@ vi.mock("../../src/lib/api", () => ({
 }));
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { createMcpServer } from "../../src/mcp/server";
 import { registerContextTools } from "../../src/mcp/tools/context";
 import { updateProfile } from "../../src/lib/config";
 import { rememberRequestProjectId } from "../../src/lib/api";
@@ -194,5 +196,104 @@ describe("link_app / unlink_app", () => {
 		const body = JSON.parse(r.content[0].text) as { unlinked: boolean };
 		expect(body.unlinked).toBe(true);
 		expect(existsSync(join(dir, ".tarout", "project.json"))).toBe(false);
+	});
+});
+
+const MANIFEST = {
+	project: { id: "p1", name: "Web", description: null, region: null },
+	applications: [
+		{
+			id: "app_1",
+			name: "web",
+			appName: "web-x1",
+			status: "running",
+			url: "https://web-x1.tarout.app",
+			buildType: "nixpacks",
+			source: { type: "github", repository: "acme/web", branch: "main" },
+			customDomains: [],
+			databaseIds: ["pg_1"],
+			envVarNames: ["DATABASE_URL", "API_TOKEN", "SECRET_KEY_BASE"],
+			scheduledJobCount: 1,
+		},
+	],
+	databases: [
+		{
+			id: "pg_1",
+			name: "main",
+			engine: "postgres",
+			status: "running",
+			plan: "starter",
+			linkedApplicationIds: ["app_1"],
+			externalAccess: true,
+		},
+	],
+	buckets: [],
+	domains: [],
+	generatedAt: "2026-09-29T10:00:00.000Z",
+};
+
+describe("agent_manifest", () => {
+	beforeEach(() => {
+		fakeClient.project.manifest.query.mockReset();
+		fakeClient.project.manifest.query.mockResolvedValue(MANIFEST);
+	});
+
+	it("is read-only and returns the manifest", async () => {
+		const server = new McpServer(
+			{ name: "t", version: "0" },
+			{ capabilities: { tools: {} } },
+		);
+		registerContextTools(server);
+		// biome-ignore lint/suspicious/noExplicitAny: RegisteredTool is SDK-internal.
+		const tool = (server as any)._registeredTools.agent_manifest;
+		expect(tool.annotations).toEqual({ readOnlyHint: true });
+
+		const r = await invoke("agent_manifest", {});
+		expect(r.isError).toBeUndefined();
+		expect(JSON.parse(r.content[0].text)).toEqual(MANIFEST);
+		expect(fakeClient.project.manifest.query).toHaveBeenCalledWith({});
+	});
+
+	it("passes an explicit projectId", async () => {
+		await invoke("agent_manifest", { projectId: "p2" });
+		expect(fakeClient.project.manifest.query).toHaveBeenCalledWith({
+			projectId: "p2",
+		});
+	});
+
+	it("returns NOT_FOUND with a pointer on a server without project.manifest", async () => {
+		fakeClient.project.manifest.query.mockRejectedValue(
+			Object.assign(new Error('No "query"-procedure on path "project.manifest"'), {
+				data: { code: "NOT_FOUND" },
+			}),
+		);
+		const r = await invoke("agent_manifest", {});
+		expect(r.isError).toBe(true);
+		const body = JSON.parse(r.content[0].text) as {
+			code: string;
+			error: string;
+			details: { reason: string };
+		};
+		expect(body.code).toBe("NOT_FOUND");
+		expect(body.error).toContain("project.manifest");
+		expect(body.details.reason).toBe("procedure_unavailable");
+	});
+
+	it("keeps env var names intact through the server's result sanitizer", async () => {
+		const server = createMcpServer();
+		// biome-ignore lint/suspicious/noExplicitAny: RegisteredTool is SDK-internal.
+		const tool = (server as any)._registeredTools.agent_manifest;
+		const r = (await tool.handler({})) as {
+			content: [{ text: string }];
+			isError?: boolean;
+		};
+		expect(r.isError).toBeUndefined();
+		const body = JSON.parse(r.content[0].text) as typeof MANIFEST;
+		expect(body.applications[0]?.envVarNames).toEqual([
+			"DATABASE_URL",
+			"API_TOKEN",
+			"SECRET_KEY_BASE",
+		]);
+		expect(body.databases[0]?.externalAccess).toBe(true);
 	});
 });

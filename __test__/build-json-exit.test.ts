@@ -31,6 +31,7 @@ vi.mock("../src/lib/api.js", () => ({
 					{ applicationId: "app_1", name: "my-app", appName: "my-app" },
 				],
 			},
+			connections: { query: async () => ({ env: {}, unavailable: [] }) },
 		},
 		envVariable: { list: { query: async () => [] } },
 	}),

@@ -48,11 +48,15 @@ const envSubcommands = new Set([
  * Commander uses the unambiguous `tarout env <command> <app>` grammar.
  */
 export function normalizeEnvCommandArgs(argv: string[]): string[] {
-	const envIndex = argv.indexOf("env");
+	// Only the CLI's own arguments: everything after `--` belongs to another
+	// program (`tarout run -- env FOO=1 printenv`) and must reach it untouched.
+	const separator = argv.indexOf("--");
+	const own = separator === -1 ? argv : argv.slice(0, separator);
+	const envIndex = own.indexOf("env");
 	if (envIndex === -1) return argv;
 
-	const app = argv[envIndex + 1];
-	const subcommand = argv[envIndex + 2];
+	const app = own[envIndex + 1];
+	const subcommand = own[envIndex + 2];
 	if (
 		!app ||
 		app.startsWith("-") ||

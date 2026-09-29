@@ -17,11 +17,12 @@ import type { Command } from "commander";
  * - `up`/`deploy`/`init`: self-manage auth (browser auto-open + `--token`) via
  *   `ensureAuthenticatedForDeploy`; pre-authing here would double-handle it.
  * - `upgrade`: updates the local CLI package and never calls the Tarout API.
- * - the whole `agent` namespace: project scaffolding that works signed-out.
+ * - the `agent` namespace (`init`, `setup`, `connect`): project scaffolding
+ *   that works signed-out, EXCEPT the {@link AGENT_GATED_LEAF} subcommands.
  * - `whoami`: it is the *question*, not a command that needs an answer. The
  *   agent docs make it the first command of every session precisely because it
  *   distinguishes "not signed in" from every other failure; auto-authenticating
- *   here made asking the question change the answer — a logged-out probe opened
+ *   here made asking the question change the answer: a logged-out probe opened
  *   a browser and blocked, and an agent holding a pasted API key got dragged
  *   into a browser sign-in before it could store the key it already had. It now
  *   reports `AUTH_ERROR` (exit 3) instead, like `gh auth status` or
@@ -40,13 +41,25 @@ export const AUTH_EXEMPT_LEAF = new Set([
 ]);
 
 /**
+ * `agent` subcommands that read the account (`agent manifest`), unlike the rest
+ * of the namespace, so they take the normal sign-in and project gates.
+ */
+export const AGENT_GATED_LEAF = new Set(["manifest"]);
+
+/** The command path (leaf first) is in the `agent` namespace and not gated. */
+function isExemptAgentCommand(names: string[]): boolean {
+	return names.includes("agent") && !AGENT_GATED_LEAF.has(names[0] ?? "");
+}
+
+/**
  * Whether the about-to-run command should be gated behind authentication.
  * Walks the command ancestry so nested commands (and the `agent` namespace at
  * any depth) are classified correctly, and never gates the bare root program.
  *
  * Only the LEAF is checked against the exempt set (unlike
  * `commandRequiresProject`): `agent connect` is exempt through the namespace
- * check, while a hypothetical `db login` should still authenticate.
+ * check (`agent manifest` is not), while a hypothetical `db login` should
+ * still authenticate.
  */
 export function commandRequiresAuth(
 	actionCommand: Command | undefined,
@@ -61,7 +74,7 @@ export function commandRequiresAuth(
 	) {
 		names.push(cur.name());
 	}
-	if (names.includes("agent")) return false;
+	if (isExemptAgentCommand(names)) return false;
 	const leaf = names[0];
 	return Boolean(leaf) && !AUTH_EXEMPT_LEAF.has(leaf);
 }
@@ -72,6 +85,9 @@ export function commandRequiresAuth(
  * project. These are organization-level surfaces, or they manage the selection
  * itself and would deadlock if they needed a project to choose one.
  * `upgrade` is local package maintenance and needs neither account nor project.
+ * `approvals` is organization-level: the platform router reads only the
+ * active organization, and an agent waiting on a parked action must not be
+ * stopped by a project picker first.
  */
 export const PROJECT_EXEMPT_LEAF = new Set([
 	"login",
@@ -83,6 +99,7 @@ export const PROJECT_EXEMPT_LEAF = new Set([
 	"projects",
 	"orgs",
 	"billing",
+	"approvals",
 ]);
 
 /**
@@ -106,7 +123,7 @@ export function commandRequiresProject(
 	) {
 		names.push(cur.name());
 	}
-	if (names.includes("agent")) return false;
+	if (isExemptAgentCommand(names)) return false;
 	for (const name of names) {
 		if (PROJECT_EXEMPT_LEAF.has(name)) return false;
 	}

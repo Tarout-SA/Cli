@@ -24,6 +24,7 @@ const EXPECTED_TOOLS = [
 	"context_switch",
 	"link_app",
 	"unlink_app",
+	"agent_manifest",
 	// Env
 	"env_list",
 	"env_set",
@@ -38,6 +39,8 @@ const EXPECTED_TOOLS = [
 	"app_restart",
 	"app_stop",
 	"app_delete",
+	"app_exec",
+	"app_explain_build",
 	// DB
 	"db_list",
 	"db_create",
@@ -98,6 +101,9 @@ const EXPECTED_TOOLS = [
 	"job_delete",
 	"job_run",
 	"job_runs",
+	// Approval requests (read-only; approving is a human dashboard action)
+	"approvals_list",
+	"approvals_get",
 ] as const;
 
 const NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -117,6 +123,7 @@ describe("MCP integration — catalog + auth envelope", () => {
 			const names = list.tools.map((t) => t.name).sort();
 			const expected = [...EXPECTED_TOOLS].sort();
 			expect(names).toEqual(expected);
+			expect(names).toHaveLength(78);
 			for (const name of names) {
 				expect(name).toMatch(NAME_RE);
 			}

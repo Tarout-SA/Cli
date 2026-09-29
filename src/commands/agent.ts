@@ -10,11 +10,19 @@
  * the Tarout MCP server in every coding agent found under HOME (hosted OAuth
  * endpoint by default, the local `tarout-mcp` with --local). No sign-in needed:
  * the hosted server signs in through the agent's own OAuth flow.
+ *
+ * `tarout agent manifest`: the one command here that reads the account. Prints
+ * the active project's apps, databases, buckets and domains in one call, so it
+ * takes the normal sign-in and project gates (see `AGENT_GATED_LEAF`).
  */
 
 import { dirname, resolve } from "node:path";
 import type { Command } from "commander";
 import { connectAgentFromHandoff } from "../lib/agent-handoff.js";
+import {
+	fetchAgentManifest,
+	renderAgentManifest,
+} from "../lib/agent-manifest.js";
 import {
 	defaultSetupIO,
 	displayPath,
@@ -35,7 +43,9 @@ import {
 	type AgentTargetId,
 	resolveTargetIds,
 } from "../lib/agent-targets.js";
-import { CliError, handleError } from "../lib/errors.js";
+import { getApiClient, getRequestProjectId } from "../lib/api.js";
+import { isLoggedIn } from "../lib/config.js";
+import { AuthError, CliError, handleError } from "../lib/errors.js";
 import {
 	box,
 	colors,
@@ -477,6 +487,53 @@ Examples:
 				}
 				success("Coding agents configured");
 				renderNextSteps(result);
+			} catch (err) {
+				handleError(err);
+			}
+		});
+
+	// `--project` is deliberately not declared here: the root program owns it
+	// and consumes it wherever it appears, so the preAction hook has already
+	// resolved it (slug or id) into the request project by the time this runs.
+	agent
+		.command("manifest")
+		.description(
+			"Show the active project's apps, databases, buckets and domains in one read (signed in)",
+		)
+		.option(
+			"--env-names",
+			"List each app's environment variable names instead of a count (values are never shown)",
+		)
+		.addHelpText(
+			"after",
+			`
+Pick another project with the global --project <slugOrId>. --json prints the
+full manifest (every app's env var names included, never values).
+
+Examples:
+  tarout agent manifest
+  tarout agent manifest --env-names
+  tarout agent manifest --project api --json`,
+		)
+		.action(async (options: { envNames?: boolean }) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const manifest = await fetchAgentManifest(
+					client,
+					getRequestProjectId() ?? undefined,
+				);
+				if (isJsonMode()) {
+					outputData(manifest);
+					return;
+				}
+				log("");
+				for (const line of renderAgentManifest(manifest, {
+					envNames: options.envNames === true,
+				})) {
+					log(line);
+				}
+				log("");
 			} catch (err) {
 				handleError(err);
 			}

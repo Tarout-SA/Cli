@@ -68,6 +68,23 @@ describe("environment command argument normalization", () => {
 		expect(normalizeEnvCommandArgs(argv)).toEqual(argv);
 	});
 
+	it("never reorders arguments after --, which belong to `tarout run`'s command", () => {
+		const argv = ["node", "tarout", "run", "--", "env", "my-app", "list"];
+		expect(normalizeEnvCommandArgs(argv)).toEqual(argv);
+		// The CLI's own args before -- are still normalized.
+		expect(
+			normalizeEnvCommandArgs([
+				"node",
+				"tarout",
+				"env",
+				"my-app",
+				"set",
+				"--",
+				"x",
+			]),
+		).toEqual(["node", "tarout", "env", "set", "my-app", "--", "x"]);
+	});
+
 	it("normalizes every app-first command without moving its remaining args", () => {
 		for (const command of [
 			"list",

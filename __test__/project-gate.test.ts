@@ -41,12 +41,15 @@ describe("commandRequiresProject", () => {
 		expect(commandRequiresProject(leaf(["up"]), root)).toBe(true);
 	});
 
-	it("exempts project, org, billing, and auth commands", () => {
+	it("exempts project, org, billing, approvals, and auth commands", () => {
 		const { root, leaf } = tree();
 		for (const path of [
 			["projects", "list"],
 			["orgs", "list"],
 			["billing", "status"],
+			// Organization-level: an agent waiting on a parked action must not
+			// hit a project picker first.
+			["approvals", "wait"],
 			["login"],
 			["logout"],
 			["whoami"],
@@ -110,5 +113,27 @@ describe("commandRequiresAuth", () => {
 		expect(commandRequiresAuth(leaf(["apps", "list"]), root)).toBe(true);
 		expect(commandRequiresAuth(leaf(["db", "list"]), root)).toBe(true);
 		expect(commandRequiresAuth(leaf(["call"]), root)).toBe(true);
+		expect(commandRequiresAuth(leaf(["run"]), root)).toBe(true);
+	});
+});
+
+describe("agent manifest", () => {
+	it("takes both gates although the rest of the agent namespace is exempt", () => {
+		// It reads the account (project.manifest), so a logged-out call must sign
+		// in first and `--project` must resolve before the action runs.
+		const { root, leaf } = tree();
+		expect(commandRequiresAuth(leaf(["agent", "manifest"]), root)).toBe(true);
+		expect(commandRequiresProject(leaf(["agent", "manifest"]), root)).toBe(
+			true,
+		);
+		for (const name of ["init", "setup", "connect"]) {
+			expect(commandRequiresAuth(leaf(["agent", name]), root)).toBe(false);
+			expect(commandRequiresProject(leaf(["agent", name]), root)).toBe(false);
+		}
+	});
+
+	it("gates `tarout run`, which reads the linked app's environment", () => {
+		const { root, leaf } = tree();
+		expect(commandRequiresProject(leaf(["run"]), root)).toBe(true);
 	});
 });

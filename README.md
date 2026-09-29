@@ -62,8 +62,11 @@ tarout call deployment.all --input '{"applicationId":"app_123"}'
 `tarout-mcp` is a local MCP server that gives coding agents (Claude Code,
 Cursor, Claude Desktop) the CLI's capabilities as first-class tools:
 deploy from the current directory, sync `.env`, run SQL against Postgres,
-schedule cron tasks (`job_*`), switch org/project/env, upgrade billing, and
-more, with a `call` escape hatch covering the entire platform API.
+schedule cron tasks (`job_*`), run a command in an app's container
+(`app_exec`), check parked approval requests
+(`approvals_*`), map a project in one read (`agent_manifest`), switch
+org/project/env, upgrade billing, and more, with a
+`call` escape hatch covering the entire platform API.
 
 ### Set up every agent at once: `tarout agent setup`
 
@@ -88,6 +91,21 @@ Only agents already installed are touched, other MCP servers are left alone,
 and an existing `tarout` entry with different settings is replaced only with
 `--yes`. Re-running reports `unchanged`. `tarout agent init` is the per-project
 counterpart (CLAUDE.md / AGENTS.md plus the Claude Code permission allowlist).
+
+### Map a project in one read: `tarout agent manifest`
+
+```bash
+tarout agent manifest                  # compact tree of the active project
+tarout agent manifest --env-names      # list env var names instead of a count
+tarout agent manifest --project api --json
+```
+
+One call returns the whole project: every app with its status, URL, source,
+custom domains, linked databases, env var **names** (never values) and
+scheduled job count, plus the project's databases, buckets and domains.
+`--json` prints the full manifest in the standard envelope. Unlike the rest of
+`tarout agent`, it needs you signed in. The MCP server exposes the same read as
+the `agent_manifest` tool (`{ projectId? }`).
 
 ### No install: the hosted connector
 
@@ -302,6 +320,63 @@ tarout env my-app pull
 tarout env my-app push
 ```
 
+### Run a local command with the app's env: `tarout run`
+
+```bash
+tarout run -- npm test
+tarout run --app api -- npx prisma migrate deploy
+```
+
+Runs the command on your machine with the linked app's environment variables
+injected (`--app` picks another app by id, name or slug). Put the command after
+`--`: it starts directly, without a shell, and every argument reaches it
+exactly as typed, spaces and quotes included. Use `sh -c "..."` when you need
+pipes or shell syntax.
+
+- Managed database variables (`DATABASE_URL`, `PGHOST`, ...) carry the
+  database's **external** connection details. A database without external
+  access is left unset, and stderr prints how to enable it
+  (`tarout db external-access <db> --enable`); the platform's hidden-route
+  placeholder is never injected.
+- Values are never printed.
+- The command's output and exit code pass straight through, unmapped; a
+  command killed by a signal exits `128+n` (130 for SIGINT). Ctrl+C and
+  SIGTERM are forwarded to the command. `--json` does not apply and is
+  rejected.
+
+`tarout dev` and `tarout build` resolve their variables the same way.
+
+### Run a command in the app's container: `tarout exec`
+
+```bash
+tarout exec -- ls -la "/app/my dir"
+tarout exec -- "npm run migrate && echo ok"
+tarout exec --app api --timeout 300 -- node scripts/backfill.js
+```
+
+Runs one command inside the app's **running container** (the linked app, or
+`--app`) and prints its stdout and stderr. Put the command after `--`:
+
+- **One argument** is sent as-is and runs as a shell line (`sh`), so quote the
+  whole line locally when it uses pipes, `&&` or `$VARS`.
+- **Several arguments** are each quoted for `sh` (single quotes, with `'`
+  written as `'"'"'`), so the container sees exactly the argv you typed.
+
+It is one request, not a stream: output arrives when the command finishes, and
+the platform keeps the first 4,000 and last 8,000 characters of each stream.
+`--timeout` is 1 to 300 seconds (default 60). The command's exit code is
+`tarout exec`'s exit code (124 when it timed out). With `--json` you get one
+`{ success, data }` envelope carrying `exitCode`, `stdout`, `stderr`,
+`truncated`, `timedOut`, `durationMs` and `ok` (exit 0, no timeout), and the
+exit code is 0 whenever the
+command ran, whatever its own exit code (the same convention as
+`tarout jobs run`); a non-zero exit then means the CLI or platform failed.
+
+Owners and admins only. An operator-tier agent key gets `NEEDS_APPROVAL` with a
+`tarout approvals wait <id>` next step; once a human approves, the command
+runs but its output is not returned. There is no interactive shell in the CLI:
+`-it` prints the link to the dashboard console (Application > Console).
+
 ### Databases
 
 | Command | Description |
@@ -395,6 +470,33 @@ immediately. Each HTTP fire carries `x-tarout-cron-timestamp` and
 `x-tarout-cron-signature` headers - verify them with the task's signing secret
 (`tarout jobs info <id>`).
 
+### Approvals
+
+When an operator-tier API key calls a destructive action (deleting an app,
+dropping a database), the platform parks it for a human and refuses the call
+with `NEEDS_APPROVAL:<id>`. The action has not failed: a human approves or
+denies it in the dashboard (Agent page, <https://tarout.sa/dashboard/agent>),
+and approving runs it. Requests expire after 24 hours.
+
+| Command | Description |
+|---------|-------------|
+| `tarout approvals list` | List requests, pending first (`--status`, `--limit`) |
+| `tarout approvals get <id>` | Show one request: procedure, requesting key, status, expiry, result or error |
+| `tarout approvals wait <id>` | Wait for the decision (`--timeout 30m`, `--interval 5`) |
+
+```bash
+# The id comes from the NEEDS_APPROVAL error (details.approvalId under --json)
+tarout approvals wait pa_123abc --timeout 1h --json
+```
+
+`wait` exits `0` only when the action was executed. A denied request exits `5`,
+an expired one or one that failed when it ran exits `1`, and a request still
+pending when `--timeout` passes (or on Ctrl+C) exits `11` with
+`APPROVAL_PENDING` and a `nextCommand` to resume. There is no approve or deny
+command: the platform refuses both to API keys, because an agent must never
+approve its own request. The MCP server exposes the same reads as
+`approvals_list` and `approvals_get`.
+
 ### Organizations
 
 | Command | Description |
@@ -435,6 +537,7 @@ with `--help` for its subcommands and flags):
 | `tarout ai` | Manage AI Gateway models and API keys |
 | `tarout monitor` | Manage uptime monitors for applications |
 | `tarout jobs` | Manage scheduled tasks (cron) for applications |
+| `tarout approvals` | See and wait on approval requests for agent actions |
 | `tarout projects` | Manage projects within the active organization |
 | `tarout orgs` | Manage and switch the active organization |
 | `tarout providers` | Manage Git providers (GitHub, GitLab) |
@@ -446,11 +549,13 @@ with `--help` for its subcommands and flags):
 | `tarout link` | Link the local directory to a Tarout application |
 | `tarout dev` | Run local dev server with cloud environment variables |
 | `tarout build` | Build locally with cloud environment variables |
+| `tarout run` | Run any local command with the app's environment variables (`tarout run -- <command>`) |
+| `tarout exec` | Run one command inside the app's running container (`tarout exec -- <command>`) |
 | `tarout settings` | Platform settings and information |
 | `tarout upgrade` | Upgrade the CLI to the latest published version |
 | `tarout queues` | Background job queues (platform operators only) |
 | `tarout call` | Call any platform procedure directly (see above) |
-| `tarout agent` | Set up coding agents: `setup` (skills + MCP, machine-wide), `init` (per project), `connect` |
+| `tarout agent` | Set up coding agents: `setup` (skills + MCP, machine-wide), `init` (per project), `connect`; `manifest` maps the project in one read |
 
 ## Global Flags
 
@@ -519,6 +624,7 @@ APP_ID=$(tarout apps list --json | jq -r '.[0].id')
 | 4 | Resource not found |
 | 5 | Permission denied |
 | 6 | Needs input - see `needs_input` event below |
+| 11 | Still running or pending when the wait ended, not failed: resume with the envelope's `resumeCommand` (deploy) or `nextCommand` (approvals) |
 
 ### JSON Output Format
 

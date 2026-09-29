@@ -4,8 +4,9 @@
  * @module lib/process
  */
 
-import { type SpawnOptions, spawn } from "node:child_process";
+import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { constants as osConstants } from "node:os";
 import { join } from "node:path";
 
 /**
@@ -364,6 +365,106 @@ export function runCommand(
 			resolve({
 				exitCode: 1,
 				signal: null,
+			});
+		});
+	});
+}
+
+/** Signals the CLI relays to a `runArgv` child while it runs. */
+const FORWARDED_SIGNALS: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
+
+/**
+ * Result from {@link runArgv}. `exitCode` is what the CLI should exit with: the
+ * child's own code, `128 + n` when signal `n` killed it (the shell convention,
+ * 130 for SIGINT), 127 when the command does not exist and 126 when it cannot
+ * be executed.
+ */
+export interface ArgvResult {
+	exitCode: number;
+	signal: NodeJS.Signals | null;
+	/** Set only when the command could not be started. */
+	error?: NodeJS.ErrnoException;
+}
+
+/** `128 + signal number`, the exit status a shell reports for a signal death. */
+export function signalExitCode(signal: NodeJS.Signals | null): number {
+	const number = signal
+		? (osConstants.signals as Record<string, number | undefined>)[signal]
+		: undefined;
+	return typeof number === "number" ? 128 + number : 1;
+}
+
+function spawnFailureExitCode(err: NodeJS.ErrnoException): number {
+	if (err.code === "ENOENT") return 127;
+	if (err.code === "EACCES" || err.code === "EPERM" || err.code === "EISDIR") {
+		return 126;
+	}
+	return 1;
+}
+
+/**
+ * Runs `command` with `args` handed to the child verbatim: no shell and no
+ * string splitting, so an argument with spaces, quotes, `$VAR` or `*` arrives
+ * exactly as given. Unlike {@link runCommand}, which splits one string on
+ * spaces, this is safe for arbitrary user argv.
+ *
+ * stdio is inherited (the child owns the terminal). While the child runs, the
+ * CLI stays alive and forwards SIGINT/SIGTERM to it, so the child decides how
+ * to shut down and its exit status is what the caller propagates.
+ *
+ * No shell also means `.cmd`/`.bat` shims (npm, npx) do not start on Windows;
+ * name the real executable there.
+ */
+export function runArgv(
+	command: string,
+	args: string[],
+	options: { env?: Record<string, string>; cwd?: string } = {},
+): Promise<ArgvResult> {
+	return new Promise((resolve) => {
+		const forwarders: Array<[NodeJS.Signals, () => void]> = [];
+		let settled = false;
+		const finish = (result: ArgvResult) => {
+			if (settled) return;
+			settled = true;
+			for (const [signal, forward] of forwarders) process.off(signal, forward);
+			resolve(result);
+		};
+
+		let child: ChildProcess;
+		try {
+			child = spawn(command, args, {
+				cwd: options.cwd || process.cwd(),
+				env: { ...process.env, ...options.env },
+				stdio: "inherit",
+				shell: false,
+			});
+		} catch (err) {
+			// spawn throws synchronously for argv it rejects outright (a NUL byte).
+			const error = err as NodeJS.ErrnoException;
+			finish({ exitCode: spawnFailureExitCode(error), signal: null, error });
+			return;
+		}
+
+		for (const signal of FORWARDED_SIGNALS) {
+			const forward = () => {
+				if (child.exitCode === null && child.signalCode === null) {
+					child.kill(signal);
+				}
+			};
+			forwarders.push([signal, forward]);
+			process.on(signal, forward);
+		}
+
+		child.once("error", (error: NodeJS.ErrnoException) => {
+			// `error` also fires when a kill fails; the child is still running then
+			// and `close` settles. Only a child that never got a pid failed to start.
+			if (child.pid !== undefined) return;
+			finish({ exitCode: spawnFailureExitCode(error), signal: null, error });
+		});
+		child.once("close", (code, signal) => {
+			finish({
+				exitCode: code !== null && code >= 0 ? code : signalExitCode(signal),
+				signal,
 			});
 		});
 	});

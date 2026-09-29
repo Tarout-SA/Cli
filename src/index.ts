@@ -6,6 +6,7 @@ import { registerAccountCommands } from "./commands/account.js";
 import { registerAgentCommands } from "./commands/agent.js";
 import { registerAiCommands } from "./commands/ai.js";
 import { registerAppsCommands } from "./commands/apps.js";
+import { registerApprovalsCommands } from "./commands/approvals.js";
 import { registerAuthCommands } from "./commands/auth.js";
 import { registerBackupsCommands } from "./commands/backups.js";
 import { registerBillingCommands } from "./commands/billing.js";
@@ -21,6 +22,7 @@ import {
 import { registerDestinationsCommands } from "./commands/destinations.js";
 import { registerDevCommand } from "./commands/dev.js";
 import { registerDomainsCommands } from "./commands/domains.js";
+import { registerExecCommand } from "./commands/exec.js";
 import {
 	normalizeEnvCommandArgs,
 	registerEnvCommands,
@@ -37,6 +39,7 @@ import { registerOrgsCommands } from "./commands/orgs.js";
 import { registerProjectsCommands } from "./commands/projects.js";
 import { registerProvidersCommands } from "./commands/providers.js";
 import { registerQueuesCommands } from "./commands/queues.js";
+import { registerRunCommand } from "./commands/run.js";
 import { registerServersCommands } from "./commands/servers.js";
 import { registerSettingsCommands } from "./commands/settings.js";
 import { registerStorageCommands } from "./commands/storage.js";
@@ -227,12 +230,15 @@ registerProjectsCommands(program);
 registerLinkCommands(program);
 registerDevCommand(program);
 registerBuildCommand(program);
+registerRunCommand(program);
+registerExecCommand(program);
 registerStorageCommands(program);
 registerKeysCommands(program);
 registerBillingCommands(program);
 registerServersCommands(program);
 registerMonitorCommands(program);
 registerJobsCommands(program);
+registerApprovalsCommands(program);
 registerTicketsCommands(program);
 registerWalletCommands(program);
 registerAiCommands(program);
@@ -266,9 +272,14 @@ const argErrorPatterns = [
 	/unknown command/i,
 ];
 const originalWriteErr = process.stderr.write.bind(process.stderr);
+// Only the CLI's own arguments count: a `--json` after `--` belongs to the
+// command `tarout run` starts or `tarout exec` sends.
+const argvSeparator = process.argv.indexOf("--");
+const ownArgv =
+	argvSeparator === -1 ? process.argv : process.argv.slice(0, argvSeparator);
 program.configureOutput({
 	writeErr: (str: string) => {
-		if (process.argv.includes("--json")) {
+		if (ownArgv.includes("--json")) {
 			setGlobalOptions({ json: true });
 			const isArgError = argErrorPatterns.some((p) => p.test(str));
 			outputError(

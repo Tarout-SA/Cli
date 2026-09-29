@@ -65,16 +65,15 @@ describe("staleCredentialGuidance", () => {
 		expect(guidance?.hint).toMatch(/has not failed/i);
 	});
 
-	it("points a parked approval at the poll, not at `tarout login`", () => {
-		// Logging in again approves nothing; the next step is approvals.get.
+	it("points a parked approval at the wait, not at `tarout login`", () => {
+		// Logging in again approves nothing; the next step is `approvals wait`.
 		const guidance = staleCredentialGuidance(
 			"FORBIDDEN",
 			"needs_approval",
 			'NEEDS_APPROVAL:pa_123abc: The destructive action "application.delete" requires human approval for this API key.',
 		);
-		expect(guidance?.details.nextCommand).toBe(
-			`tarout call approvals.get --input '{"id":"pa_123abc"}'`,
-		);
+		expect(guidance?.details.nextCommand).toBe("tarout approvals wait pa_123abc");
+		expect(guidance?.hint).toMatch(/tarout approvals wait/);
 		expect(guidance?.details.approvalId).toBe("pa_123abc");
 		expect(guidance?.details.reason).toBe("needs_approval");
 		expect(guidance?.details.hint).not.toMatch(/tarout login/);
@@ -82,10 +81,24 @@ describe("staleCredentialGuidance", () => {
 		expect(guidance?.hint).not.toMatch(/tarout login/);
 	});
 
-	it("still names the poll when the approval id cannot be parsed", () => {
+	it("still names the wait when the approval id cannot be parsed", () => {
 		const guidance = staleCredentialGuidance("FORBIDDEN", "needs_approval");
-		expect(guidance?.details.nextCommand).toMatch(/^tarout call approvals\.get/);
+		expect(guidance?.details.nextCommand).toBe(
+			"tarout approvals wait <approvalId>",
+		);
 		expect(guidance?.details.approvalId).toBeUndefined();
+	});
+
+	it("never pastes an id that could carry shell syntax into nextCommand", () => {
+		// Agents run nextCommand verbatim.
+		const guidance = staleCredentialGuidance(
+			"FORBIDDEN",
+			"needs_approval",
+			"NEEDS_APPROVAL:pa_1;rm$(x): refused.",
+		);
+		expect(guidance?.details.nextCommand).toBe(
+			"tarout approvals wait <approvalId>",
+		);
 	});
 
 	it("tells a read-only member that an owner or admin must act", () => {

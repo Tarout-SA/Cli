@@ -22,6 +22,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different settings is replaced only with `--yes`, a config with comments
   (JSONC) gets a paste-ready snippet instead of a rewrite, and a re-run
   reports `unchanged`. The skills now ship in the npm package under `skills/`.
+- **`tarout approvals list | get | wait`.** See and wait on the approval
+  requests the platform parks when an operator-tier key calls a destructive
+  action. `list` shows pending requests first (`--status`, `--limit`); `get`
+  shows the procedure, the requesting key, expiry, and the result or error;
+  `wait <id>` polls until a human decides (`--timeout`, default `30m`, max
+  `24h`; `--interval`, default 5 seconds). `wait` exits 0 only when the action
+  was executed, 5 when a human denied it, 1 when it expired or failed when it
+  ran, and 11 (`APPROVAL_PENDING`, with a resumable `nextCommand`) when the
+  timeout passes or on Ctrl+C. `--json` prints one envelope. There is no
+  approve or deny command: only a human in the dashboard can decide.
+- **MCP tools `approvals_list` and `approvals_get`** (read-only), bringing the
+  stdio server to 75 tools.
+- **`tarout run -- <command> [args...]`.** Runs a local command with the linked
+  app's environment variables injected (`--app` picks another app). The argv
+  after `--` reaches the command verbatim, with no shell and no splitting, so
+  arguments with spaces or quotes survive. Managed database variables carry
+  the external connection details from the platform's new
+  `application.connections`; a database without external access is left unset
+  and stderr prints its hint. Values are never printed. The command's exit code
+  passes through unmapped (a signal exits `128+n`), SIGINT and SIGTERM are
+  forwarded to it, and `--json` is rejected as `INVALID_ARGUMENTS`. Against a
+  server without `application.connections` it warns once and runs without
+  database variables.
+- **`tarout agent manifest`.** One read of the whole project (the platform's
+  new `project.manifest`): apps with status, URL, source, custom domains,
+  linked databases, env var names (a count unless `--env-names`, never values)
+  and scheduled job count, plus databases, buckets and domains. Prints a
+  compact tree, or the full manifest with `--json`; the global `--project`
+  picks the project. Unlike the rest of `tarout agent` it takes the normal
+  sign-in and project gates. An older server answers `NOT_FOUND` with a
+  pointer at the per-resource list commands.
+- **MCP tool `agent_manifest`** (read-only, `{ projectId? }`), the same read,
+  bringing the stdio server to 76 tools.
+- **`tarout exec -- <command...>`.** Runs one command inside the app's running
+  container through the platform's new `application.exec` (the linked app, or
+  `--app`; `--timeout` 1 to 300 seconds, default 60). One argument is sent
+  verbatim as a shell line; several are each single-quoted for `sh` (`'`
+  becomes `'"'"'`), so `tarout exec -- ls -la "/app/my dir"` runs exactly
+  that. It is one request, not a stream: stdout and stderr print as returned
+  (each capped by the platform at its first 4,000 and last 8,000 characters),
+  with a dim footer and any truncation notice on stderr. The exit code is the
+  command's own (clamped to 0-255, 124 on timeout). `--json` prints one
+  `{ success, data }` envelope with `exitCode`, `stdout`, `stderr`,
+  `truncated`, `timedOut`, `durationMs` and `ok` and exits 0 whenever the command
+  ran, like `tarout jobs run`. A parked `NEEDS_APPROVAL` prints the
+  `tarout approvals wait <id>` next step and says the approved run's output is
+  not returned (`details.afterApproval` under `--json`). `-i`/`-t` do not open
+  a shell: they print the dashboard console link and exit 2.
+- **MCP tool `app_exec`** (`destructiveHint`, `{ app?, command,
+  timeoutSeconds? }`), the same call; `app` defaults to the linked app, a
+  non-zero `exitCode` is a normal result, and `NEEDS_APPROVAL` carries the
+  same `afterApproval` note. This brings the stdio server to 77 tools.
+
+### Changed
+
+- **`tarout dev` and `tarout build` no longer inject the managed-database
+  placeholder.** `envVariable.list` returns a managed database's private route
+  as the sentence `[managed database route hidden; use the external database
+  endpoint]`, and both commands passed it on as `DATABASE_URL`. They now share
+  `tarout run`'s resolver: the placeholder is dropped, the external connection
+  details are injected, and a database without external access is left unset
+  with a hint (listed as `unavailableEnv` under `--json`).
+- **`tarout env <app> <command>` reordering stops at `--`**, so a `tarout run --
+  env ...` command line reaches the command untouched.
+- **`NEEDS_APPROVAL` guidance names the new commands.** The CLI error's
+  `nextCommand` is now `tarout approvals wait <id>` (instead of
+  `tarout call approvals.get --input ...`), and the MCP remediation points at
+  the `approvals_get` tool. Both still say an agent must not approve its own
+  request.
 
 ## [1.14.0] - 2026-09-25
 

@@ -5,6 +5,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import packageJson from "../../package.json" with { type: "json" };
 import { registerAppsTools } from "./tools/apps.js";
+import { registerApprovalsTools } from "./tools/approvals.js";
 import { registerBillingTools } from "./tools/billing.js";
 import { registerCallTools } from "./tools/call.js";
 import { registerContextTools } from "./tools/context.js";
@@ -34,5 +35,6 @@ export function createMcpServer(): McpServer {
 	registerBillingTools(server);
 	registerDeployTools(server);
 	registerJobsTools(server);
+	registerApprovalsTools(server);
 	return server;
 }

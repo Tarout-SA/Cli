@@ -16,6 +16,7 @@ import {
 import { withInvocationContext } from "../lib/invocation-context.js";
 import {
 	approvalIdFromMessage,
+	approvalWaitCommand,
 	AuthError,
 	BuildFailedError,
 	CliError,
@@ -212,6 +213,11 @@ export function toEnvelope(err: unknown, procedurePath?: string): Envelope {
 	if (err instanceof NotFoundError) {
 		return { error: err.message, code: "NOT_FOUND" };
 	}
+	if (err instanceof CliError && err.code === ExitCode.NOT_FOUND) {
+		// A NOT_FOUND raised as a plain CliError (a procedure an older platform
+		// does not have yet, for example) keeps the readable code too.
+		return { error: err.message, code: "NOT_FOUND", details: err.details };
+	}
 	if (err instanceof CliError && err.code === ExitCode.INVALID_ARGUMENTS) {
 		// Same readable code the tools' own argument checks return, so an agent
 		// can key off INVALID_ARGUMENTS whichever layer refused the call (an
@@ -305,9 +311,9 @@ function applyForbiddenGuidance(
 		if (approvalId) details.approvalId = approvalId;
 		env.details = details;
 		env.remediation =
-			"This action has not failed: it is parked for a human to approve or deny in the Tarout dashboard under Agent > Approvals. Tell the user, then poll the `call` tool with procedure `approvals.get` and input " +
-			`{ "id": ${idJson} } (or \`tarout call approvals.get --input '{"id":${idJson}}'\`). ` +
-			'Status "executed" means it was approved and performed; "denied" or "expired" means it will not run. Do NOT retry the action with different parameters, and do not try to approve it yourself.';
+			"This action has not failed: it is parked for a human to approve or deny in the Tarout dashboard under Agent > Approvals. Tell the user, then poll the `approvals_get` tool with " +
+			`{ "id": ${idJson} } every few seconds (in a terminal, \`${approvalWaitCommand(approvalId)}\` does the same wait). ` +
+			'"pending" or "approved" means keep polling; "executed" means it was approved and performed; "failed" means it was approved but errored when it ran; "denied" or "expired" means it will not run. Do NOT retry the action with different parameters, and do not try to approve it yourself.';
 		return;
 	}
 	if (reason) {

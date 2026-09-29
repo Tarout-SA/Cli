@@ -95,10 +95,14 @@ const HERE = fileURLToPath(new URL(".", import.meta.url));
 const TOOLS_DIR = join(HERE, "../../src/mcp/tools");
 const BILLING_LIB = join(HERE, "../../src/lib/billing-upgrade.ts");
 
+const BUILD_EXPLAIN_LIB = join(HERE, "../../src/lib/build-explain.ts");
+
 // ---------------------------------------------------------------------------
 // Recording tRPC client. A Proxy that turns any `client.<router>.<proc>.
 // (query|mutate)(payload)` chain into a recorded { procedure, payload } entry
-// and returns a benign value — an apps array for the resolveAppRef lookups,
+// and returns a benign value: an apps array for the resolveAppRef lookups, a
+// pending answer for application.explainBuild (so app_explain_build polls
+// application.explainBuildResult once and that payload is captured too), and
 // `{}` for everything else (so billing finalize classifies "deferred" and
 // never polls / hits the network).
 // ---------------------------------------------------------------------------
@@ -106,7 +110,11 @@ const h = vi.hoisted(() => {
 	const calls: Array<{ procedure: string; payload: unknown }> = [];
 	const APPS = [{ applicationId: "app_1", name: "web" }];
 	function benign(path: string): unknown {
-		return path.endsWith("allByOrganization") ? APPS : {};
+		if (path.endsWith("allByOrganization")) return APPS;
+		if (path === "application.explainBuild") {
+			return { status: "pending", jobId: "explain-contract_1" };
+		}
+		return {};
 	}
 	function node(path: string[]): unknown {
 		return new Proxy(() => {}, {
@@ -139,6 +147,10 @@ vi.mock("../../src/lib/api", () => ({
 }));
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+	EXEC_MAX_COMMAND_LENGTH,
+	EXEC_MAX_TIMEOUT_SECONDS,
+} from "../../src/commands/exec";
 import { registerAppsTools } from "../../src/mcp/tools/apps";
 import { registerBillingTools } from "../../src/mcp/tools/billing";
 import { registerDbTools } from "../../src/mcp/tools/db";
@@ -186,6 +198,9 @@ const { appRouter } = await import(SRC + "/server/api/root");
 const registry = {
 	applicationLogsInput: appRouter._def.procedures["application.getApplicationLogs"]._def.inputs[0],
 	apiCreateApplication: appMod.apiCreateApplication,
+	apiExecApplicationCommand: appMod.apiExecApplicationCommand,
+	apiFindOneApplication: appMod.apiFindOneApplication,
+	apiExplainBuildResult: appMod.apiExplainBuildResult,
 	apiCreatePostgres: pgMod.apiCreatePostgres,
 	apiCreateMySql: myMod.apiCreateMySql,
 	apiImportEnvVariables: envMod.apiImportEnvVariables,
@@ -256,7 +271,25 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 			return found.payload;
 		}
 
-		// env_push reads a real dotenv file off disk — stage one.
+		// app_explain_build makes two calls in one invocation: explainBuild
+		// answers pending (see benign()), so it polls explainBuildResult once
+		// after a 1s wait and stops on the `{}` that comes back.
+		const explainBefore = h.calls.length;
+		await tools.app_explain_build.handler({ app: "web", waitSeconds: 1 });
+		const explainCalls = h.calls.slice(explainBefore);
+		const explainPayload = (procedure: string): unknown => {
+			const found = explainCalls.find((c) => c.procedure === procedure);
+			if (!found) {
+				throw new Error(
+					`app_explain_build did not call ${procedure}; it called: ${explainCalls
+						.map((c) => c.procedure)
+						.join(", ")}`,
+				);
+			}
+			return found.payload;
+		};
+
+		// env_push reads a real dotenv file off disk, so stage one.
 		const scratch = mkdtempSync(join(tmpdir(), "tarout-contract-"));
 		writeFileSync(join(scratch, ".env.contract"), "FOO=bar\nBAZ=qux\n");
 
@@ -278,6 +311,30 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 					"app_create",
 					{ name: "My API", description: "backend", plan: "SHARED" },
 					"application.create",
+				),
+				expectValid: true,
+			},
+			{
+				id: "app_exec",
+				schema: "apiExecApplicationCommand",
+				payload: await capture(
+					"app_exec",
+					{
+						app: "web",
+						command: "npm run migrate && echo ok",
+						timeoutSeconds: 120,
+					},
+					"application.exec",
+				),
+				expectValid: true,
+			},
+			{
+				id: "app_exec.default-timeout",
+				schema: "apiExecApplicationCommand",
+				payload: await capture(
+					"app_exec",
+					{ app: "web", command: "ls -la" },
+					"application.exec",
 				),
 				expectValid: true,
 			},
@@ -375,6 +432,25 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 				),
 				expectValid: true,
 			},
+			{
+				id: "app_explain_build",
+				schema: "apiFindOneApplication",
+				payload: explainPayload("application.explainBuild"),
+				expectValid: true,
+			},
+			{
+				id: "app_explain_build.poll",
+				schema: "apiExplainBuildResult",
+				payload: explainPayload("application.explainBuildResult"),
+				expectValid: true,
+			},
+			// Negative control: the platform only honors its own job id format.
+			{
+				id: "negative.app_explain_build-bad-jobId",
+				schema: "apiExplainBuildResult",
+				payload: { applicationId: "app_1", jobId: "deploy-123" },
+				expectValid: false,
+			},
 			// Omitting appName is now VALID by design — the create service
 			// auto-generates the display name and slug (see the `name`/`appName`
 			// `.optional()` in the platform's apiCreateApplication). This used to be
@@ -402,6 +478,31 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 			},
 		];
 
+		// `tarout exec` refuses locally past these limits; the platform must
+		// accept a payload right at them and reject one just past them.
+		captured.push(
+			{
+				id: "app_exec.cli-limits",
+				schema: "apiExecApplicationCommand",
+				payload: {
+					applicationId: "app_1",
+					command: "x".repeat(EXEC_MAX_COMMAND_LENGTH),
+					timeoutSeconds: EXEC_MAX_TIMEOUT_SECONDS,
+				},
+				expectValid: true,
+			},
+			{
+				id: "negative.app_exec-past-cli-limits",
+				schema: "apiExecApplicationCommand",
+				payload: {
+					applicationId: "app_1",
+					command: "x".repeat(EXEC_MAX_COMMAND_LENGTH + 1),
+					timeoutSeconds: EXEC_MAX_TIMEOUT_SECONDS + 1,
+				},
+				expectValid: false,
+			},
+		);
+
 		// Referenced-procedure set for the phantom guard: union of (a) everything
 		// the recording client actually saw during capture (resolves db.ts's
 		// dynamic `router.<proc>` dispatch faithfully), (b) a static scan of every
@@ -414,6 +515,7 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 		const rx = /client\.([a-zA-Z]+)\.([a-zA-Z]+)\.(?:query|mutate)/g;
 		const sources = [
 			BILLING_LIB,
+			BUILD_EXPLAIN_LIB,
 			...readdirSync(TOOLS_DIR)
 				.filter((f) => f.endsWith(".ts"))
 				.map((f) => join(TOOLS_DIR, f)),
@@ -477,6 +579,13 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 			[
 				"app_logs",
 				"app_create",
+				"app_exec",
+				"app_exec.default-timeout",
+				"app_exec.cli-limits",
+				"negative.app_exec-past-cli-limits",
+				"app_explain_build",
+				"app_explain_build.poll",
+				"negative.app_explain_build-bad-jobId",
 				"billing_upgrade.plan+quantity",
 				"billing_upgrade.planQuantity",
 				"db_create.postgres",
@@ -510,6 +619,11 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 		"env_unset.multi",
 		"billing_upgrade.plan+quantity",
 		"billing_upgrade.planQuantity",
+		"app_exec",
+		"app_exec.default-timeout",
+		"app_exec.cli-limits",
+		"app_explain_build",
+		"app_explain_build.poll",
 	]) {
 		it(`${expected} payload validates against its platform schema`, () => {
 			const r = validator.results.find((x) => x.id === expected);
@@ -526,6 +640,25 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 			(x) => x.id === "app_create-without-appName",
 		);
 		expect(r?.valid, r?.errors.join("; ")).toBe(true);
+	});
+
+	it("negative control: a command or timeout past the CLI's limits is REJECTED", () => {
+		const r = validator.results.find(
+			(x) => x.id === "negative.app_exec-past-cli-limits",
+		);
+		expect(r, "no validator result").toBeDefined();
+		expect(r?.valid).toBe(false);
+		expect(r?.errors.some((e) => e.startsWith("command:"))).toBe(true);
+		expect(r?.errors.some((e) => e.startsWith("timeoutSeconds:"))).toBe(true);
+	});
+
+	it("negative control: a job id the platform did not mint is REJECTED", () => {
+		const r = validator.results.find(
+			(x) => x.id === "negative.app_explain_build-bad-jobId",
+		);
+		expect(r, "no validator result").toBeDefined();
+		expect(r?.valid).toBe(false);
+		expect(r?.errors.some((e) => e.startsWith("jobId:"))).toBe(true);
 	});
 
 	it("negative control: an unknown plan is REJECTED by the schema", () => {

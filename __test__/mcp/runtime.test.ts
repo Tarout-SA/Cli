@@ -334,8 +334,10 @@ describe("withAuth FORBIDDEN classification", () => {
 		expect(body.details?.reason).toBe("needs_approval");
 		expect(body.details?.approvalId).toBe("pa_123abc");
 		expect(body.details?.procedure).toBe("application.delete");
-		expect(body.remediation).toMatch(/approvals\.get/);
+		expect(body.remediation).toMatch(/`approvals_get` tool/);
+		expect(body.remediation).not.toMatch(/approvals\.get/);
 		expect(body.remediation).toContain('"pa_123abc"');
+		expect(body.remediation).toContain("tarout approvals wait pa_123abc");
 		expect(body.remediation).toMatch(/Agent > Approvals/);
 		expect(body.remediation).toMatch(/do NOT retry/i);
 		expect(body.remediation).toMatch(/do not try to approve it yourself/i);
@@ -366,7 +368,8 @@ describe("withAuth FORBIDDEN classification", () => {
 		expect(body.code).toBe("NEEDS_APPROVAL");
 		// No prefix to parse: the remediation still names the poll, with a placeholder.
 		expect(body.details?.approvalId).toBeUndefined();
-		expect(body.remediation).toMatch(/approvals\.get/);
+		expect(body.remediation).toMatch(/approvals_get/);
+		expect(body.remediation).toContain("tarout approvals wait <approvalId>");
 		expectNoBilling(body);
 	});
 

@@ -7,6 +7,12 @@
 import type { Command } from "commander";
 import { getApiClient } from "../lib/api.js";
 import {
+	type AppEnv,
+	reportAppEnvNotices,
+	resolveAppEnv,
+	unavailableEnvField,
+} from "../lib/app-env.js";
+import {
 	getProjectConfig,
 	isLoggedIn,
 	isProjectLinked,
@@ -23,7 +29,6 @@ import { colors, isJsonMode, log, outputData } from "../lib/output.js";
 import {
 	detectFramework,
 	detectPackageManager,
-	envVarsToObject,
 	getDefaultPort,
 	getDevCommand,
 	readPackageJson,
@@ -110,13 +115,13 @@ export function registerDevCommand(program: Command) {
 					`Fetching environment variables for ${appName}...`,
 				);
 				let envVars: Record<string, string> = {};
+				let appEnv: AppEnv;
 
 				try {
-					const variables = await client.envVariable.list.query({
-						applicationId,
-						includeValues: true,
-					});
-					envVars = envVarsToObject(variables);
+					// Shared with `tarout run`: drops the platform's managed-database
+					// placeholder and injects the external connection details instead.
+					appEnv = await resolveAppEnv(client, applicationId);
+					envVars = appEnv.env;
 					succeedSpinner(
 						`Loaded ${Object.keys(envVars).length} environment variables`,
 					);
@@ -126,6 +131,7 @@ export function registerDevCommand(program: Command) {
 						`Failed to fetch environment variables: ${err instanceof Error ? err.message : "Unknown error"}`,
 					);
 				}
+				reportAppEnvNotices(appEnv);
 
 				// Add PORT to env vars if specified
 				if (options.port) {
@@ -143,6 +149,7 @@ export function registerDevCommand(program: Command) {
 					framework: frameworkName,
 					envVarCount: Object.keys(envVars).length,
 					packageManager: pm,
+					...unavailableEnvField(appEnv),
 				};
 
 				if (isJsonMode()) {

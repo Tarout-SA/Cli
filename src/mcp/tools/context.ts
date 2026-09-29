@@ -1,7 +1,11 @@
 /**
  * Curated MCP tools for identity / context: context_status, context_switch,
- * link_app, unlink_app. Handlers route through withAuth() and never touch
- * stdout / process.exit / CLI prompt helpers.
+ * link_app, unlink_app, agent_manifest. Handlers route through withAuth() and
+ * never touch stdout / process.exit / CLI prompt helpers.
+ *
+ * `agent_manifest` maps a whole project in one read (the same data as
+ * `tarout agent manifest --json`), so an agent can orient itself without
+ * listing every resource type.
  *
  * `link_app` writes .tarout/project.json in the given directory so future
  * deploy/env tools can infer the target when no `app` argument is passed.
@@ -22,6 +26,7 @@ import {
 	removeProjectConfig,
 	setProjectConfig,
 } from "../../lib/config.js";
+import { fetchAgentManifest } from "../../lib/agent-manifest.js";
 import { resolveAppRef } from "../../lib/env-core.js";
 import { rememberRequestProjectId } from "../../lib/api.js";
 import { AuthError } from "../../lib/errors.js";
@@ -168,6 +173,27 @@ export function registerContextTools(server: McpServer): void {
 				{ cwd },
 			);
 		},
+	);
+
+	server.registerTool(
+		"agent_manifest",
+		{
+			title: "Project manifest: apps, databases, buckets, domains",
+			description:
+				"One read that maps a project: every app with its status, URL, source, custom domains, linked database ids, env var NAMES (never values) and scheduled job count, plus the project's databases (engine, plan, external access, linked apps), storage buckets and domains. Defaults to the active project. Call it first to orient instead of listing each resource type.",
+			inputSchema: {
+				projectId: z
+					.string()
+					.optional()
+					.describe("Project id. Defaults to the session's active project."),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		async ({ projectId }) =>
+			withAuth(
+				(client) => fetchAgentManifest(client, projectId),
+				"project.manifest",
+			),
 	);
 
 	server.registerTool(
