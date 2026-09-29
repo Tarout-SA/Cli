@@ -74,6 +74,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timeoutSeconds? }`), the same call; `app` defaults to the linked app, a
   non-zero `exitCode` is a normal result, and `NEEDS_APPROVAL` carries the
   same `afterApproval` note. This brings the stdio server to 77 tools.
+- **`tarout build --explain`.** Asks the platform's new
+  `application.explainBuild` what a deploy would build and whether it would
+  get past the pre-build checks, without building, deploying or changing
+  anything. It explains the app's configured source on Tarout (the tracked Git
+  branch or the last uploaded archive), not uncommitted or unpushed local
+  files, and runs nothing locally. The report shows the source
+  (`repo@branch`, short commit), detected kind and build type, summary,
+  providers and package versions, steps with their commands (long lists are
+  shortened), start command, port and build-time variable names (never
+  values), then warnings and errors. `--app` picks another app than the linked
+  one; `--wait <seconds>` (0 to 600, default 120) polls a slow inspection
+  through `application.explainBuildResult`. Exits 0 on ok, 12
+  (`BUILD_FAILED`) when a deploy would fail, and 11 (`EXPLAIN_PENDING`, with a
+  `nextCommand`) when still pending after `--wait`. `--json` prints one
+  envelope with the raw answer. The platform's rate limit (10 a minute per
+  user) surfaces as `TOO_MANY_REQUESTS` with a wait-a-minute message, and an
+  older server answers `NOT_FOUND`: "This Tarout server does not support build
+  explain yet".
+- **MCP tool `app_explain_build`** (`readOnlyHint`, `{ app?, waitSeconds? }`),
+  the same read with the same polling; `app` defaults to the linked app, and
+  `status: "failed"` is a normal result, not a tool error. This brings the
+  stdio server to 78 tools.
 
 ### Changed
 

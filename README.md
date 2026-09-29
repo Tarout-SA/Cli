@@ -63,7 +63,8 @@ tarout call deployment.all --input '{"applicationId":"app_123"}'
 Cursor, Claude Desktop) the CLI's capabilities as first-class tools:
 deploy from the current directory, sync `.env`, run SQL against Postgres,
 schedule cron tasks (`job_*`), run a command in an app's container
-(`app_exec`), check parked approval requests
+(`app_exec`), explain what a deploy would build (`app_explain_build`), check
+parked approval requests
 (`approvals_*`), map a project in one read (`agent_manifest`), switch
 org/project/env, upgrade billing, and more, with a
 `call` escape hatch covering the entire platform API.
@@ -377,6 +378,30 @@ Owners and admins only. An operator-tier agent key gets `NEEDS_APPROVAL` with a
 runs but its output is not returned. There is no interactive shell in the CLI:
 `-it` prints the link to the dashboard console (Application > Console).
 
+### Explain what a deploy would build: `tarout build --explain`
+
+```bash
+tarout build --explain
+tarout build --explain --app api --wait 300 --json
+```
+
+Asks Tarout what a deploy would build and whether it would get past the
+pre-build checks, without building, deploying or changing anything. It reads
+the app's **configured source on Tarout** (the tracked Git branch, or the last
+uploaded archive), not your local files, so push (or upload) first to explain
+local changes. Nothing runs locally. The report shows the source
+(`repo@branch` and short commit), detected kind and build type, a summary,
+providers and toolchain versions, build steps with their commands, the start
+command, the port, and the **names** of build-time variables (never values),
+then warnings and errors.
+
+Exit status: 0 when the plan is ok, 12 (`BUILD_FAILED`) when a deploy would
+fail, and 11 (`EXPLAIN_PENDING`) when Tarout is still inspecting after `--wait`
+seconds (default 120, max 600; run it again to pick up the same inspection).
+`--json` prints one envelope carrying the platform's full answer. The platform
+allows 10 explanations a minute per user. The MCP tool `app_explain_build`
+does the same.
+
 ### Databases
 
 | Command | Description |
@@ -548,7 +573,7 @@ with `--help` for its subcommands and flags):
 | `tarout inbox` | Manage in-app notifications |
 | `tarout link` | Link the local directory to a Tarout application |
 | `tarout dev` | Run local dev server with cloud environment variables |
-| `tarout build` | Build locally with cloud environment variables |
+| `tarout build` | Build locally with cloud environment variables; `--explain` shows what a deploy would build from the app's configured source |
 | `tarout run` | Run any local command with the app's environment variables (`tarout run -- <command>`) |
 | `tarout exec` | Run one command inside the app's running container (`tarout exec -- <command>`) |
 | `tarout settings` | Platform settings and information |
@@ -624,7 +649,8 @@ APP_ID=$(tarout apps list --json | jq -r '.[0].id')
 | 4 | Resource not found |
 | 5 | Permission denied |
 | 6 | Needs input - see `needs_input` event below |
-| 11 | Still running or pending when the wait ended, not failed: resume with the envelope's `resumeCommand` (deploy) or `nextCommand` (approvals) |
+| 11 | Still running or pending when the wait ended, not failed: resume with the envelope's `resumeCommand` (deploy) or `nextCommand` (approvals, `build --explain`) |
+| 12 | Build failed: the local `tarout build` command failed, or `tarout build --explain` found errors that would stop a deploy |
 
 ### JSON Output Format
 
