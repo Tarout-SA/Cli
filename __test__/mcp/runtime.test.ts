@@ -1,3 +1,5 @@
+import { TRPCClientError } from "@trpc/client";
+import type { AnyRouter } from "@trpc/server";
 import { describe, expect, it, vi } from "vitest";
 import {
 	AuthError,
@@ -89,6 +91,17 @@ describe("toEnvelope", () => {
 		const e = toEnvelope(err);
 		expect(e.code).toBe("FORBIDDEN");
 		expect(e.error).toBe("no slot");
+	});
+
+	it("preserves the server's data.reason in details", () => {
+		const err = Object.assign(new Error("refused"), {
+			data: { code: "FORBIDDEN", reason: "member_read_only" },
+		});
+		const e = toEnvelope(err, "application.create");
+		expect(e.details).toEqual({
+			procedure: "application.create",
+			reason: "member_read_only",
+		});
 	});
 
 	it("falls back to GENERAL_ERROR", () => {
@@ -238,6 +251,216 @@ describe("withAuth", () => {
 		expect(body.remediation).toMatch(/billing_upgrade/);
 		expect(body.details?.entitlementKey).toBe("db.starter.slots");
 		expect(body.details?.remedy?.command).toContain("addon:buy");
+	});
+});
+
+describe("withAuth FORBIDDEN classification", () => {
+	type Body = {
+		code: string;
+		error: string;
+		remediation?: string;
+		details?: {
+			reason?: string;
+			approvalId?: string;
+			procedure?: string;
+			remedy?: { command?: string };
+			entitlementKey?: string;
+		};
+	};
+
+	// A fake client whose one mutation throws `err`, with the catalog query
+	// spied so a test can prove the billing enrichment never ran.
+	function clientThrowing(err: unknown) {
+		const getCatalog = vi.fn(async () => ({ plans: [], addons: [] }));
+		const client = {
+			subscription: { getCatalog: { query: getCatalog } },
+			application: {
+				delete: {
+					mutate: async () => {
+						throw err;
+					},
+				},
+			},
+		};
+		return { client, getCatalog };
+	}
+
+	async function run(err: unknown): Promise<{
+		body: Body;
+		getCatalog: ReturnType<typeof vi.fn>;
+	}> {
+		isLoggedIn.mockReturnValue(true);
+		const { client, getCatalog } = clientThrowing(err);
+		getApiClient.mockReturnValue(client);
+		const r = await withAuth(
+			async (c) => await c.application.delete.mutate(),
+			"application.delete",
+		);
+		expect(r.isError).toBe(true);
+		return { body: JSON.parse(r.content[0].text) as Body, getCatalog };
+	}
+
+	// What the server's errorFormatter sends over HTTP, parsed by the real
+	// tRPC client: `data.reason` sits next to `data.code`.
+	function trpcClientError(
+		message: string,
+		reason: string | null,
+	): TRPCClientError<AnyRouter> {
+		return new TRPCClientError<AnyRouter>(message, {
+			result: {
+				error: {
+					message,
+					code: -32003,
+					data: { code: "FORBIDDEN", httpStatus: 403, reason },
+				},
+			},
+		});
+	}
+
+	const APPROVAL_MESSAGE =
+		'NEEDS_APPROVAL:pa_123abc: The destructive action "application.delete" requires human approval for this API key. An approval request (id: pa_123abc) is now waiting in the Tarout dashboard under Agent > Approvals.';
+
+	function expectNoBilling(body: Body) {
+		expect(body.remediation ?? "").not.toMatch(/billing_upgrade|upgrade|addon/i);
+		expect(body.details?.remedy).toBeUndefined();
+		expect(body.details?.entitlementKey).toBeUndefined();
+	}
+
+	it("maps needs_approval from data.reason to NEEDS_APPROVAL with the approval id", async () => {
+		const { body, getCatalog } = await run(
+			trpcClientError(APPROVAL_MESSAGE, "needs_approval"),
+		);
+		expect(body.code).toBe("NEEDS_APPROVAL");
+		expect(body.details?.reason).toBe("needs_approval");
+		expect(body.details?.approvalId).toBe("pa_123abc");
+		expect(body.details?.procedure).toBe("application.delete");
+		expect(body.remediation).toMatch(/approvals\.get/);
+		expect(body.remediation).toContain('"pa_123abc"');
+		expect(body.remediation).toMatch(/Agent > Approvals/);
+		expect(body.remediation).toMatch(/do NOT retry/i);
+		expect(body.remediation).toMatch(/do not try to approve it yourself/i);
+		expectNoBilling(body);
+		expect(getCatalog).not.toHaveBeenCalled();
+	});
+
+	it("maps needs_approval from the message prefix alone (no data.reason)", async () => {
+		const { body, getCatalog } = await run(
+			Object.assign(new Error(APPROVAL_MESSAGE), {
+				data: { code: "FORBIDDEN" },
+			}),
+		);
+		expect(body.code).toBe("NEEDS_APPROVAL");
+		expect(body.details?.reason).toBe("needs_approval");
+		expect(body.details?.approvalId).toBe("pa_123abc");
+		expectNoBilling(body);
+		expect(getCatalog).not.toHaveBeenCalled();
+	});
+
+	it("reads data.reason from shape.data when data carries only the code", async () => {
+		const { body } = await run(
+			Object.assign(new Error("Refused."), {
+				data: { code: "FORBIDDEN" },
+				shape: { data: { code: "FORBIDDEN", reason: "needs_approval" } },
+			}),
+		);
+		expect(body.code).toBe("NEEDS_APPROVAL");
+		// No prefix to parse: the remediation still names the poll, with a placeholder.
+		expect(body.details?.approvalId).toBeUndefined();
+		expect(body.remediation).toMatch(/approvals\.get/);
+		expectNoBilling(body);
+	});
+
+	it.each([
+		[
+			"insufficient_tier",
+			'AGENT_READ_ONLY: This API key is read-only, so the mutation "application.delete" was refused.',
+			/access tier/i,
+		],
+		[
+			"area_not_allowed",
+			'AGENT_SCOPE: This API key is not allowed to use the "apps" area, so "application.delete" was refused.',
+			/limited to certain areas or projects/i,
+		],
+		[
+			"member_read_only",
+			'Your account has view-only access to this organization, so "application.delete" was refused.',
+			/read-only \(view-only\) member.*owner or admin/i,
+		],
+		[
+			"needs_interactive_session",
+			"This account action requires an interactive signed-in session - an API key cannot change its own access.",
+			/signed-in human session in the Tarout dashboard/i,
+		],
+	])("gives %s its own remediation, not billing", async (reason, message, expected) => {
+		const { body, getCatalog } = await run(trpcClientError(message, reason));
+		expect(body.code).toBe("FORBIDDEN");
+		expect(body.details?.reason).toBe(reason);
+		expect(body.remediation).toMatch(expected);
+		expectNoBilling(body);
+		expect(getCatalog).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		["AGENT_READ_ONLY", "insufficient_tier", /access tier/i],
+		["AGENT_SCOPE", "area_not_allowed", /limited to certain areas/i],
+	])("infers the reason from a bare %s: prefix", async (prefix, reason, expected) => {
+		const { body, getCatalog } = await run(
+			Object.assign(new Error(`${prefix}: This API key was refused.`), {
+				data: { code: "FORBIDDEN" },
+			}),
+		);
+		expect(body.code).toBe("FORBIDDEN");
+		expect(body.details?.reason).toBe(reason);
+		expect(body.remediation).toMatch(expected);
+		expectNoBilling(body);
+		expect(getCatalog).not.toHaveBeenCalled();
+	});
+
+	it("treats an AGENT_GUARDRAIL: refusal as a guardrail, not a plan limit", async () => {
+		const { body, getCatalog } = await run(
+			Object.assign(
+				new Error(
+					"AGENT_GUARDRAIL: This API key already has 20 approvals waiting - ask the user to resolve them before requesting more destructive actions.",
+				),
+				{ data: { code: "FORBIDDEN", reason: null } },
+			),
+		);
+		expect(body.code).toBe("FORBIDDEN");
+		expect(body.remediation).toMatch(/guardrail/i);
+		expectNoBilling(body);
+		expect(getCatalog).not.toHaveBeenCalled();
+	});
+
+	it("gives an unexplained FORBIDDEN a permission remediation, not billing", async () => {
+		const { body, getCatalog } = await run(
+			trpcClientError(
+				"Direct provider credentials are disabled for managed storage. Create a scoped Tarout storage access key instead.",
+				null,
+			),
+		);
+		expect(body.code).toBe("FORBIDDEN");
+		expect(body.details?.reason).toBeUndefined();
+		expect(body.remediation).toMatch(/permission refusal/i);
+		expectNoBilling(body);
+		expect(getCatalog).not.toHaveBeenCalled();
+	});
+
+	it("still routes a Plan limit refusal (reason null) to billing_upgrade", async () => {
+		const { body, getCatalog } = await run(
+			trpcClientError("Plan limit reached for db.starter.slots: 1/1.", null),
+		);
+		expect(body.code).toBe("FORBIDDEN");
+		expect(body.remediation).toMatch(/billing_upgrade/);
+		expect(body.details?.entitlementKey).toBe("db.starter.slots");
+		expect(body.details?.remedy?.command).toContain("addon:buy");
+		expect(getCatalog).toHaveBeenCalledTimes(1);
+	});
+
+	it("maps NEEDS_APPROVAL in toEnvelope itself, for callers outside withAuth", () => {
+		// tools/deploy.ts calls toEnvelope directly on its catch path.
+		const e = toEnvelope(trpcClientError(APPROVAL_MESSAGE, "needs_approval"));
+		expect(e.code).toBe("NEEDS_APPROVAL");
+		expect((e.details as { approvalId?: string }).approvalId).toBe("pa_123abc");
 	});
 });
 

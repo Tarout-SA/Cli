@@ -15,12 +15,15 @@ import {
 } from "../lib/project-auth.js";
 import { withInvocationContext } from "../lib/invocation-context.js";
 import {
+	approvalIdFromMessage,
 	AuthError,
 	BuildFailedError,
 	CliError,
 	DeploymentFailedError,
 	DeploymentTimeoutError,
 	NotFoundError,
+	rejectionReasonFromMessage,
+	rejectionReasonHint,
 } from "../lib/errors.js";
 import { resolveEntitlementRemedy } from "../lib/entitlement-remedy.js";
 import { ExitCode } from "../utils/exit-codes.js";
@@ -230,14 +233,100 @@ export function toEnvelope(err: unknown, procedurePath?: string): Envelope {
 		typeof (err as { data: { code?: unknown } }).data.code === "string"
 	) {
 		const e = err as { message?: string; data: { code: string } };
-		return {
-			error: e.message ?? "tRPC error",
+		const message = e.message ?? "tRPC error";
+		const reason = rejectionReasonOf(err, message);
+		const details: Record<string, unknown> = {};
+		if (procedurePath) details.procedure = procedurePath;
+		if (reason) details.reason = reason;
+		const env: Envelope = {
+			error: message,
 			code: e.data.code,
-			details: procedurePath ? { procedure: procedurePath } : undefined,
+			details: Object.keys(details).length > 0 ? details : undefined,
 		};
+		if (env.code === "FORBIDDEN") applyForbiddenGuidance(env, err, reason);
+		return env;
 	}
 	const message = err instanceof Error ? err.message : String(err);
 	return { error: message, code: "GENERAL_ERROR" };
+}
+
+/**
+ * Why the server refused the call. `data.reason` is the structured answer (the
+ * platform's errorFormatter lifts it from the TRPCError cause; `null` means the
+ * server did not know). Older servers, and paths that build the message by
+ * hand, only carry the message prefix, so that is the fallback.
+ */
+function rejectionReasonOf(err: unknown, message: string): string | undefined {
+	const e = err as {
+		data?: { reason?: unknown } | null;
+		shape?: { data?: { reason?: unknown } | null } | null;
+	};
+	const reason = e.data?.reason ?? e.shape?.data?.reason;
+	if (typeof reason === "string" && reason) return reason;
+	return rejectionReasonFromMessage(message);
+}
+
+/**
+ * Agent guardrail and membership refusals. None of these is fixed by paying,
+ * retrying, or switching credentials, so each names the human step instead.
+ */
+const FORBIDDEN_REASON_REMEDIATION: Record<string, string> = {
+	insufficient_tier:
+		"This API key's access tier does not allow this action. Retrying will not help. Ask the user to raise the key's tier in the Tarout dashboard under Agent > Keys, or to do this action themselves.",
+	area_not_allowed:
+		"This API key is limited to certain areas or projects, and this action is outside them. Retrying will not help. Ask the user to widen the key's allowed areas in the Tarout dashboard under Agent > Keys.",
+	member_read_only:
+		"The signed-in user is a read-only (view-only) member of this organization, so nothing can be created, changed or deleted. Retrying or switching credentials will not help. Ask an organization owner or admin to make this change, or to give the user a role that can.",
+	needs_interactive_session:
+		"This action is deliberately unavailable to API keys and requires a signed-in human session in the Tarout dashboard. Re-authenticating or using a different key will not help; ask the user to do it in the dashboard.",
+};
+
+const GUARDRAIL_REMEDIATION =
+	"An agent guardrail on this API key refused the action; the error message says why. Do not retry with different parameters. Tell the user, who can resolve it in the Tarout dashboard under Agent (for example by clearing waiting approvals).";
+
+const GENERIC_FORBIDDEN_REMEDIATION =
+	"The platform refused this action; this is a permission refusal, not a plan limit. Follow any instruction in the error message. Otherwise do not retry with different parameters or switch credentials: tell the user what was refused so they can grant access or do it themselves.";
+
+/**
+ * Sets the remediation for a FORBIDDEN envelope from what the server said.
+ * Entitlement refusals are left bare: {@link withAuth} fills them in with the
+ * catalog-backed `billing_upgrade` remedy, which needs a network call.
+ */
+function applyForbiddenGuidance(
+	env: Envelope,
+	err: unknown,
+	reason: string | undefined,
+): void {
+	if (reason === "needs_approval") {
+		const details = (env.details ?? {}) as Record<string, unknown>;
+		const approvalId = approvalIdFromMessage(env.error);
+		const idJson = JSON.stringify(approvalId ?? "<approvalId>");
+		env.code = "NEEDS_APPROVAL";
+		if (approvalId) details.approvalId = approvalId;
+		env.details = details;
+		env.remediation =
+			"This action has not failed: it is parked for a human to approve or deny in the Tarout dashboard under Agent > Approvals. Tell the user, then poll the `call` tool with procedure `approvals.get` and input " +
+			`{ "id": ${idJson} } (or \`tarout call approvals.get --input '{"id":${idJson}}'\`). ` +
+			'Status "executed" means it was approved and performed; "denied" or "expired" means it will not run. Do NOT retry the action with different parameters, and do not try to approve it yourself.';
+		return;
+	}
+	if (reason) {
+		env.remediation =
+			FORBIDDEN_REASON_REMEDIATION[reason] ??
+			capitalize(rejectionReasonHint(reason)) ??
+			GENERIC_FORBIDDEN_REMEDIATION;
+		return;
+	}
+	if (/\bAGENT_GUARDRAIL:/.test(env.error)) {
+		env.remediation = GUARDRAIL_REMEDIATION;
+		return;
+	}
+	if (isEntitlementRefusal(err)) return;
+	env.remediation = GENERIC_FORBIDDEN_REMEDIATION;
+}
+
+function capitalize(text: string | undefined): string | undefined {
+	return text ? text.charAt(0).toUpperCase() + text.slice(1) : undefined;
 }
 
 /**
@@ -274,7 +363,7 @@ export async function withAuth(
 				return okResult(result);
 			} catch (err) {
 				const env = toEnvelope(err, procedurePath);
-				if (env.code === "FORBIDDEN") {
+				if (env.code === "FORBIDDEN" && isEntitlementRefusal(err)) {
 					await enrichForbiddenEnvelope(env, err);
 				}
 				return errorResult(env);
@@ -295,10 +384,36 @@ function entitlementKeyFromError(err: unknown): string | undefined {
 }
 
 /**
+ * True only for a plan/entitlement refusal, the one FORBIDDEN that paying
+ * fixes. A server-named reason (approval, key tier, area, read-only member)
+ * or an agent guardrail prefix rules it out. The message signals mirror
+ * commands/deploy.ts::isEntitlementError, kept local for the same reason as
+ * entitlementKeyFromError above.
+ */
+function isEntitlementRefusal(err: unknown): boolean {
+	const message =
+		err && typeof err === "object" && "message" in err
+			? String((err as { message?: unknown }).message ?? "")
+			: "";
+	if (rejectionReasonOf(err, message)) return false;
+	if (/\bAGENT_GUARDRAIL:/.test(message)) return false;
+	const msg = message.toLowerCase();
+	return (
+		msg.includes("plan limit reached") ||
+		msg.includes("entitlement") ||
+		msg.includes("upgrade to add more") ||
+		msg.includes("active subscription") ||
+		msg.includes("free_not_allowed_on_paid_plan")
+	);
+}
+
+/**
  * Best-effort: turn a bare FORBIDDEN entitlement rejection into an actionable
  * remedy (the exact `billing_upgrade`/addon command), the way tools/deploy.ts
- * does. Wrapped so a catalog-fetch or resolver failure never masks the original
- * error — on any failure the envelope is left as the plain FORBIDDEN it was.
+ * does. Only called for {@link isEntitlementRefusal}; a guardrail refusal told
+ * to "upgrade" sends an agent to pay for something no plan unlocks. Wrapped so
+ * a catalog-fetch or resolver failure never masks the original error: on any
+ * failure the envelope is left as the plain FORBIDDEN it was.
  */
 async function enrichForbiddenEnvelope(
 	env: Envelope,

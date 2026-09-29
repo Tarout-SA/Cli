@@ -144,28 +144,62 @@ function describeCredential(credential: CredentialDiagnostic): string {
  */
 const REASON_HINTS: Record<string, string> = {
 	key_revoked:
-		"this API key has been revoked. It will not start working again — ask the user for a new key from https://tarout.sa/dashboard/agent/keys. Do NOT fall back to another stored credential: it may belong to a different organization.",
+		"this API key has been revoked. It will not start working again, so ask the user for a new key from https://tarout.sa/dashboard/agent/keys. Do NOT fall back to another stored credential: it may belong to a different organization.",
 	key_frozen:
-		"agent access is currently paused for this key (the kill switch is on). Nothing is wrong with the key itself — ask the user to re-enable agent access at https://tarout.sa/dashboard/agent, then retry.",
+		"agent access is currently paused for this key (the kill switch is on). Nothing is wrong with the key itself; ask the user to re-enable agent access at https://tarout.sa/dashboard/agent, then retry.",
 	key_expired:
-		"this credential has passed its expiry date. Agent keys created today never expire, so this is an older key — ask the user to issue a new one at https://tarout.sa/dashboard/agent/keys.",
+		"this credential has passed its expiry date. Agent keys created today never expire, so this is an older key. Ask the user to issue a new one at https://tarout.sa/dashboard/agent/keys.",
 	insufficient_tier:
 		"the key is valid but its access tier does not allow this operation. Ask the user to widen the key's tier at https://tarout.sa/dashboard/agent/keys. Retrying will not help.",
 	area_not_allowed:
 		"the key is valid but this part of the platform is outside its allowed areas. Ask the user to widen the key's areas at https://tarout.sa/dashboard/agent/keys. Retrying will not help.",
 	needs_approval:
-		"this action is waiting for human approval — it has not failed. Tell the user to approve it under Agent → Approvals in the dashboard, then poll `tarout call approvals.get` rather than retrying the action.",
+		"this action is waiting for human approval; it has not failed. Tell the user to approve it under Agent > Approvals in the dashboard, then poll `tarout call approvals.get` with the approval id rather than retrying the action. Do not try to approve it yourself.",
 	needs_interactive_session:
 		"this action is deliberately unavailable to API keys and must be done by a signed-in human in the dashboard. Re-authenticating will not help, and neither will a different key.",
 	no_project:
-		"the credential is valid, but its organization has no project for it to work in. Ask the user to create a project in the dashboard, then retry. The key itself is fine — do not replace it.",
+		"the credential is valid, but its organization has no project for it to work in. Ask the user to create a project in the dashboard, then retry. The key itself is fine, so do not replace it.",
 	wrong_host:
 		"this credential was issued by a different Tarout host than the one being called. Check the API URL rather than the key.",
 	not_org_member:
 		"the credential is valid but this account is not an owner of the target organization. Ask the user which organization this work belongs to; do not switch credentials to find one that works.",
 	account_suspended:
 		"the account is suspended, so no credential will work until that is resolved. Ask the user to contact support.",
+	member_read_only:
+		"the credential is valid, but the user is a read-only (view-only) member of this organization and cannot create, change or delete anything. Ask an organization owner or admin to make this change, or to give the user a role that can. Retrying or switching credentials will not help.",
 };
+
+/** The server-named reason's guidance, or undefined when it is not one we know. */
+export function rejectionReasonHint(
+	reason: string | null | undefined,
+): string | undefined {
+	return reason ? REASON_HINTS[reason] : undefined;
+}
+
+/** Reasons where signing in again yields a working credential. */
+const LOGIN_FIXES_REASONS = new Set(["key_revoked", "key_expired"]);
+
+const NO_REAUTH_HINT =
+	"Re-authenticating will not help, and neither will a different credential. A human has to act in the Tarout dashboard; tell the user what the hint says and stop.";
+
+/**
+ * The reason named by the message prefix, for servers and paths that do not
+ * send `data.reason`.
+ */
+export function rejectionReasonFromMessage(
+	message?: string,
+): string | undefined {
+	if (!message) return undefined;
+	if (/\bNEEDS_APPROVAL:/.test(message)) return "needs_approval";
+	if (/\bAGENT_READ_ONLY:/.test(message)) return "insufficient_tier";
+	if (/\bAGENT_SCOPE:/.test(message)) return "area_not_allowed";
+	return undefined;
+}
+
+/** `NEEDS_APPROVAL:<pendingActionId>: ...`: the id runs up to the next colon. */
+export function approvalIdFromMessage(message?: string): string | undefined {
+	return message?.match(/\bNEEDS_APPROVAL:\s*([^:\s]+)\s*:/)?.[1];
+}
 
 /**
  * When a server UNAUTHORIZED lands while a credential IS stored locally, return
@@ -175,24 +209,56 @@ const REASON_HINTS: Record<string, string> = {
  * handles "not logged in").
  *
  * `reason` comes from the server when it knows; without it we fall back to the
- * deliberately-neutral hint.
+ * deliberately-neutral hint. `message` is the server's error text, read only
+ * for the approval id of a parked action.
  */
 export function staleCredentialGuidance(
 	code: string,
 	reason?: string | null,
+	message?: string,
 ): {
 	hint: string;
 	details: {
 		hint: string;
-		nextCommand: string;
+		nextCommand?: string;
 		reason?: string;
+		approvalId?: string;
 		credential?: CredentialDiagnostic;
 	};
 } | null {
 	const reasonHint = reason ? REASON_HINTS[reason] : undefined;
 	const credential = activeCredentialDiagnostic();
 	const credentialSuffix = credential ? ` ${describeCredential(credential)}` : "";
+	if (reasonHint && reason === "needs_approval") {
+		// Logging in again approves nothing, so the next step is the poll, not
+		// `tarout login`.
+		const approvalId = approvalIdFromMessage(message);
+		const idJson = JSON.stringify(approvalId ?? "<approvalId>");
+		return {
+			hint: `${reasonHint}${credentialSuffix}`,
+			details: {
+				hint: "Nothing to re-authenticate: the action is parked for a human to approve or deny in the Tarout dashboard under Agent > Approvals. Poll approvals.get with the approval id until its status is executed, denied or expired. Do not retry the action with different parameters, and do not try to approve it yourself.",
+				nextCommand: `tarout call approvals.get --input '{"id":${idJson}}'`,
+				reason,
+				...(approvalId ? { approvalId } : {}),
+				...(credential ? { credential } : {}),
+			},
+		};
+	}
 	if (reasonHint && reason) {
+		// Only a dead credential is fixed by signing in again. Every other named
+		// reason needs a human in the dashboard, and `tarout login` there just
+		// sends the agent looking for a credential that works.
+		if (!LOGIN_FIXES_REASONS.has(reason)) {
+			return {
+				hint: `${reasonHint}${credentialSuffix}`,
+				details: {
+					hint: NO_REAUTH_HINT,
+					reason,
+					...(credential ? { credential } : {}),
+				},
+			};
+		}
 		return {
 			hint: `${reasonHint}${credentialSuffix}`,
 			details: {
@@ -338,10 +404,14 @@ export function handleError(err: unknown): never {
 			const rawMessage = e.message ?? "Request failed";
 			// A rejected stored credential (vs. no credential) gets an actionable
 			// re-auth hint; exit code stays AUTH_ERROR (3) via mapTrpcErrorCode.
-			// `data.reason` is the server naming WHY when it knows — without it we
+			// `data.reason` is the server naming WHY when it knows; without it we
 			// stay deliberately vague rather than guess (see REASON_HINTS).
-			const stale = staleCredentialGuidance(code, e.data?.reason);
-			const message = stale ? `${rawMessage} — ${stale.hint}` : rawMessage;
+			const stale = staleCredentialGuidance(
+				code,
+				e.data?.reason ?? rejectionReasonFromMessage(rawMessage),
+				rawMessage,
+			);
+			const message = stale ? `${rawMessage}: ${stale.hint}` : rawMessage;
 			if (isJsonMode()) {
 				outputJson(jsonError(code, message, undefined, stale?.details));
 			} else {

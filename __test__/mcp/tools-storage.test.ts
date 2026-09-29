@@ -198,8 +198,13 @@ describe("storage tools", () => {
 		);
 		const r = await invoke("storage_credentials", { bucket: "assets" });
 		expect(r.isError).toBe(true);
-		const body = JSON.parse(r.content[0].text) as { code: string };
+		const body = JSON.parse(r.content[0].text) as {
+			code: string;
+			remediation?: string;
+		};
 		expect(body.code).toBe("FORBIDDEN");
+		// A policy refusal, not a plan limit: paying would not unlock it.
+		expect(body.remediation ?? "").not.toMatch(/billing_upgrade/);
 	});
 
 	it("storage_files lists files (default invocation)", async () => {

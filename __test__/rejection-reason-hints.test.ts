@@ -8,9 +8,11 @@ vi.mock("../src/lib/config.js", () => ({
 	}),
 }));
 
-const { STALE_CREDENTIAL_HINT, staleCredentialGuidance } = await import(
-	"../src/lib/errors"
-);
+const {
+	STALE_CREDENTIAL_HINT,
+	rejectionReasonFromMessage,
+	staleCredentialGuidance,
+} = await import("../src/lib/errors");
 
 /**
  * The CLI must never GUESS why a credential was refused.
@@ -63,6 +65,36 @@ describe("staleCredentialGuidance", () => {
 		expect(guidance?.hint).toMatch(/has not failed/i);
 	});
 
+	it("points a parked approval at the poll, not at `tarout login`", () => {
+		// Logging in again approves nothing; the next step is approvals.get.
+		const guidance = staleCredentialGuidance(
+			"FORBIDDEN",
+			"needs_approval",
+			'NEEDS_APPROVAL:pa_123abc: The destructive action "application.delete" requires human approval for this API key.',
+		);
+		expect(guidance?.details.nextCommand).toBe(
+			`tarout call approvals.get --input '{"id":"pa_123abc"}'`,
+		);
+		expect(guidance?.details.approvalId).toBe("pa_123abc");
+		expect(guidance?.details.reason).toBe("needs_approval");
+		expect(guidance?.details.hint).not.toMatch(/tarout login/);
+		expect(guidance?.details.hint).toMatch(/Agent > Approvals/);
+		expect(guidance?.hint).not.toMatch(/tarout login/);
+	});
+
+	it("still names the poll when the approval id cannot be parsed", () => {
+		const guidance = staleCredentialGuidance("FORBIDDEN", "needs_approval");
+		expect(guidance?.details.nextCommand).toMatch(/^tarout call approvals\.get/);
+		expect(guidance?.details.approvalId).toBeUndefined();
+	});
+
+	it("tells a read-only member that an owner or admin must act", () => {
+		const guidance = staleCredentialGuidance("FORBIDDEN", "member_read_only");
+		expect(guidance?.hint).toMatch(/read-only/i);
+		expect(guidance?.hint).toMatch(/owner or admin/i);
+		expect(guidance?.details.reason).toBe("member_read_only");
+	});
+
 	it("keeps the do-not-switch-credentials warning on a revoked key", () => {
 		// This is the sentence that prevents the wrong-organization deploy.
 		const guidance = staleCredentialGuidance("UNAUTHORIZED", "key_revoked");
@@ -88,5 +120,52 @@ describe("staleCredentialGuidance", () => {
 
 	it("returns nothing for an unrelated error with no reason", () => {
 		expect(staleCredentialGuidance("NOT_FOUND")).toBeNull();
+	});
+
+	it.each([
+		"insufficient_tier",
+		"area_not_allowed",
+		"member_read_only",
+		"needs_interactive_session",
+		"no_project",
+		"key_frozen",
+		"not_org_member",
+		"account_suspended",
+	])("does not send %s to `tarout login`", (reason) => {
+		// Signing in again fixes none of these; it only sends the agent hunting
+		// for another credential.
+		const guidance = staleCredentialGuidance("FORBIDDEN", reason);
+		expect(guidance?.details.nextCommand).toBeUndefined();
+		expect(guidance?.details.hint).toMatch(/will not help/i);
+		expect(guidance?.details.reason).toBe(reason);
+	});
+
+	it.each(["key_revoked", "key_expired"])(
+		"still points %s at `tarout login`",
+		(reason) => {
+			const guidance = staleCredentialGuidance("UNAUTHORIZED", reason);
+			expect(guidance?.details.nextCommand).toBe("tarout login");
+		},
+	);
+});
+
+describe("rejectionReasonFromMessage", () => {
+	it("reads the reason from the guardrail message prefix", () => {
+		expect(
+			rejectionReasonFromMessage("NEEDS_APPROVAL:pa_1: parked for approval"),
+		).toBe("needs_approval");
+		expect(rejectionReasonFromMessage("AGENT_READ_ONLY: read only key")).toBe(
+			"insufficient_tier",
+		);
+		expect(rejectionReasonFromMessage("AGENT_SCOPE: outside areas")).toBe(
+			"area_not_allowed",
+		);
+	});
+
+	it("names nothing for other messages", () => {
+		expect(rejectionReasonFromMessage("Plan limit reached for apps")).toBe(
+			undefined,
+		);
+		expect(rejectionReasonFromMessage(undefined)).toBe(undefined);
 	});
 });

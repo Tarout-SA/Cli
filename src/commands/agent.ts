@@ -1,10 +1,15 @@
 /**
- * `tarout agent init` — scaffold AI-agent config into the current project.
+ * `tarout agent init`: scaffold AI-agent config into the current project.
  *
  * Local-only (no auth, no network): drops a Tarout instruction block into the
  * agent's memory file (CLAUDE.md / AGENTS.md) and, for Claude, allowlists
  * `Bash(tarout:*)` in `.claude/settings.local.json` so the agent can run the
  * CLI without per-command approval prompts. Mirrors `specific init --agent`.
+ *
+ * `tarout agent setup`: machine-wide. Installs the Tarout skills and registers
+ * the Tarout MCP server in every coding agent found under HOME (hosted OAuth
+ * endpoint by default, the local `tarout-mcp` with --local). No sign-in needed:
+ * the hosted server signs in through the agent's own OAuth flow.
  */
 
 import { resolve } from "node:path";
@@ -131,7 +136,7 @@ export function registerAgentCommands(program: Command): void {
 					// The terminal envelope must be the same `{success, data}` shape
 					// every other command emits and the README documents. This used to
 					// be a bespoke `{type:"result", ok:true, …}`, so an agent that
-					// checked `.success` — as it does for every other Tarout command —
+					// checked `.success` (as it does for every other Tarout command)
 					// read a successful scaffold as a failure.
 					outputData({
 						agent: result.agent,
@@ -147,7 +152,7 @@ export function registerAgentCommands(program: Command): void {
 					result.files.map((file) => {
 						const label = `${colors.bold(file.action)} ${file.path}`;
 						return file.reason
-							? `${label} — ${colors.dim(file.reason)}`
+							? `${label} (${colors.dim(file.reason)})`
 							: label;
 					}),
 				);
