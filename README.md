@@ -42,7 +42,9 @@ tarout deploy --wait --source upload
 **Cloned a repo that already deploys to Tarout?** Its `.tarout/` folder arrives
 with only a `.gitignore`, because your login is not committed. Run `tarout login`
 (or straight `tarout deploy`, which signs you in and asks which app to deploy
-to). In CI, set `TAROUT_TOKEN` to a key from
+to). On a machine with no browser, such as a server over SSH, run
+`tarout login --device` and approve its one-time code from any browser. In CI,
+set `TAROUT_TOKEN` to a key from
 <https://tarout.sa/dashboard/agent/keys>. To commit the login instead, see
 [Sharing one login through git](#sharing-one-login-through-git).
 
@@ -63,9 +65,10 @@ tarout call deployment.all --input '{"applicationId":"app_123"}'
 Cursor, Claude Desktop) the CLI's capabilities as first-class tools:
 deploy from the current directory, sync `.env`, run SQL against Postgres,
 schedule cron tasks (`job_*`), run a command in an app's container
-(`app_exec`), explain what a deploy would build (`app_explain_build`), check
-parked approval requests
-(`approvals_*`), map a project in one read (`agent_manifest`), switch
+(`app_exec`), explain what a deploy would build (`app_explain_build`), deploy
+a ready-made app from a template (`template_*`), check parked approval requests
+(`approvals_*`), map a project in one read (`agent_manifest`), read the agent
+activity timeline and credentials (`agent_events`, `agent_sessions`), switch
 org/project/env, upgrade billing, and more, with a
 `call` escape hatch covering the entire platform API.
 
@@ -107,6 +110,41 @@ scheduled job count, plus the project's databases, buckets and domains.
 `--json` prints the full manifest in the standard envelope. Unlike the rest of
 `tarout agent`, it needs you signed in. The MCP server exposes the same read as
 the `agent_manifest` tool (`{ projectId? }`).
+
+### Agent credentials and activity: `tarout agent sessions` / `tarout agent events`
+
+```bash
+tarout agent sessions                  # OAuth connections and API keys
+tarout agent events                    # the 30 most recent agent actions
+tarout agent events --since 1h         # everything in the last hour (up to 500)
+tarout agent events --follow           # keep printing new ones (Ctrl+C stops)
+tarout agent events --follow --json | jq .procedure
+```
+
+`sessions` lists this account's agent credentials in the organization, in two
+groups: OAuth connections (hosted MCP connectors: client, tier, status,
+created, last used, expires) and API keys (name, prefix, tier, status, last
+used). Status is `active`, `paused` (agent access switched off) or `expired`.
+The key itself is never shown. Revoking or pausing is done by a human in the
+dashboard (Agent > Keys, <https://tarout.sa/dashboard/agent>); this command
+deliberately does not.
+
+`events` is the timeline the dashboard's Agent page shows: every change an
+agent made through the CLI or MCP (reads are not recorded), with the time, the
+key or OAuth client that acted, the procedure, the surface (`cli` or `mcp`),
+ok or error, and the error. Rows print oldest first. `--limit` takes 1 to 500
+(default 30, or 500 with `--since`); `--since` takes `15m`, `2h`, `7d` or
+`1h30m`. `--follow` polls every 3 seconds, prints only rows it has not printed
+before, and exits 0 on Ctrl+C. `--json` prints one envelope, or with `--follow`
+one JSON object per event per line (NDJSON, `"type": "agent_event"`).
+
+Both are organization-level: they need you signed in but no project. When the
+platform refuses a read (an organization agent-policy rule, for example), they
+exit `5` with `PERMISSION_DENIED` and the dashboard link rather than a stack
+trace. The MCP server exposes the same reads as `agent_events`
+(`{ limit?, since? }`, up to 100 rows) and `agent_sessions`. `agent_sessions`
+exists because `user.listApiKeys` was already reachable over MCP through the
+platform surface and `call`; it adds no new access.
 
 ### No install: the hosted connector
 
@@ -179,6 +217,7 @@ install the CLI + register the server in one shot.
 |---------|-------------|
 | `tarout login` | Authenticate via browser; writes this project's `.tarout/auth.json` |
 | `tarout login --token <key>` | Same, headless, with no browser |
+| `tarout login --device` | Sign in from a host with no browser (SSH, a container): approve the printed one-time code in any browser |
 | `tarout login --commit-token` | Commit this project's `.tarout/auth.json` with the repo ([details](#sharing-one-login-through-git)); `--no-commit-token` undoes it |
 | `tarout register` | Create a new account via browser |
 | `tarout token <key>` | Alias for `login --token` |
@@ -194,6 +233,10 @@ tarout login --api-url https://staging.tarout.sa
 
 # Store the credential machine-wide instead of in this project
 tarout login --global
+
+# On a server over SSH or in a container: open the printed URL on any device,
+# enter the code, and approve it (only approve a code you started yourself)
+tarout login --device
 
 # Ignore this project's credential for a single command
 tarout whoami --global-auth
@@ -402,6 +445,38 @@ seconds (default 120, max 600; run it again to pick up the same inspection).
 allows 10 explanations a minute per user. The MCP tool `app_explain_build`
 does the same.
 
+### Templates
+
+Deploy a ready-made app (an image, its port, the environment variables it
+reads, and a managed PostgreSQL database when it needs one) into the active
+project with one command.
+
+| Command | Description |
+|---------|-------------|
+| `tarout template list` | List the templates: code, name, category, and whether it creates a Postgres database |
+| `tarout template info <code>` | Image, port, database, docs link, and every variable: required, secret, generated or defaulted |
+| `tarout template deploy <code>` | Create the app, its database if any, fill the variables, and start the first deployment |
+
+```bash
+tarout template list
+tarout template info <code>
+tarout template deploy <code> --env ADMIN_EMAIL=me@example.com --yes --wait
+```
+
+`deploy` takes `--name <name>`, a repeatable `--env KEY=VALUE`, and `--wait`
+(follow the first deployment and stream its logs, like `tarout deploy --wait`).
+`--env` keys are checked against the template first: an unknown key exits `2`
+before anything is created. A required variable you leave out is asked for
+(masked when secret); with `--json` or `--non-interactive` it is a
+`needs_input` event naming the `--env` flag to add (exit `6`). A template that
+creates a managed PostgreSQL database asks before it does, since that can add
+a charge to your plan; `--yes` skips the question. Variables the platform
+generates are listed by name only and never printed: read one with
+`tarout env reveal <app> <KEY>`. An operator-tier API key may get
+`NEEDS_APPROVAL` (wait with `tarout approvals wait <id>`), and a plan limit
+gets the usual upgrade options. The MCP tools `template_list`,
+`template_info` and `template_deploy` do the same.
+
 ### Databases
 
 | Command | Description |
@@ -554,6 +629,7 @@ with `--help` for its subcommands and flags):
 | `tarout db` | Manage databases |
 | `tarout domains` | Manage domains and DNS |
 | `tarout storage` | Manage cloud storage buckets |
+| `tarout template` | Deploy ready-made apps from templates (`list`, `info`, `deploy`) |
 | `tarout servers` | Manage cloud servers (VMs) |
 | `tarout backups` | Manage database backup configurations |
 | `tarout destinations` | Manage backup storage destinations |
@@ -580,7 +656,7 @@ with `--help` for its subcommands and flags):
 | `tarout upgrade` | Upgrade the CLI to the latest published version |
 | `tarout queues` | Background job queues (platform operators only) |
 | `tarout call` | Call any platform procedure directly (see above) |
-| `tarout agent` | Set up coding agents: `setup` (skills + MCP, machine-wide), `init` (per project), `connect`; `manifest` maps the project in one read |
+| `tarout agent` | Set up coding agents: `setup` (skills + MCP, machine-wide), `init` (per project), `connect`; `manifest` maps the project in one read; `sessions` lists agent credentials; `events` shows (or `--follow`s) what agents did |
 
 ## Global Flags
 

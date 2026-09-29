@@ -1,7 +1,10 @@
 import type { Command } from "commander";
 import { resolveActiveProject } from "../lib/active-project.js";
 import { resolveProfileFromCredential } from "../lib/auth-profile.js";
-import { startCliBrowserAuth } from "../lib/auth-server.js";
+import {
+	type AuthCallbackData,
+	startCliBrowserAuth,
+} from "../lib/auth-server.js";
 import { normalizeApiUrl } from "../lib/api-url.js";
 import { canLaunchBrowser, openInBrowser } from "../lib/browser.js";
 import {
@@ -28,6 +31,14 @@ import {
 	setProjectTokenCommitted,
 } from "../lib/project-auth.js";
 import { persistProfile } from "../lib/credential-store.js";
+import {
+	DEVICE_LOGIN_COMMAND,
+	type DeviceAuthorizationResult,
+	type DeviceCode,
+	deviceClientName,
+	requestDeviceCode,
+	waitForDeviceAuthorization,
+} from "../lib/device-auth.js";
 import type { Profile } from "../lib/config.js";
 import { AuthError, CliError, handleError } from "../lib/errors.js";
 import {
@@ -39,21 +50,27 @@ import {
 	log,
 	outputData,
 	outputJsonLine,
+	quietOutput,
 	success,
 	warn,
 } from "../lib/output.js";
 import { stringifyJson } from "../utils/json.js";
 import { ExitCode } from "../utils/exit-codes.js";
 import { input, promptOrEmit } from "../utils/prompts.js";
-import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
+import {
+	failSpinner,
+	startSpinner,
+	stopSpinner,
+	succeedSpinner,
+} from "../utils/spinner.js";
 
 /**
  * Browser auth (`tarout login`, `tarout register`) runs on the user's machine,
- * so we always open the browser and wait on the local callback — even under
+ * so we always open the browser and wait on the local callback, even under
  * `--json`/agent mode (the CLI is driven locally, so a browser is reachable).
  * This just adds visibility: in `--json` it emits the auth URL as a structured
  * event so the agent can show it to the user; on a genuinely headless host it
- * points at the API-token fallback. It never refuses.
+ * points at `--device` and the API-token fallback. It never refuses.
  */
 export function announceAuthUrl(
 	authUrl: string,
@@ -73,7 +90,7 @@ export function announceAuthUrl(
 	if (!canLaunchBrowser()) {
 		log(
 			colors.dim(
-				"On a remote/headless host? Run `tarout login --token <api-token>` instead — create one at https://tarout.sa/dashboard/agent/keys.",
+				"On a remote/headless host? Run `tarout login --device` to approve a one-time code from any browser, or `tarout login --token <api-token>` with a key from https://tarout.sa/dashboard/agent/keys.",
 			),
 		);
 	}
@@ -273,10 +290,15 @@ export async function performLogout(
 
 /**
  * Credential sources minted by a browser sign-in. Those CLI keys expire after
- * 30 days (the platform's `/api/cli/exchange`), so a committed copy signs the
+ * 30 days (the platform's `/api/cli/exchange`, and the device flow's token
+ * endpoint, which returns the same credential), so a committed copy signs the
  * whole team out at once. Dashboard keys never expire unless asked to.
  */
-const EXPIRING_CREDENTIAL_SOURCES = new Set(["login", "register"]);
+const EXPIRING_CREDENTIAL_SOURCES = new Set([
+	"login",
+	"login --device",
+	"register",
+]);
 
 /** The "Credential:" line of the account box. */
 function credentialLine(
@@ -559,14 +581,243 @@ export function buildProjectKeyMetadata(scope: {
 	};
 }
 
+/** Credential source recorded for `tarout login --device`. */
+const DEVICE_LOGIN_SOURCE = "login --device";
+
+/**
+ * Store and report a credential minted by a browser sign-in. The loopback
+ * callback (`tarout login`) and the device code flow (`tarout login --device`)
+ * both end here, so they resolve, place, and report the credential the same
+ * way: this project's `.tarout/auth.json` unless the user asked for
+ * machine-wide or the working directory is not a project at all.
+ */
+async function completeBrowserLogin(
+	authData: AuthCallbackData,
+	context: {
+		apiUrl: string;
+		placement: CredentialPlacement;
+		commitToken: boolean | undefined;
+		source: string;
+	},
+): Promise<void> {
+	const { apiUrl, placement, commitToken, source } = context;
+	const fallbackProfile = {
+		token: authData.token,
+		apiUrl,
+		userId: authData.userId,
+		userEmail: authData.userEmail,
+		userName: authData.userName,
+		organizationId: authData.organizationId,
+		organizationName: authData.organizationName,
+		projectId: authData.projectId,
+		projectName: authData.projectName,
+		projectSlug: authData.projectSlug,
+	};
+	const profile = await resolveProfileFromCredential({
+		token: authData.token,
+		apiUrl,
+		fallback: fallbackProfile,
+	}).catch(() => fallbackProfile);
+	const credentialPath = persistProfile(profile, placement, source);
+	const commitOutcome =
+		commitToken !== undefined && placement.projectDir
+			? applyTokenCommitChoice(placement.projectDir, commitToken, {
+					...profile,
+					source,
+				})
+			: undefined;
+	const tokenCommitted = placement.projectDir
+		? isProjectTokenCommitted(placement.projectDir)
+		: undefined;
+
+	if (isJsonMode()) {
+		outputData({
+			success: true,
+			scope: placement.scope,
+			credentialPath,
+			tokenCommitted,
+			...(commitOutcome ? { warnings: commitOutcome.warnings } : {}),
+			scopeFallbackReason: placement.fallbackReason,
+			user: {
+				id: authData.userId,
+				email: authData.userEmail,
+				name: authData.userName,
+			},
+			organization: {
+				id: authData.organizationId,
+				name: authData.organizationName,
+			},
+			project: {
+				id: profile.projectId,
+				name: profile.projectName,
+				slug: profile.projectSlug,
+			},
+		});
+		return;
+	}
+
+	log("");
+	if (placement.fallbackReason) warn(placement.fallbackReason);
+	success(`CLI authorized as ${colors.cyan(authData.userEmail)}`);
+	// Login binds the account and organization only, so there may be no
+	// project yet. Omit the line rather than print "undefined".
+	const activeProjectName = profile.projectName || authData.projectName;
+	box("Account", [
+		`Organization: ${colors.bold(authData.organizationName)}`,
+		...(activeProjectName ? [`Project: ${colors.bold(activeProjectName)}`] : []),
+		credentialLine(credentialPath, tokenCommitted),
+	]);
+	if (commitOutcome) reportTokenCommitChoice(commitOutcome);
+	else if (placement.scope === "project") logTokenGitHint(tokenCommitted);
+
+	// Login binds the account and organization; pick a project now so the next
+	// command doesn't stop to ask. Skippable, and a failure here must not undo
+	// a login that already succeeded. Interactive only: in a non-TTY the picker
+	// would emit needs_input and exit 6, failing a login that worked.
+	if (!profile.projectId && !isNonInteractiveMode()) {
+		await resolveActiveProject().catch(() => null);
+	}
+}
+
+/**
+ * Show the one-time code. Under `--json` this is a single `device_code` event
+ * line, printed before anything else happens, so an agent can relay the URL
+ * and code to its user while the CLI keeps polling. The secret `device_code`
+ * is never printed.
+ */
+export function announceDeviceCode(code: DeviceCode): void {
+	if (isJsonMode()) {
+		outputJsonLine({
+			type: "event",
+			event: "device_code",
+			user_code: code.userCode,
+			verification_uri: code.verificationUri,
+			verification_uri_complete: code.verificationUriComplete,
+			expires_in: code.expiresIn,
+		});
+		return;
+	}
+	// `box` is silent under --quiet, and without the code nobody can finish.
+	quietOutput(`${code.verificationUri} ${code.userCode}`);
+	const minutes = Math.max(1, Math.round(code.expiresIn / 60));
+	box("Sign in from any browser", [
+		`1. Open ${colors.cyan(code.verificationUri)}`,
+		`2. Enter the code ${colors.bold(code.userCode)}`,
+		"",
+		colors.warn("Only approve a code you started yourself."),
+		colors.dim(
+			`The code expires in ${minutes} minute${minutes === 1 ? "" : "s"}.`,
+		),
+	]);
+}
+
+/**
+ * `tarout login --device`: request a one-time code, show it, and poll until a
+ * human approves it in any browser. Ctrl+C only flips a flag and wakes the
+ * current sleep (the `approvals wait` pattern), so the loop ends cleanly and
+ * nothing is saved.
+ */
+async function loginWithDeviceCode(
+	apiUrl: string,
+	placement: CredentialPlacement,
+	commitToken: boolean | undefined,
+): Promise<void> {
+	const code = await requestDeviceCode(apiUrl, {
+		clientName: deviceClientName(),
+	});
+	announceDeviceCode(code);
+	// Opens only when a browser is reachable, never throws, and prints nothing
+	// under --json (the event above already carries the link).
+	await openInBrowser(code.verificationUriComplete, {
+		hint:
+			code.verificationUriComplete === code.verificationUri
+				? "Open this link to continue:"
+				: "Or open this link, which fills in the code for you:",
+	});
+
+	let interrupted = false;
+	let wake: (() => void) | undefined;
+	const onSigint = () => {
+		interrupted = true;
+		wake?.();
+	};
+	const sleep = (ms: number) =>
+		new Promise<void>((resolve) => {
+			const timer = setTimeout(() => {
+				wake = undefined;
+				resolve();
+			}, ms);
+			wake = () => {
+				clearTimeout(timer);
+				wake = undefined;
+				resolve();
+			};
+		});
+
+	let result: DeviceAuthorizationResult;
+	startSpinner("Waiting for the code to be approved... (Ctrl+C to cancel)");
+	process.once("SIGINT", onSigint);
+	try {
+		result = await waitForDeviceAuthorization(apiUrl, code, {
+			sleep,
+			isInterrupted: () => interrupted,
+		});
+	} catch (err) {
+		failSpinner("Device login failed");
+		throw err;
+	} finally {
+		process.removeListener("SIGINT", onSigint);
+	}
+
+	switch (result.outcome) {
+		case "authorized":
+			succeedSpinner("CLI authorized.");
+			await completeBrowserLogin(result.authData, {
+				apiUrl,
+				placement,
+				commitToken,
+				source: DEVICE_LOGIN_SOURCE,
+			});
+			return;
+		case "denied":
+			failSpinner("Sign-in denied");
+			throw new CliError(
+				`The sign-in request for code ${code.userCode} was denied in the browser, so nothing was saved. To try again, run \`${DEVICE_LOGIN_COMMAND}\`.`,
+				ExitCode.AUTH_ERROR,
+				undefined,
+				{ reason: "access_denied", nextCommand: DEVICE_LOGIN_COMMAND },
+			);
+		case "expired":
+			failSpinner("Code expired");
+			throw new CliError(
+				`The code ${code.userCode} expired before anyone approved it, so nothing was saved. Run \`${DEVICE_LOGIN_COMMAND}\` again for a new code.`,
+				ExitCode.AUTH_ERROR,
+				undefined,
+				{ reason: "expired_token", nextCommand: DEVICE_LOGIN_COMMAND },
+			);
+		case "interrupted":
+			stopSpinner();
+			throw new CliError(
+				`Login cancelled, so nothing was saved. Run \`${DEVICE_LOGIN_COMMAND}\` to start again.`,
+				ExitCode.AUTH_ERROR,
+				undefined,
+				{ reason: "interrupted", nextCommand: DEVICE_LOGIN_COMMAND },
+			);
+	}
+}
+
 export function registerAuthCommands(program: Command) {
 	// Login command
 	program
 		.command("login")
 		.description(
-			"Authenticate with Tarout via browser, or headlessly with --token",
+			"Authenticate with Tarout via browser, with a one-time code (--device), or headlessly with --token",
 		)
 		.option("--api-url <url>", "Custom API URL", "https://tarout.sa")
+		.option(
+			"--device",
+			"Sign in with a one-time code approved in any browser, for hosts without one (SSH, containers)",
+		)
 		.option(
 			"--token <api-token>",
 			"Authenticate with an existing API key instead of opening the browser (for headless/CI). Create one at /dashboard/agent/keys",
@@ -592,6 +843,12 @@ export function registerAuthCommands(program: Command) {
 				if (options.local && options.global) {
 					throw new CliError(
 						"Pass either --local or --global, not both.",
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+				if (options.token && options.device) {
+					throw new CliError(
+						"Pass either --token or --device, not both.",
 						ExitCode.INVALID_ARGUMENTS,
 					);
 				}
@@ -682,6 +939,15 @@ export function registerAuthCommands(program: Command) {
 
 				const apiUrl = options.apiUrl;
 				warnIfUntrustedHost(apiUrl);
+
+				// No browser needed here: a human approves a one-time code in any
+				// browser, and the credential lands exactly where the loopback
+				// flow below would put it.
+				if (options.device) {
+					await loginWithDeviceCode(apiUrl, placement, commitToken);
+					return;
+				}
+
 				log("");
 				log("Opening browser to authenticate...");
 
@@ -706,91 +972,12 @@ export function registerAuthCommands(program: Command) {
 					succeedSpinner("CLI authorized.");
 					authServer.close();
 
-					// Save profile
-					const fallbackProfile = {
-						token: authData.token,
+					await completeBrowserLogin(authData, {
 						apiUrl,
-						userId: authData.userId,
-						userEmail: authData.userEmail,
-						userName: authData.userName,
-						organizationId: authData.organizationId,
-						organizationName: authData.organizationName,
-						projectId: authData.projectId,
-						projectName: authData.projectName,
-						projectSlug: authData.projectSlug,
-					};
-					const profile = await resolveProfileFromCredential({
-						token: authData.token,
-						apiUrl,
-						fallback: fallbackProfile,
-					}).catch(() => fallbackProfile);
-					// Browser login lands in the same place a token login would: this
-					// project, unless the user asked for machine-wide or the working
-					// directory is not a project at all.
-					const credentialPath = persistProfile(profile, placement, "login");
-					const commitOutcome =
-						commitToken !== undefined && placement.projectDir
-							? applyTokenCommitChoice(placement.projectDir, commitToken, {
-									...profile,
-									source: "login",
-								})
-							: undefined;
-					const tokenCommitted = placement.projectDir
-						? isProjectTokenCommitted(placement.projectDir)
-						: undefined;
-
-					if (isJsonMode()) {
-						outputData({
-							success: true,
-							scope: placement.scope,
-							credentialPath,
-							tokenCommitted,
-							...(commitOutcome ? { warnings: commitOutcome.warnings } : {}),
-							scopeFallbackReason: placement.fallbackReason,
-							user: {
-								id: authData.userId,
-								email: authData.userEmail,
-								name: authData.userName,
-							},
-							organization: {
-								id: authData.organizationId,
-								name: authData.organizationName,
-							},
-							project: {
-								id: profile.projectId,
-								name: profile.projectName,
-								slug: profile.projectSlug,
-							},
-						});
-					} else {
-						log("");
-						if (placement.fallbackReason) warn(placement.fallbackReason);
-						success(`CLI authorized as ${colors.cyan(authData.userEmail)}`);
-						// Login binds the account and organization only, so there may be
-						// no project yet — omit the line rather than print "undefined".
-						const activeProjectName =
-							profile.projectName || authData.projectName;
-						box("Account", [
-							`Organization: ${colors.bold(authData.organizationName)}`,
-							...(activeProjectName
-								? [`Project: ${colors.bold(activeProjectName)}`]
-								: []),
-							credentialLine(credentialPath, tokenCommitted),
-						]);
-						if (commitOutcome) reportTokenCommitChoice(commitOutcome);
-						else if (placement.scope === "project") {
-							logTokenGitHint(tokenCommitted);
-						}
-
-						// Login binds the account and organization; pick a project now
-						// so the next command doesn't stop to ask. Skippable, and a
-						// failure here must not undo a login that already succeeded.
-						// Interactive only: in a non-TTY the picker would emit
-						// needs_input and exit 6, failing a login that worked.
-						if (!profile.projectId && !isNonInteractiveMode()) {
-							await resolveActiveProject().catch(() => null);
-						}
-					}
+						placement,
+						commitToken,
+						source: "login",
+					});
 				} catch (err) {
 					failSpinner("Authentication failed");
 					authServer.close();

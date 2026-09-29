@@ -105,7 +105,7 @@ const NETWORK_FAILURE_CODES = new Set([
 	"UND_ERR_CONNECT_TIMEOUT",
 ]);
 
-function isNetworkFailure(error: unknown): boolean {
+export function isNetworkFailure(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
 	const code = (error as { cause?: { code?: string } }).cause?.code;
 	return error.message === "fetch failed" || (!!code && NETWORK_FAILURE_CODES.has(code));

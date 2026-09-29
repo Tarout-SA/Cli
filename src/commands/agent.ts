@@ -11,13 +11,29 @@
  * endpoint by default, the local `tarout-mcp` with --local). No sign-in needed:
  * the hosted server signs in through the agent's own OAuth flow.
  *
- * `tarout agent manifest`: the one command here that reads the account. Prints
- * the active project's apps, databases, buckets and domains in one call, so it
- * takes the normal sign-in and project gates (see `AGENT_GATED_LEAF`).
+ * `tarout agent manifest`: reads the account. Prints the active project's apps,
+ * databases, buckets and domains in one call, so it takes the normal sign-in
+ * and project gates (see `AGENT_GATED_LEAF`).
+ *
+ * `tarout agent sessions` and `tarout agent events`: also read the account, at
+ * the organization level (sign-in gate only, no project). `sessions` lists the
+ * agent credentials (OAuth connections and API keys) without key material;
+ * `events` shows what agents did, and `--follow` tails it. Revoking or pausing
+ * a credential stays a human action in the dashboard, so neither offers it.
  */
 
 import { dirname, resolve } from "node:path";
 import type { Command } from "commander";
+import {
+	type AgentEvent,
+	FOLLOW_INTERVAL_MS,
+	fetchAgentEvents,
+	MAX_EVENTS_LIMIT,
+	parseEventsLimit,
+	parseSinceDuration,
+	resolveEventsLimit,
+	watchAgentEvents,
+} from "../lib/agent-events.js";
 import { connectAgentFromHandoff } from "../lib/agent-handoff.js";
 import {
 	fetchAgentManifest,
@@ -39,27 +55,42 @@ import {
 	scaffoldAgentConfig,
 } from "../lib/agent-scaffold.js";
 import {
+	type AgentSession,
+	type AgentSessionList,
+	listAgentSessions,
+} from "../lib/agent-sessions.js";
+import {
 	AGENT_TARGETS,
 	type AgentTargetId,
 	resolveTargetIds,
 } from "../lib/agent-targets.js";
 import { getApiClient, getRequestProjectId } from "../lib/api.js";
+import { approvalsDashboardUrl } from "../lib/approvals.js";
 import { isLoggedIn } from "../lib/config.js";
-import { AuthError, CliError, handleError } from "../lib/errors.js";
+import {
+	AuthError,
+	CliError,
+	handleError,
+	rejectionReasonHint,
+} from "../lib/errors.js";
 import {
 	box,
 	colors,
 	isJsonMode,
+	isQuietMode,
 	log,
 	outputData,
 	outputError,
 	outputJsonLine,
+	quietOutput,
 	shouldSkipConfirmation,
 	success,
+	table,
 	warn,
 } from "../lib/output.js";
 import { ExitCode, exit } from "../utils/exit-codes.js";
 import { confirm } from "../utils/prompts.js";
+import { startSpinner, stopSpinner, succeedSpinner } from "../utils/spinner.js";
 
 interface AgentInitOptions {
 	agent?: string;
@@ -223,6 +254,189 @@ function renderNextSteps(report: SetupReport): void {
 	log("");
 }
 
+/**
+ * A FORBIDDEN from one of the agent reads (an organization agent-policy deny
+ * rule, or a member without project access), as a readable PERMISSION_DENIED
+ * (exit 5) that names the dashboard page, instead of a bare tRPC error. Returns
+ * undefined for anything that is not a refusal.
+ */
+export function agentReadRefusal(
+	err: unknown,
+	options: { what: string; procedure: string },
+): CliError | undefined {
+	if (!err || typeof err !== "object" || err instanceof CliError) {
+		return undefined;
+	}
+	const e = err as {
+		message?: unknown;
+		data?: { code?: unknown; reason?: unknown } | null;
+		shape?: { data?: { code?: unknown; reason?: unknown } | null } | null;
+	};
+	const code = e.data?.code ?? e.shape?.data?.code;
+	if (code !== "FORBIDDEN") return undefined;
+	const rawMessage =
+		typeof e.message === "string" && e.message.trim()
+			? e.message.trim()
+			: "the platform refused the request";
+	const serverMessage = /[.!?]$/.test(rawMessage)
+		? rawMessage
+		: `${rawMessage}.`;
+	const reasonValue = e.data?.reason ?? e.shape?.data?.reason;
+	const reason =
+		typeof reasonValue === "string" && reasonValue ? reasonValue : undefined;
+	const reasonHint = rejectionReasonHint(reason);
+	const dashboardUrl = approvalsDashboardUrl();
+	return new CliError(
+		`${options.what} is not available to this credential: ${serverMessage} A signed-in human can see it on the Agent page of the dashboard: ${dashboardUrl}`,
+		ExitCode.PERMISSION_DENIED,
+		undefined,
+		{
+			procedure: options.procedure,
+			...(reason ? { reason } : {}),
+			dashboardUrl,
+			hint: reasonHint
+				? `${reasonHint.charAt(0).toUpperCase()}${reasonHint.slice(1)}`
+				: "Retrying or re-authenticating will not help. Tell the user what was refused; they can review agent access in the dashboard.",
+		},
+	);
+}
+
+function formatWhen(value: string | null): string {
+	if (!value) return colors.dim("-");
+	return new Date(value).toLocaleString("en-US", {
+		month: "short",
+		day: "numeric",
+		hour: "2-digit",
+		minute: "2-digit",
+	});
+}
+
+function formatTier(tier: string): string {
+	return tier === "read_only" ? "read-only" : tier;
+}
+
+function formatSessionStatus(session: AgentSession): string {
+	switch (session.status) {
+		case "active":
+			return colors.success("● active");
+		case "paused":
+			return colors.warn("○ paused");
+		default:
+			return colors.dim("○ expired");
+	}
+}
+
+function renderAgentSessions(list: AgentSessionList): void {
+	const total = list.oauthConnections.length + list.keys.length;
+	if (total === 0) {
+		log("");
+		log("No agent credentials for this account in this organization.");
+	}
+	if (list.oauthConnections.length > 0) {
+		log("");
+		log(colors.bold(`OAuth connections (${list.oauthConnections.length})`));
+		table(
+			["CLIENT", "TIER", "STATUS", "CREATED", "LAST USED", "EXPIRES"],
+			list.oauthConnections.map((session) => [
+				session.name,
+				formatTier(session.tier),
+				formatSessionStatus(session),
+				formatWhen(session.createdAt),
+				session.lastUsedAt ? formatWhen(session.lastUsedAt) : colors.dim("never"),
+				session.expiresAt ? formatWhen(session.expiresAt) : colors.dim("never"),
+			]),
+		);
+	}
+	if (list.keys.length > 0) {
+		log("");
+		log(colors.bold(`API keys (${list.keys.length})`));
+		table(
+			["NAME", "PREFIX", "TIER", "STATUS", "LAST USED"],
+			list.keys.map((session) => [
+				session.name,
+				session.prefix ?? colors.dim("-"),
+				formatTier(session.tier),
+				formatSessionStatus(session),
+				session.lastUsedAt ? formatWhen(session.lastUsedAt) : colors.dim("never"),
+			]),
+		);
+	}
+	log("");
+	log(
+		`Revoke or pause any of these in the dashboard (Agent > Keys): ${colors.cyan(list.dashboardUrl)}`,
+	);
+}
+
+const EVENT_COLUMNS = { time: 17, agent: 22, procedure: 36, surface: 8, status: 8 };
+
+function cell(text: string, width: number): string {
+	const clipped = text.length > width - 1 ? `${text.slice(0, width - 2)}…` : text;
+	return clipped.padEnd(width);
+}
+
+function eventErrorSummary(event: AgentEvent): string {
+	if (event.status !== "error") return "";
+	const text = [event.errorCode, event.errorMessage]
+		.filter(Boolean)
+		.join(": ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return "";
+	return text.length > 100 ? `${text.slice(0, 97)}...` : text;
+}
+
+function eventAgentName(event: AgentEvent): string {
+	if (event.keyName) return event.keyName;
+	if (event.apiKeyId) return `key ${event.apiKeyId.slice(0, 8)}`;
+	return "-";
+}
+
+function eventTimeLabel(event: AgentEvent): string {
+	return new Date(event.at).toLocaleString("en-US", {
+		month: "short",
+		day: "numeric",
+		hour: "2-digit",
+		minute: "2-digit",
+		second: "2-digit",
+		hour12: false,
+	});
+}
+
+function printAgentEventsHeader(): void {
+	log(
+		colors.dim(
+			`${"TIME".padEnd(EVENT_COLUMNS.time)}${"AGENT".padEnd(EVENT_COLUMNS.agent)}${"PROCEDURE".padEnd(EVENT_COLUMNS.procedure)}${"SURFACE".padEnd(EVENT_COLUMNS.surface)}${"STATUS".padEnd(EVENT_COLUMNS.status)}ERROR`,
+		),
+	);
+}
+
+/** One line per event; tab-separated plain fields in quiet mode. */
+function printAgentEvents(events: AgentEvent[]): void {
+	for (const event of events) {
+		const error = eventErrorSummary(event);
+		if (isQuietMode()) {
+			quietOutput(
+				[
+					event.at,
+					eventAgentName(event),
+					event.procedure,
+					event.surface,
+					event.status,
+					error,
+				].join("\t"),
+			);
+			continue;
+		}
+		const status =
+			event.status === "error"
+				? colors.error(cell("✗ error", EVENT_COLUMNS.status))
+				: colors.success(cell("✓ ok", EVENT_COLUMNS.status));
+		log(
+			`${colors.dim(cell(eventTimeLabel(event), EVENT_COLUMNS.time))}${cell(eventAgentName(event), EVENT_COLUMNS.agent)}${colors.cyan(cell(event.procedure, EVENT_COLUMNS.procedure))}${cell(event.surface, EVENT_COLUMNS.surface)}${status}${error ? colors.error(error) : ""}`,
+		);
+	}
+}
+
 function parseAgent(value: string | undefined): AgentType {
 	const agent = (value ?? "claude").toLowerCase();
 	if ((AGENT_TYPES as readonly string[]).includes(agent)) {
@@ -237,7 +451,9 @@ function parseAgent(value: string | undefined): AgentType {
 export function registerAgentCommands(program: Command): void {
 	const agent = program
 		.command("agent")
-		.description("Configure coding agents to use the Tarout CLI");
+		.description(
+			"Set up coding agents, and see their credentials and activity",
+		);
 
 	agent
 		.command("connect")
@@ -538,4 +754,174 @@ Examples:
 				handleError(err);
 			}
 		});
+
+	agent
+		.command("sessions")
+		.description(
+			"List the agent credentials of this account in the organization: OAuth connections and API keys (no key material)",
+		)
+		.addHelpText(
+			"after",
+			`
+Shows each OAuth connection (client, tier, status, created, last used,
+expires) and each API key (name, prefix, tier, status, last used). The key
+itself is never shown. Revoking or pausing is done by a human in the
+dashboard (Agent > Keys); this command deliberately does not.
+
+Examples:
+  tarout agent sessions
+  tarout agent sessions --json`,
+		)
+		.action(async () => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				startSpinner("Fetching agent sessions...");
+				const list = await listAgentSessions(client);
+				succeedSpinner();
+				if (isJsonMode()) {
+					outputData(list);
+					return;
+				}
+				renderAgentSessions(list);
+			} catch (err) {
+				stopSpinner();
+				handleError(
+					agentReadRefusal(err, {
+						what: "Listing agent sessions",
+						procedure: "user.listApiKeys",
+					}) ?? err,
+				);
+			}
+		});
+
+	agent
+		.command("events")
+		.description(
+			"Show the agent activity timeline: what the CLI and MCP agents changed, oldest first",
+		)
+		.option(
+			"-n, --limit <n>",
+			`How many recent events, 1 to ${MAX_EVENTS_LIMIT} (default 30, or ${MAX_EVENTS_LIMIT} with --since)`,
+		)
+		.option(
+			"--since <duration>",
+			"Only events newer than this: 15m, 2h, 7d or 1h30m (a bare number is seconds)",
+		)
+		.option(
+			"-f, --follow",
+			`Keep printing new events (polls every ${FOLLOW_INTERVAL_MS / 1000}s; Ctrl+C to stop)`,
+		)
+		.addHelpText(
+			"after",
+			`
+Each row: time, the key or OAuth client that acted, the procedure, the
+surface (cli or mcp), ok or error, and the error. Only changes are recorded,
+not reads. --json prints one envelope; with --follow it prints one JSON
+object per event per line (NDJSON) instead.
+
+Examples:
+  tarout agent events
+  tarout agent events --since 1h
+  tarout agent events --follow
+  tarout agent events --follow --json | jq .procedure`,
+		)
+		.action(
+			async (options: { limit?: string; since?: string; follow?: boolean }) => {
+				let interrupted = false;
+				let wake: (() => void) | undefined;
+				const onSigint = () => {
+					interrupted = true;
+					wake?.();
+				};
+				const sleep = (ms: number) =>
+					new Promise<void>((resolve) => {
+						const timer = setTimeout(() => {
+							wake = undefined;
+							resolve();
+						}, ms);
+						wake = () => {
+							clearTimeout(timer);
+							wake = undefined;
+							resolve();
+						};
+					});
+
+				try {
+					if (!isLoggedIn()) throw new AuthError();
+					const limit = parseEventsLimit(options.limit);
+					const sinceMs =
+						options.since === undefined
+							? undefined
+							: parseSinceDuration(options.since);
+					const client = getApiClient();
+
+					if (options.follow) {
+						if (!isJsonMode()) {
+							log(
+								colors.dim(
+									`Following agent activity (polling every ${FOLLOW_INTERVAL_MS / 1000}s). Press Ctrl+C to stop.`,
+								),
+							);
+							printAgentEventsHeader();
+						}
+						process.once("SIGINT", onSigint);
+						await watchAgentEvents(client, {
+							limit,
+							sinceMs,
+							sleep,
+							isInterrupted: () => interrupted,
+							onEvents: (events) => {
+								if (isJsonMode()) {
+									for (const event of events) {
+										outputJsonLine({ type: "agent_event", ...event });
+									}
+									return;
+								}
+								printAgentEvents(events);
+							},
+						});
+						log(colors.dim("Stopped following agent activity."));
+						return;
+					}
+
+					startSpinner("Fetching agent activity...");
+					const events = await fetchAgentEvents(client, { limit, sinceMs });
+					succeedSpinner();
+					if (isJsonMode()) {
+						outputData({ count: events.length, events });
+						return;
+					}
+					if (events.length === 0) {
+						log("");
+						log(
+							options.since
+								? `No agent activity in the last ${options.since}.`
+								: "No agent activity yet.",
+						);
+						return;
+					}
+					log("");
+					printAgentEventsHeader();
+					printAgentEvents(events);
+					log("");
+					const cap = resolveEventsLimit({ limit, sinceMs });
+					log(
+						colors.dim(
+							`${events.length} event${events.length === 1 ? "" : "s"}, oldest first${events.length >= cap ? ` (the ${cap} most recent)` : ""}. Follow new ones: tarout agent events --follow`,
+						),
+					);
+				} catch (err) {
+					stopSpinner();
+					handleError(
+						agentReadRefusal(err, {
+							what: "Reading the agent activity feed",
+							procedure: "dashboard.getAgentActivity",
+						}) ?? err,
+					);
+				} finally {
+					process.removeListener("SIGINT", onSigint);
+				}
+			},
+		);
 }

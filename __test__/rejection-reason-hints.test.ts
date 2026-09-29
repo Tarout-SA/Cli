@@ -144,6 +144,7 @@ describe("staleCredentialGuidance", () => {
 		"key_frozen",
 		"not_org_member",
 		"account_suspended",
+		"policy_denied",
 	])("does not send %s to `tarout login`", (reason) => {
 		// Signing in again fixes none of these; it only sends the agent hunting
 		// for another credential.

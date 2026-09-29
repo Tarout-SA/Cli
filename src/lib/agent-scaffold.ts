@@ -121,6 +121,8 @@ fails (\`AUTH_ERROR\` / exit 3), fix it with whatever the user gave you:
   ask for a fresh one from https://tarout.sa/dashboard/agent instead of retrying)
 - neither → \`tarout login\` **directly**. It opens a browser on the user's machine and
   waits for sign-in — tell the user to finish in the browser, then continue.
+- no browser on this machine (remote sandbox, SSH, CI runner) → \`tarout login --device --json\`:
+  relay the code and URL from its first line to the user, who approves it in any browser.
 
 Do **not** ask the user to run \`tarout login\` for you, and don't treat it as
 interactive. Deploys (\`tarout up\` / \`tarout deploy\`) also auto-launch this login when

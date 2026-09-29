@@ -161,7 +161,7 @@ export function errorResult(env: Envelope): ToolText {
 }
 
 const AUTH_REMEDIATION =
-	"Run `tarout login --token <api-key>` from the project directory on the machine running this MCP server. That writes ./.tarout/auth.json; start the MCP server from that same directory so it resolves the credential.";
+	"Run `tarout login` from the project directory on the machine running this MCP server (on a machine without a browser, `tarout login --device` and approve the code in any browser, or `tarout login --token <api-key>`). That writes ./.tarout/auth.json; start the MCP server from that same directory so it resolves the credential.";
 
 export function toEnvelope(err: unknown, procedurePath?: string): Envelope {
 	if (err instanceof ProcessExitAttemptedError) {
@@ -285,6 +285,8 @@ const FORBIDDEN_REASON_REMEDIATION: Record<string, string> = {
 		"The signed-in user is a read-only (view-only) member of this organization, so nothing can be created, changed or deleted. Retrying or switching credentials will not help. Ask an organization owner or admin to make this change, or to give the user a role that can.",
 	needs_interactive_session:
 		"This action is deliberately unavailable to API keys and requires a signed-in human session in the Tarout dashboard. Re-authenticating or using a different key will not help; ask the user to do it in the dashboard.",
+	policy_denied:
+		"An agent policy rule set by the organization forbids this action for this key; the message names the rule. Do not retry or look for another credential. Ask the user whether the rule should change (Agent > Policies in the Tarout dashboard).",
 };
 
 const GUARDRAIL_REMEDIATION =

@@ -52,7 +52,11 @@ export function createPkceChallenge(codeVerifier: string): string {
 	return createHash("sha256").update(codeVerifier, "ascii").digest("base64url");
 }
 
-function parseAuthCallbackData(value: unknown): AuthCallbackData {
+/**
+ * Validate the credential body `/api/cli/exchange` returns. The device flow's
+ * `/api/cli/device/token` answers with the same body, so it is checked here too.
+ */
+export function parseAuthCallbackData(value: unknown): AuthCallbackData {
 	if (!value || typeof value !== "object" || Array.isArray(value)) {
 		throw new Error(
 			"Tarout returned an invalid response to the authorization-code exchange.",

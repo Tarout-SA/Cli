@@ -41,14 +41,57 @@ export const AUTH_EXEMPT_LEAF = new Set([
 ]);
 
 /**
- * `agent` subcommands that read the account (`agent manifest`), unlike the rest
- * of the namespace, so they take the normal sign-in and project gates.
+ * Top-level namespaces none of whose subcommands authenticate themselves, so
+ * every one takes the sign-in gate even when its leaf shares a name with an
+ * {@link AUTH_EXEMPT_LEAF} entry: `template deploy` is not the self-authing
+ * top-level `deploy`, and without this it would dead-end on "Not logged in"
+ * instead of opening the browser.
  */
-export const AGENT_GATED_LEAF = new Set(["manifest"]);
+export const AUTH_GATED_NAMESPACE = new Set(["template"]);
+
+/**
+ * `agent` subcommands that read the account (`agent manifest`, `agent
+ * sessions`, `agent events`), unlike the rest of the namespace, so they take
+ * the normal sign-in gate. `manifest` also takes the project gate; the
+ * {@link AGENT_ORG_LEVEL_LEAF} ones do not.
+ */
+export const AGENT_GATED_LEAF = new Set(["manifest", "sessions", "events"]);
+
+/**
+ * Gated `agent` subcommands that read the organization, not a project: agent
+ * credentials and the agent activity feed are organization-wide on the
+ * platform, and a project picker must not stand between an agent and them.
+ * Kept separate from {@link PROJECT_EXEMPT_LEAF}, which matches any ancestor
+ * name and would exempt every command called `events` anywhere.
+ */
+export const AGENT_ORG_LEVEL_LEAF = new Set(["sessions", "events"]);
+
+/**
+ * `template` subcommands that read the platform's template catalog, which is
+ * the same for every project. `template deploy` creates the app in the active
+ * project, so it keeps the project gate. Scoped to the `template` namespace for
+ * the same reason as {@link AGENT_ORG_LEVEL_LEAF}: `apps info` still needs a
+ * project.
+ */
+export const TEMPLATE_CATALOG_LEAF = new Set(["list", "info"]);
+
+/** The command path (leaf first) is a top-level `template` catalog read. */
+function isTemplateCatalogCommand(names: string[]): boolean {
+	return (
+		names.length === 2 &&
+		names[1] === "template" &&
+		TEMPLATE_CATALOG_LEAF.has(names[0] ?? "")
+	);
+}
 
 /** The command path (leaf first) is in the `agent` namespace and not gated. */
 function isExemptAgentCommand(names: string[]): boolean {
 	return names.includes("agent") && !AGENT_GATED_LEAF.has(names[0] ?? "");
+}
+
+/** The command path (leaf first) is an organization-level `agent` read. */
+function isOrgLevelAgentCommand(names: string[]): boolean {
+	return names[1] === "agent" && AGENT_ORG_LEVEL_LEAF.has(names[0] ?? "");
 }
 
 /**
@@ -56,10 +99,12 @@ function isExemptAgentCommand(names: string[]): boolean {
  * Walks the command ancestry so nested commands (and the `agent` namespace at
  * any depth) are classified correctly, and never gates the bare root program.
  *
- * Only the LEAF is checked against the exempt set (unlike
- * `commandRequiresProject`): `agent connect` is exempt through the namespace
- * check (`agent manifest` is not), while a hypothetical `db login` should
- * still authenticate.
+ * The exempt set names TOP-LEVEL commands only (unlike
+ * `commandRequiresProject`): `billing upgrade`, `storage upgrade`, `servers
+ * upgrade`, `domains register` and `keys deploy` share a leaf name with an
+ * exempt command but not its behaviour, and without the depth check they
+ * skipped the sign-in and dead-ended on "Not logged in". `agent connect` is
+ * exempt through the namespace check (`agent manifest` is not).
  */
 export function commandRequiresAuth(
 	actionCommand: Command | undefined,
@@ -75,8 +120,13 @@ export function commandRequiresAuth(
 		names.push(cur.name());
 	}
 	if (isExemptAgentCommand(names)) return false;
+	const namespace = names[names.length - 1];
+	if (names.length > 1 && namespace && AUTH_GATED_NAMESPACE.has(namespace)) {
+		return true;
+	}
 	const leaf = names[0];
-	return Boolean(leaf) && !AUTH_EXEMPT_LEAF.has(leaf);
+	if (!leaf) return false;
+	return !(names.length === 1 && AUTH_EXEMPT_LEAF.has(leaf));
 }
 
 /**
@@ -106,7 +156,7 @@ export const PROJECT_EXEMPT_LEAF = new Set([
  * Whether the about-to-run command needs an active project.
  *
  * Unlike `commandRequiresAuth`, this checks *every* ancestor name against the
- * exempt set, not just the leaf — `projects use` and `billing upgrade` must be
+ * exempt set, not just the leaf: `projects use` and `billing upgrade` must be
  * exempt through their parent. A missing entry fails safe: the server answers
  * "No project selected" instead of acting on the wrong project.
  */
@@ -124,6 +174,8 @@ export function commandRequiresProject(
 		names.push(cur.name());
 	}
 	if (isExemptAgentCommand(names)) return false;
+	if (isOrgLevelAgentCommand(names)) return false;
+	if (isTemplateCatalogCommand(names)) return false;
 	for (const name of names) {
 		if (PROJECT_EXEMPT_LEAF.has(name)) return false;
 	}

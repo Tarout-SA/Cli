@@ -231,7 +231,7 @@ export function registerDeployTools(server: McpServer): void {
 							error: "Not authenticated.",
 							code: "AUTH_ERROR",
 							remediation:
-								"Run `tarout login --token <api-key>` from the project directory on the machine running this MCP server, then restart it from that directory so it picks up ./.tarout/auth.json.",
+								"Run `tarout login` (or `tarout login --device` on a machine without a browser, or `tarout login --token <api-key>`) from the project directory on the machine running this MCP server, then restart it from that directory so it picks up ./.tarout/auth.json.",
 						});
 					}
 					const { getApiClient } = await import("../../lib/api.js");

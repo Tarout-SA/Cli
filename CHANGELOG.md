@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`tarout login --device`.** Signs in from a host with no browser (SSH, a
+  container, a remote dev box). The CLI asks the platform for a one-time code
+  (`/api/cli/device/code`), shows the verification URL and the code with a
+  reminder to only approve a code you started yourself, opens the prefilled
+  link only when a browser is reachable, and polls `/api/cli/device/token`
+  every `interval` seconds (5 more after each `slow_down`) until the code is
+  approved or `expires_in` passes. The credential is stored through the same
+  path as the browser login, so `--global`, `--local` and `--commit-token`
+  behave the same, and it lands in this project's `.tarout/auth.json` by
+  default. `--json` prints one `device_code` event (`user_code`,
+  `verification_uri`, `verification_uri_complete`, `expires_in`) as soon as
+  the code exists, so an agent can relay it, then the usual login envelope. A
+  denied code, an expired code, Ctrl+C, and a server without the device
+  endpoints (which points at `tarout login --token <key>`) all exit 3
+  (`AUTH_ERROR`) with nothing saved. The not-logged-in hint now names
+  `--device` as the preferred sign-in on headless hosts, keeping `--token`
+  for CI.
 - **`tarout agent setup`.** One command installs the `tarout-deploy` and
   `tarout-domains` skills and registers the Tarout MCP server in every coding
   agent found on the machine: Claude Code, Codex, Cursor, VS Code (GitHub
@@ -96,6 +113,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same read with the same polling; `app` defaults to the linked app, and
   `status: "failed"` is a normal result, not a tool error. This brings the
   stdio server to 78 tools.
+- **`tarout agent sessions`.** Lists this account's agent credentials in the
+  organization (the platform's `user.listApiKeys`) in two groups: OAuth
+  connections (keys minted for hosted MCP connectors, prefix `mcp`: client
+  name, tier, status, created, last used, expires) and API keys (name, prefix,
+  tier, status, last used). Status is `active`, `paused` or `expired`. No key
+  material is printed, not even the key's leading characters, in either
+  output mode. The table ends with the dashboard link where a human revokes or
+  pauses a credential; this command offers no revoke. `--json` prints one envelope
+  (`oauthConnections`, `keys`, `dashboardUrl`).
+- **`tarout agent events`.** The agent activity timeline (the platform's
+  `dashboard.getAgentActivity`, scope `agent`: what the CLI and MCP changed,
+  as on the dashboard's Agent page): time, key or OAuth client, procedure,
+  surface, ok or error, and the error. Oldest first. `--limit` 1 to 500
+  (default 30, or 500 with `--since`); `--since 15m|2h|7d|1h30m` pages back
+  client-side, since the platform has no time filter. `--follow` polls every
+  3 seconds, dedupes by id, rescans 30 seconds behind the newest row so a late
+  write is not lost, tolerates two failed polls, and exits 0 on Ctrl+C.
+  `--json` prints one envelope, or with `--follow` one `"type": "agent_event"`
+  object per line (NDJSON). The fetching lives in `lib/agent-events`, whose
+  follow loop hands out batches through one callback so a server-sent stream
+  can replace polling later.
+- Both commands take the sign-in gate but not the project gate (they read the
+  organization). A refusal (an agent-policy deny rule, a member without
+  project access) exits 5 with `PERMISSION_DENIED`, the server's reason and the
+  dashboard link, and an older server without the procedure exits 4.
+- **MCP tools `agent_events`** (`readOnlyHint`, `{ limit?, since? }`, up to 100
+  rows, oldest first) **and `agent_sessions`** (`readOnlyHint`, no input).
+  `agent_sessions` is added because `user.listApiKeys` was already exposed on
+  the platform's MCP surface and reachable through `call`; there is still no
+  revoke or pause tool. This brings the stdio server to 80 tools.
+- **`tarout template list | info | deploy`.** Deploys a ready-made app from
+  the platform's new `template` router. `list` shows code, name, category and
+  whether the template creates a managed PostgreSQL database; `info <code>`
+  shows the image, port, docs link, architectures and every variable
+  (required, secret, and whether it is generated, defaulted, optional or yours
+  to provide). `deploy <code>` creates the app in the active project, its
+  database when the template needs one, fills the variables and starts the
+  first deployment; it takes `--name`, a repeatable `--env KEY=VALUE` (split
+  on the first `=`) and `--wait`, which follows the deployment with the same
+  helper as `tarout deploy --wait`. `--env` keys are checked against the
+  template before anything is created: an unknown key exits 2
+  (`INVALID_ARGUMENTS`, with the allowed keys and a did-you-mean), a malformed
+  or repeated pair exits 2 without calling the API, and a required variable
+  with no default and no generator is asked for on a terminal (masked when
+  secret) or, with `--json` / `--non-interactive`, reported as one
+  `needs_input` event (`field: "env.<KEY>"`, `flag: "--env <KEY>=<value>"`,
+  every missing variable in `context.missing`) with exit 6. A template that
+  creates a database asks first (`confirm_template_database`, skipped with
+  `--yes`). Generated values are never printed: the result names the keys and
+  `tarout env reveal <app> <KEY>`. `--json` prints one envelope (with
+  `nextCommand`); with `--wait` the result is a `template_deployed` event line
+  and the deploy follow prints the final envelope. A parked `NEEDS_APPROVAL`
+  exits 5 with `tarout approvals wait <id>` and a note that the approved
+  result is not returned; a plan limit gets the `NEEDS_UPGRADE` options (or the
+  interactive upgrade chooser), as `db create` does. An older server answers
+  `NOT_FOUND`: "This Tarout server does not support templates yet". `list`
+  and `info` need no active project; all three take the sign-in gate (a
+  leaf-only check would have treated `template deploy` like the self-authenticating
+  top-level `deploy`).
+- **MCP tools `template_list`, `template_info`** (`readOnlyHint`) **and
+  `template_deploy`** (`{ code, name?, env? }`, no hint, like `app_create` and
+  `db_create`). Variables come back with `sensitive` in place of `secret`,
+  because the result sanitizer redacts any field named like a secret, and a
+  secret variable's default is left out. `template_deploy` returns
+  `INVALID_ARGUMENTS` for an unknown key and `NEEDS_INPUT` with
+  `details.missing` for missing required variables before creating anything,
+  and adds `details.afterApproval` to `NEEDS_APPROVAL`. This brings the stdio
+  server to 83 tools.
 
 ### Changed
 

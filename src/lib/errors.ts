@@ -64,13 +64,15 @@ export class CliError extends Error {
 
 /**
  * Agent-facing guidance attached to every AUTH_ERROR. An agent driving the CLI
- * can run `tarout login` ITSELF — it opens a browser on the user's machine and
- * blocks on the local callback until sign-in completes — so the agent should run
+ * can run `tarout login` ITSELF (it opens a browser on the user's machine and
+ * blocks on the local callback until sign-in completes), so the agent should run
  * it directly and tell the user to finish in the browser, NOT hand the command
- * back for the user to type. The token path is only for genuinely headless hosts.
+ * back for the user to type. On a host with no browser, `--device` is preferred:
+ * the agent still runs it, and relays the one-time code for the user to approve
+ * anywhere. The token path is for runs with no human to approve anything.
  */
 export const AGENT_LOGIN_HINT =
-	"Run `tarout login` directly to authenticate — it opens a browser on this machine and waits for the user to sign in, then your command works. Do not ask the user to run it for you, and don't treat it as interactive. On a headless/CI host with no browser, use `tarout login --token <key>` (create one at https://tarout.sa/dashboard/agent/keys).";
+	"Run `tarout login` directly to authenticate: it opens a browser on this machine and waits for the user to sign in, then your command works. Do not ask the user to run it for you, and don't treat it as interactive. On a headless host with no browser (SSH, a container), prefer `tarout login --device`: it prints a URL and a one-time code (under --json, a `device_code` event) and waits while the user approves the code in any browser, so show both to the user. For CI or other runs with no human to approve, use `tarout login --token <key>` (create one at https://tarout.sa/dashboard/agent/keys).";
 
 /**
  * Guidance for the case where a credential IS stored locally but the SERVER
@@ -167,6 +169,8 @@ const REASON_HINTS: Record<string, string> = {
 		"the account is suspended, so no credential will work until that is resolved. Ask the user to contact support.",
 	member_read_only:
 		"the credential is valid, but the user is a read-only (view-only) member of this organization and cannot create, change or delete anything. Ask an organization owner or admin to make this change, or to give the user a role that can. Retrying or switching credentials will not help.",
+	policy_denied:
+		"an agent policy rule set by the organization forbids this action for this key. The message names the rule. Retrying or switching credentials will not help; ask the user whether the rule should change (Agent > Policies in the dashboard).",
 };
 
 /** The server-named reason's guidance, or undefined when it is not one we know. */
