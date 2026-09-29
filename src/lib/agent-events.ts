@@ -19,7 +19,7 @@
  * @module lib/agent-events
  */
 
-import { approvalsDashboardUrl } from "./approvals.js";
+import { agentDashboardUrl } from "./approvals.js";
 import {
 	CliError,
 	InvalidArgumentError,
@@ -179,13 +179,13 @@ export function parseSinceDuration(value: unknown, flag = "--since"): number {
 function readError(err: unknown): unknown {
 	if (!isMissingProcedureError(err)) return err;
 	return new CliError(
-		`This Tarout server has no agent activity feed yet (${PROCEDURE} is missing). The dashboard's Agent page shows it: ${approvalsDashboardUrl()}`,
+		`This Tarout server has no agent activity feed yet (${PROCEDURE} is missing). The dashboard's Agent page shows it: ${agentDashboardUrl()}`,
 		ExitCode.NOT_FOUND,
 		undefined,
 		{
 			procedure: PROCEDURE,
 			reason: "procedure_unavailable",
-			dashboardUrl: approvalsDashboardUrl(),
+			dashboardUrl: agentDashboardUrl(),
 		},
 	);
 }

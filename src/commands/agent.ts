@@ -65,7 +65,7 @@ import {
 	resolveTargetIds,
 } from "../lib/agent-targets.js";
 import { getApiClient, getRequestProjectId } from "../lib/api.js";
-import { approvalsDashboardUrl } from "../lib/approvals.js";
+import { agentDashboardUrl } from "../lib/approvals.js";
 import { isLoggedIn } from "../lib/config.js";
 import {
 	AuthError,
@@ -285,7 +285,7 @@ export function agentReadRefusal(
 	const reason =
 		typeof reasonValue === "string" && reasonValue ? reasonValue : undefined;
 	const reasonHint = rejectionReasonHint(reason);
-	const dashboardUrl = approvalsDashboardUrl();
+	const dashboardUrl = agentDashboardUrl();
 	return new CliError(
 		`${options.what} is not available to this credential: ${serverMessage} A signed-in human can see it on the Agent page of the dashboard: ${dashboardUrl}`,
 		ExitCode.PERMISSION_DENIED,

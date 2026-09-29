@@ -69,8 +69,8 @@ export function isTerminalApprovalStatus(status: string): boolean {
 	return TERMINAL_STATUSES.has(status);
 }
 
-/** Where a human approves or denies requests (the Agent page's approvals card). */
-export function approvalsDashboardUrl(): string {
+/** The dashboard's Agent page (keys, activity, the kill switch). */
+export function agentDashboardUrl(): string {
 	let base = "https://tarout.sa";
 	try {
 		base = getApiUrl();
@@ -79,6 +79,11 @@ export function approvalsDashboardUrl(): string {
 		// still where the dashboard lives.
 	}
 	return `${base.replace(/\/+$/, "")}/dashboard/agent`;
+}
+
+/** Where a human approves or denies requests (Agent > Agent approvals). */
+export function approvalsDashboardUrl(): string {
+	return `${agentDashboardUrl()}/approvals`;
 }
 
 export function parseApprovalStatus(

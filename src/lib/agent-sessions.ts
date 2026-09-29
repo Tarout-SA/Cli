@@ -20,7 +20,7 @@
  * @module lib/agent-sessions
  */
 
-import { approvalsDashboardUrl } from "./approvals.js";
+import { agentDashboardUrl } from "./approvals.js";
 import { CliError, isMissingProcedureError } from "./errors.js";
 import { ExitCode } from "../utils/exit-codes.js";
 
@@ -143,7 +143,7 @@ function missingProcedureError(err: unknown): CliError | undefined {
 		{
 			procedure: "user.listApiKeys",
 			reason: "procedure_unavailable",
-			dashboardUrl: approvalsDashboardUrl(),
+			dashboardUrl: agentDashboardUrl(),
 		},
 	);
 }
@@ -166,6 +166,6 @@ export async function listAgentSessions(
 	return {
 		oauthConnections: sessions.filter((session) => session.kind === "oauth"),
 		keys: sessions.filter((session) => session.kind === "api_key"),
-		dashboardUrl: approvalsDashboardUrl(),
+		dashboardUrl: agentDashboardUrl(),
 	};
 }

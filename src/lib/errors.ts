@@ -156,7 +156,7 @@ const REASON_HINTS: Record<string, string> = {
 	area_not_allowed:
 		"the key is valid but this part of the platform is outside its allowed areas. Ask the user to widen the key's areas at https://tarout.sa/dashboard/agent/keys. Retrying will not help.",
 	needs_approval:
-		"this action is waiting for human approval; it has not failed. Tell the user to approve it under Agent > Approvals in the dashboard, then run `tarout approvals wait <id>` with the approval id rather than retrying the action. Do not try to approve it yourself.",
+		"this action is waiting for human approval; it has not failed. Tell the user to approve it under Agent > Agent approvals in the dashboard (they can also choose 'Always allow' there so this action stops asking), then run `tarout approvals wait <id>` with the approval id rather than retrying the action. Do not try to approve it yourself.",
 	needs_interactive_session:
 		"this action is deliberately unavailable to API keys and must be done by a signed-in human in the dashboard. Re-authenticating will not help, and neither will a different key.",
 	no_project:

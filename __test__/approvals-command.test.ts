@@ -178,7 +178,7 @@ describe("tarout approvals list", () => {
 		expect(text).toContain("✗ denied");
 		expect(text).toContain("3 requests");
 		expect(text).toContain(
-			"Approve or deny pending requests at https://tarout.sa/dashboard/agent",
+			"Approve or deny pending requests at https://tarout.sa/dashboard/agent/approvals",
 		);
 		expect(exitCodes).toEqual([]);
 	});
@@ -250,7 +250,7 @@ describe("tarout approvals get", () => {
 		expect(text).toContain("Requested by:  ci-agent");
 		expect(text).toContain('"applicationId":"app_1"');
 		expect(text).toContain("Expires:");
-		expect(text).toContain("https://tarout.sa/dashboard/agent");
+		expect(text).toContain("https://tarout.sa/dashboard/agent/approvals");
 		expect(text).toContain("tarout approvals wait pa_1");
 	});
 
@@ -332,7 +332,7 @@ describe("tarout approvals wait", () => {
 		const text = out();
 		expect(text).toContain("Waiting up to 30m");
 		expect(text).toContain(
-			"Approve or deny it at https://tarout.sa/dashboard/agent",
+			"Approve or deny it at https://tarout.sa/dashboard/agent/approvals",
 		);
 		expect(text).toContain("Approved and executed: application.delete");
 		expect(text).toContain("Executed successfully");
@@ -366,7 +366,7 @@ describe("tarout approvals wait", () => {
 		expect(env?.error.details).toMatchObject({
 			id: "pa_1",
 			status: "denied",
-			dashboardUrl: "https://tarout.sa/dashboard/agent",
+			dashboardUrl: "https://tarout.sa/dashboard/agent/approvals",
 		});
 	});
 
@@ -418,7 +418,7 @@ describe("tarout approvals wait", () => {
 		expect(env?.error.details).toMatchObject({
 			stillPending: true,
 			nextCommand: "tarout approvals wait pa_1",
-			dashboardUrl: "https://tarout.sa/dashboard/agent",
+			dashboardUrl: "https://tarout.sa/dashboard/agent/approvals",
 		});
 		expect(env?.error.details.interrupted).toBeUndefined();
 	});
@@ -467,7 +467,7 @@ describe("tarout approvals --help", () => {
 		approvals?.outputHelp();
 
 		expect(help).toContain(
-			"a human approves or denies requests in the dashboard (https://tarout.sa/dashboard/agent); an agent cannot approve its own request.",
+			"a human approves or denies requests in the dashboard (https://tarout.sa/dashboard/agent/approvals); an agent cannot approve its own request.",
 		);
 		const names = approvals?.commands.map((c) => c.name());
 		expect(names).toEqual(["list", "get", "wait"]);
