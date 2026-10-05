@@ -150,6 +150,8 @@ export const PROJECT_EXEMPT_LEAF = new Set([
 	"orgs",
 	"billing",
 	"approvals",
+	// Account-level: a referral code belongs to the user, not a project.
+	"referral",
 ]);
 
 /**

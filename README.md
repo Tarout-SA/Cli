@@ -635,6 +635,7 @@ with `--help` for its subcommands and flags):
 | `tarout destinations` | Manage backup storage destinations |
 | `tarout billing` | Manage subscription and billing |
 | `tarout wallet` | Manage AI Gateway wallet balance |
+| `tarout referral` | Your referral code, link and compute-credit earnings (`history` for per-payment credit) |
 | `tarout ai` | Manage AI Gateway models and API keys |
 | `tarout monitor` | Manage uptime monitors for applications |
 | `tarout jobs` | Manage scheduled tasks (cron) for applications |

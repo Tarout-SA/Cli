@@ -7,6 +7,7 @@ import packageJson from "../../package.json" with { type: "json" };
 import { registerAppsTools } from "./tools/apps.js";
 import { registerApprovalsTools } from "./tools/approvals.js";
 import { registerBillingTools } from "./tools/billing.js";
+import { registerReferralTools } from "./tools/referral.js";
 import { registerCallTools } from "./tools/call.js";
 import { registerContextTools } from "./tools/context.js";
 import { registerDbTools } from "./tools/db.js";
@@ -34,6 +35,7 @@ export function createMcpServer(): McpServer {
 	registerStorageTools(server);
 	registerDomainTools(server);
 	registerBillingTools(server);
+	registerReferralTools(server);
 	registerDeployTools(server);
 	registerJobsTools(server);
 	registerApprovalsTools(server);
