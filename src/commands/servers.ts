@@ -25,6 +25,16 @@ import { ExitCode } from "../utils/exit-codes.js";
 import { confirm, input, select } from "../utils/prompts.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
 
+/**
+ * The provider name shown to customers. The platform reports Global GPU
+ * servers as "global"; older platform versions sent the internal supplier id,
+ * which must not be printed either.
+ */
+function displayProvider(providerId: unknown): string {
+	if (typeof providerId !== "string" || !providerId) return "";
+	return providerId === "runpod" ? "global" : providerId;
+}
+
 export function registerServersCommands(program: Command) {
 	const servers = program
 		.command("servers")
@@ -118,7 +128,7 @@ export function registerServersCommands(program: Command) {
 		)
 		.option("-o, --os <os>", `OS: ${SERVER_OS_TYPES.join(", ")}`)
 		.option("--software <software>", "Pre-install software: coolify or dokploy")
-		.option("--provider <provider>", "Cloud provider: gcp, runpod")
+		.option("--provider <provider>", "Cloud provider: gcp or global (Global GPU)")
 		.option(
 			"-k, --key <key...>",
 			"Saved SSH key name(s) or id(s) to install (default: your default keys)",
@@ -415,7 +425,7 @@ export function registerServersCommands(program: Command) {
 				log(`  Size: ${details.serverSize || details.size || colors.dim("-")}`);
 				log(`  OS: ${details.osType || colors.dim("-")}`);
 				log(
-					`  Provider: ${details.providerId || details.provider || colors.dim("-")}`,
+					`  Provider: ${displayProvider(details.providerId || details.provider) || colors.dim("-")}`,
 				);
 				log("");
 				log(colors.bold("Network"));
@@ -1212,7 +1222,7 @@ export function registerServersCommands(program: Command) {
 		.command("sizes")
 		.description("List available server sizes and types")
 		.option("-t, --type <type>", "Filter by type: cpu, gpu, all", "all")
-		.option("--provider <provider>", "Filter by provider: gcp, runpod")
+		.option("--provider <provider>", "Filter by provider: gcp or global")
 		.action(async (options) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
@@ -2428,61 +2438,69 @@ export function registerServersCommands(program: Command) {
 			}
 		});
 
-	servers
-		.command("runpod-images")
-		.description("List available RunPod Docker images")
-		.action(async () => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-				const client = getApiClient();
-				const _spinner = startSpinner("Fetching RunPod images...");
-				const images =
-					await client.virtualMachine.getRunPodDockerImages.query();
-				succeedSpinner();
-				if (isJsonMode()) {
-					outputData(images);
-					return;
-				}
-				const list = Array.isArray(images)
-					? images
-					: (images as any)?.images || [];
-				if (!list.length) {
-					log("\nNo RunPod images found.\n");
-					return;
-				}
-				log("");
-				table(
-					["IMAGE", "TAG"],
-					list.map((i: any) => [i.image || i.name || "-", i.tag || "latest"]),
-				);
-				log("");
-			} catch (err) {
-				handleError(err);
+	// Global GPU images and availability. The old `runpod-*` names stay as
+	// hidden aliases so scripts written against them keep working; the
+	// upstream GPU supplier is never named to customers.
+	const listGpuImages = async () => {
+		try {
+			if (!isLoggedIn()) throw new AuthError();
+			const client = getApiClient();
+			const _spinner = startSpinner("Fetching Global GPU images...");
+			const images = await client.virtualMachine.getRunPodDockerImages.query();
+			succeedSpinner();
+			if (isJsonMode()) {
+				outputData(images);
+				return;
 			}
-		});
+			const list = Array.isArray(images)
+				? images
+				: (images as any)?.images || [];
+			if (!list.length) {
+				log("\nNo Global GPU images found.\n");
+				return;
+			}
+			log("");
+			table(
+				["ID", "NAME", "DESCRIPTION"],
+				list.map((i: any) => [i.id || "-", i.name || "-", i.description || ""]),
+			);
+			log("");
+		} catch (err) {
+			handleError(err);
+		}
+	};
+
+	const checkGpuAvailability = async () => {
+		try {
+			if (!isLoggedIn()) throw new AuthError();
+			const client = getApiClient();
+			const _spinner = startSpinner("Checking Global GPU availability...");
+			const result = await client.virtualMachine.isRunPodAvailable.query();
+			succeedSpinner();
+			if (isJsonMode()) {
+				outputData(result);
+				return;
+			}
+			const available = (result as any)?.available ?? result;
+			log(
+				`\nGlobal GPU: ${available ? colors.success("available") : colors.error("unavailable")}\n`,
+			);
+		} catch (err) {
+			handleError(err);
+		}
+	};
 
 	servers
-		.command("runpod-available")
-		.description("Check if RunPod GPU cloud is available")
-		.action(async () => {
-			try {
-				if (!isLoggedIn()) throw new AuthError();
-				const client = getApiClient();
-				const _spinner = startSpinner("Checking RunPod availability...");
-				const result = await client.virtualMachine.isRunPodAvailable.query();
-				succeedSpinner();
-				if (isJsonMode()) {
-					outputData(result);
-					return;
-				}
-				const available = (result as any)?.available ?? result;
-				log(
-					`\nRunPod: ${available ? colors.success("available") : colors.error("unavailable")}\n`,
-				);
-			} catch (err) {
-				handleError(err);
-			}
-		});
+		.command("gpu-images")
+		.description("List available Global GPU server images")
+		.action(listGpuImages);
+	servers.command("runpod-images", { hidden: true }).action(listGpuImages);
+
+	servers
+		.command("gpu-available")
+		.description("Check whether Global GPU servers can be rented")
+		.action(checkGpuAvailability);
+	servers.command("runpod-available", { hidden: true }).action(checkGpuAvailability);
 
 	servers
 		.command("check-quota")
