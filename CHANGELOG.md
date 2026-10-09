@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.1] - 2026-10-10
+
+### Removed
+
+- `servers info` no longer knows the Modal supplier (`global-session`); the
+  platform removed Modal on 2026-10-10 and never ran a Modal server.
+
 ## [1.15.0] - 2026-10-10
 
 ### Added

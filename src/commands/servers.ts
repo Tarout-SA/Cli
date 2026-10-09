@@ -32,9 +32,7 @@ import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
  */
 function displayProvider(providerId: unknown): string {
 	if (typeof providerId !== "string" || !providerId) return "";
-	if (providerId === "runpod") return "global";
-	if (providerId === "modal") return "global-session";
-	return providerId;
+	return providerId === "runpod" ? "global" : providerId;
 }
 
 export function registerServersCommands(program: Command) {
