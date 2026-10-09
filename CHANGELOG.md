@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`tarout ai ocr <file|url>`.** Reads a PDF, scan or photo with Tarout OCR
+  (`aiGateway.ocrProcess`) into Markdown (`--format md`, default), plain text
+  (`txt`) or the full JSON result (`json`, or the global `--json`). Local files
+  up to 10 MB are sent inline; `--pages 1-3,5` (1-based) limits the pages,
+  `--key` picks the AI Gateway key to bill and `--latin-digits` converts
+  Arabic-Indic digits. Failed pages are reported on stderr and not billed.
+- **MCP tool `ocr_process`.** The same, for agents: a local `path` or a public
+  `url`, optional 0-based `pages`, returns per-page Markdown.
 - **`tarout login --device`.** Signs in from a host with no browser (SSH, a
   container, a remote dev box). The CLI asks the platform for a one-time code
   (`/api/cli/device/code`), shows the verification URL and the code with a

@@ -110,6 +110,8 @@ const EXPECTED_TOOLS = [
 	"template_list",
 	"template_info",
 	"template_deploy",
+	// Tarout OCR
+	"ocr_process",
 ] as const;
 
 const NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -129,7 +131,7 @@ describe("MCP integration — catalog + auth envelope", () => {
 			const names = list.tools.map((t) => t.name).sort();
 			const expected = [...EXPECTED_TOOLS].sort();
 			expect(names).toEqual(expected);
-			expect(names).toHaveLength(83);
+			expect(names).toHaveLength(84);
 			for (const name of names) {
 				expect(name).toMatch(NAME_RE);
 			}

@@ -15,6 +15,7 @@ import { registerDeployTools } from "./tools/deploy.js";
 import { registerDomainTools } from "./tools/domains.js";
 import { registerEnvTools } from "./tools/env.js";
 import { registerJobsTools } from "./tools/jobs.js";
+import { registerOcrTools } from "./tools/ocr.js";
 import { registerStorageTools } from "./tools/storage.js";
 import { registerTemplateTools } from "./tools/templates.js";
 import { guardServerHandlers } from "./runtime.js";
@@ -38,6 +39,7 @@ export function createMcpServer(): McpServer {
 	registerReferralTools(server);
 	registerDeployTools(server);
 	registerJobsTools(server);
+	registerOcrTools(server);
 	registerApprovalsTools(server);
 	registerTemplateTools(server);
 	return server;

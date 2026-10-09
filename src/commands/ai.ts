@@ -17,6 +17,7 @@ import {
 import { ExitCode } from "../utils/exit-codes.js";
 import { confirm, input } from "../utils/prompts.js";
 import { startSpinner, succeedSpinner } from "../utils/spinner.js";
+import { registerAiOcrCommand } from "./ai-ocr.js";
 
 /**
  * AI Gateway key management over the CLI.
@@ -44,7 +45,9 @@ const KEY_MANAGEMENT_DASHBOARD_URL =
 export function registerAiCommands(program: Command) {
 	const ai = program
 		.command("ai")
-		.description("Manage AI Gateway models and API keys");
+		.description("Manage AI Gateway models and API keys, and read documents with OCR");
+
+	registerAiOcrCommand(ai);
 
 	// List available models
 	ai.command("models")
