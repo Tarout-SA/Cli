@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-10-10
+
 ### Added
 
 - **`tarout ai ocr <file|url>`.** Reads a PDF, scan or photo with Tarout OCR
@@ -210,7 +212,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gpu-images` and `tarout servers gpu-available` replace `runpod-images` and
   `runpod-available` (both old names still work, hidden from help). `--provider`
   takes `gcp` or `global` (`runpod` is still accepted), `servers info` prints
-  `Provider: global`, and the image list shows id, name and description.
+  `Provider: global`, and the image list shows id, name and description. The
+  commands call the neutral `virtualMachine.getGpuDockerImages` and
+  `isGlobalGpuAvailable`; Global GPU sizes are now `gpu-container-*` (the old
+  `runpod-*` ids are still accepted by `--size`).
 
 ## [1.14.0] - 2026-09-25
 

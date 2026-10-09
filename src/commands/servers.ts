@@ -32,7 +32,9 @@ import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
  */
 function displayProvider(providerId: unknown): string {
 	if (typeof providerId !== "string" || !providerId) return "";
-	return providerId === "runpod" ? "global" : providerId;
+	if (providerId === "runpod") return "global";
+	if (providerId === "modal") return "global-session";
+	return providerId;
 }
 
 export function registerServersCommands(program: Command) {
@@ -2446,7 +2448,7 @@ export function registerServersCommands(program: Command) {
 			if (!isLoggedIn()) throw new AuthError();
 			const client = getApiClient();
 			const _spinner = startSpinner("Fetching Global GPU images...");
-			const images = await client.virtualMachine.getRunPodDockerImages.query();
+			const images = await client.virtualMachine.getGpuDockerImages.query();
 			succeedSpinner();
 			if (isJsonMode()) {
 				outputData(images);
@@ -2475,7 +2477,7 @@ export function registerServersCommands(program: Command) {
 			if (!isLoggedIn()) throw new AuthError();
 			const client = getApiClient();
 			const _spinner = startSpinner("Checking Global GPU availability...");
-			const result = await client.virtualMachine.isRunPodAvailable.query();
+			const result = await client.virtualMachine.isGlobalGpuAvailable.query();
 			succeedSpinner();
 			if (isJsonMode()) {
 				outputData(result);
