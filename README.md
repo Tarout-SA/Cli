@@ -68,7 +68,9 @@ schedule cron tasks (`job_*`), run a command in an app's container
 (`app_exec`), explain what a deploy would build (`app_explain_build`), deploy
 a ready-made app from a template (`template_*`), check parked approval requests
 (`approvals_*`), map a project in one read (`agent_manifest`), read the agent
-activity timeline and credentials (`agent_events`, `agent_sessions`), switch
+activity timeline and credentials (`agent_events`, `agent_sessions`), move a
+project from Vercel, Render, Railway, Heroku, Netlify or Fly.io
+(`import_project`, `import_status`), switch
 org/project/env, upgrade billing, and more, with a
 `call` escape hatch covering the entire platform API.
 
@@ -636,6 +638,7 @@ with `--help` for its subcommands and flags):
 | `tarout billing` | Manage subscription and billing |
 | `tarout wallet` | Manage AI Gateway wallet balance |
 | `tarout referral` | Your referral code, link and compute-credit earnings (`history` for per-payment credit) |
+| `tarout import` | Move a project from Vercel, Render, Railway, Heroku, Netlify or Fly.io: apps, env vars, the database with its data, cron jobs and domains (`--dry-run`, `status <runId>`, `domains <runId>`) |
 | `tarout ai` | Manage AI Gateway models and API keys |
 | `tarout monitor` | Manage uptime monitors for applications |
 | `tarout jobs` | Manage scheduled tasks (cron) for applications |
