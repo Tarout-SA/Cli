@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`tarout import`.** Moves a project from Vercel or Render to Tarout: reads
+  `vercel.json`, `.vercel/project.json` or `render.yaml` from the current
+  directory and, with the source token from `VERCEL_TOKEN` / `RENDER_API_KEY`
+  (or `--token-env`, or a prompt without echo), recreates the apps, copies the
+  environment variables and the Postgres data server-side, creates the cron
+  jobs and prints a report with the DNS step per domain
+  (`platformImport.plan`, `start`, `status`, `finish`). `--dry-run` shows the
+  plan only, `--database copy|empty|keep` chooses what happens to the
+  database, `--only` picks services, `--no-deploy` / `--no-wait` stop early,
+  and `tarout import status <runId> [--deploy]` resumes. Needs the platform's
+  `platformImport` router.
+- **MCP tools `import_project` and `import_status`.** The same import for
+  coding agents: plan by default, `execute: true` to run. The token is read
+  from the MCP server's environment, never taken as an argument.
+
 ## [1.15.1] - 2026-10-10
 
 ### Removed

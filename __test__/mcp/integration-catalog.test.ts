@@ -114,6 +114,9 @@ const EXPECTED_TOOLS = [
 	"ocr_process",
 	// Referrals
 	"referral_status",
+	// Moving from Vercel / Render
+	"import_project",
+	"import_status",
 ] as const;
 
 const NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -133,7 +136,7 @@ describe("MCP integration — catalog + auth envelope", () => {
 			const names = list.tools.map((t) => t.name).sort();
 			const expected = [...EXPECTED_TOOLS].sort();
 			expect(names).toEqual(expected);
-			expect(names).toHaveLength(85);
+			expect(names).toHaveLength(87);
 			for (const name of names) {
 				expect(name).toMatch(NAME_RE);
 			}

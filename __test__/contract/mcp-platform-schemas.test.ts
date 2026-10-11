@@ -96,6 +96,7 @@ const TOOLS_DIR = join(HERE, "../../src/mcp/tools");
 const BILLING_LIB = join(HERE, "../../src/lib/billing-upgrade.ts");
 
 const BUILD_EXPLAIN_LIB = join(HERE, "../../src/lib/build-explain.ts");
+const PLATFORM_IMPORT_LIB = join(HERE, "../../src/lib/platform-import.ts");
 
 // ---------------------------------------------------------------------------
 // Recording tRPC client. A Proxy that turns any `client.<router>.<proc>.
@@ -516,6 +517,7 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 		const sources = [
 			BILLING_LIB,
 			BUILD_EXPLAIN_LIB,
+			PLATFORM_IMPORT_LIB,
 			...readdirSync(TOOLS_DIR)
 				.filter((f) => f.endsWith(".ts"))
 				.map((f) => join(TOOLS_DIR, f)),
