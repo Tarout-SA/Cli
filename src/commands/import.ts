@@ -17,6 +17,10 @@ import {
 	detectImportProvider,
 	IMPORT_PROVIDERS,
 	type ImportPlanResponse,
+	type MoveDomainsResult,
+	moveDomainsWhenLive,
+	PROVIDER_LABEL,
+	TOKEN_ENVS,
 	type ImportProvider,
 	type ImportReport,
 	type ImportRunResult,
@@ -32,12 +36,15 @@ const DATABASE_MODES = ["copy", "empty", "keep"] as const;
 const DATABASE_PLANS = ["STARTER", "STANDARD", "PRO"] as const;
 const DEFAULT_WAIT_MINUTES = 30;
 
-const PROVIDER_LABEL: Record<ImportProvider, string> = { vercel: "Vercel", render: "Render" };
 
 interface ImportOptions {
 	from?: string;
 	project?: string;
 	team?: string;
+	environment?: string;
+	repo?: string;
+	branch?: string;
+	moveDomains?: boolean;
 	service?: string[];
 	only?: string[];
 	database?: string;
@@ -92,6 +99,11 @@ export function printPlan({ plan, repoAccess }: ImportPlanResponse): void {
 	log("");
 }
 
+export function printDomainMoves(result: MoveDomainsResult): void {
+	for (const host of result.moved) log(`  ${colors.success("✓")} ${host} now points at Tarout`);
+	for (const entry of result.skipped) log(colors.dim(`  ${entry.host}: ${entry.reason}`));
+}
+
 export function printReport(report: ImportReport): void {
 	log("");
 	log(colors.bold(report.complete ? "Import complete" : "Import in progress"));
@@ -111,9 +123,9 @@ export function printReport(report: ImportReport): void {
 		log("");
 		log(colors.bold("Domains"));
 		for (const domain of report.domains) {
-			log(`  ${domain.host}`);
+			log(`  ${domain.host}${domain.moved ? `  ${colors.success("moved")}` : ""}`);
 			log(colors.dim(`      ${domain.steps}`));
-			log(`      ${colors.cyan(domain.command)}`);
+			if (!domain.moved) log(`      ${colors.cyan(domain.command)}`);
 		}
 	}
 	if (report.notes.length > 0) {
@@ -127,12 +139,18 @@ export function registerImportCommands(program: Command) {
 	program
 		.command("import")
 		.description(
-			"Move a project from Vercel or Render: apps, env vars, the database with its data, jobs and a domain plan",
+			"Move a project from Vercel, Render, Railway, Heroku, Netlify or Fly.io: apps, env vars, the database with its data, jobs and domains",
 		)
 		.option("--from <platform>", `Source platform: ${IMPORT_PROVIDERS.join(" | ")} (default: detected from the repo)`)
-		.option("--project <name>", "Vercel project name or prj_ id (default: .vercel/project.json)")
+		.option(
+			"--project <name>",
+			"Vercel project, Railway project id, Heroku app, Netlify site or Fly app (default: from the repo's config)",
+		)
 		.option("--team <id>", "Vercel team id for a team project")
-		.option("--service <names>", "Render service name(s) to read (repeatable or comma-separated)", collect)
+		.option("--environment <name>", "Railway environment (default: the project's primary)")
+		.option("--service <names>", "Render/Railway service name(s) to read (repeatable or comma-separated)", collect)
+		.option("--repo <owner/repo>", "GitHub repository the app builds from (default: this clone's origin)")
+		.option("--branch <name>", "Branch to build (default: the source's, else the checked-out one)")
 		.option("--only <keys>", "Import only these services from the plan (repeatable or comma-separated)", collect)
 		.option("--database <mode>", `copy | empty | keep (default: copy)`)
 		.option("--database-plan <plan>", "STARTER | STANDARD | PRO (default: STARTER)")
@@ -143,21 +161,24 @@ export function registerImportCommands(program: Command) {
 		)
 		.option(
 			"--token-env <ENV_VAR>",
-			`Environment variable holding the source token (default: ${DEFAULT_TOKEN_ENV.vercel} / ${DEFAULT_TOKEN_ENV.render})`,
+			"Environment variable holding the source token (default: the platform's usual one, listed below)",
 		)
 		.option("--no-deploy", "Create everything but do not deploy")
 		.option("--no-wait", "Return once the import started instead of waiting for the database copy")
 		.option("--wait-minutes <n>", `How long to wait for the database copy (default: ${DEFAULT_WAIT_MINUTES})`)
+		.option("--move-domains", "Once the apps are live, link domains whose zone is on Tarout")
 		.option("--dry-run", "Show what would be created, then stop")
 		.addHelpText(
 			"after",
 			`
-The source token is read from ${DEFAULT_TOKEN_ENV.vercel} (Vercel) or ${DEFAULT_TOKEN_ENV.render} (Render),
-or asked for without echo. It is used for this import only and never stored.
+The source token is read from the environment, or asked for without echo.
+It is used for this import only and never stored:
+${IMPORT_PROVIDERS.map((provider) => `  ${PROVIDER_LABEL[provider].padEnd(8)} ${TOKEN_ENVS[provider].join(" or ")}`).join("\n")}
 
 Examples:
   $ VERCEL_TOKEN=... tarout import --dry-run
   $ tarout import --from render --service api --service worker
+  $ tarout import --from heroku --project my-app --move-domains
   $ tarout import --database keep           # keep using the current database
 `,
 		)
@@ -213,7 +234,10 @@ Examples:
 					token,
 					project: options.project,
 					teamId: options.team,
+					environment: options.environment,
 					services: options.service,
+					repo: options.repo,
+					branch: options.branch,
 				});
 
 				startSpinner(`Reading the ${PROVIDER_LABEL[provider]} project...`);
@@ -285,8 +309,18 @@ Examples:
 					status = await client.platformImport.status.query({ runId: result.runId });
 				}
 
+				let domainMoves: MoveDomainsResult | null = null;
+				const canMoveDomains =
+					options.moveDomains && status?.state === "finished" && status.report.domains.some((d) => d.onTarout && !d.moved);
+				if (canMoveDomains) {
+					startSpinner("Waiting for the apps to go live before moving domains...");
+					domainMoves = await moveDomainsWhenLive(client, result.runId, { timeoutMs: waitMinutes * 60_000 });
+					stopSpinner();
+					if (domainMoves) status = await client.platformImport.status.query({ runId: result.runId });
+				}
+
 				if (isJsonMode()) {
-					outputData({ result, status, timedOut });
+					outputData({ result, status, timedOut, domainMoves });
 					return;
 				}
 				if (status) printReport(status.report);
@@ -300,6 +334,13 @@ Examples:
 					);
 				} else if (status?.state === "ready" && !options.deploy) {
 					log(`Deploy when ready: ${colors.dim(`tarout import status ${result.runId} --deploy`)}`);
+				}
+				if (domainMoves) {
+					printDomainMoves(domainMoves);
+				} else if (canMoveDomains) {
+					warn(`The apps are not live yet. Move the domains later with \`tarout import domains ${result.runId}\`.`);
+				} else if (status?.report.domains.some((d) => d.onTarout && !d.moved)) {
+					log(`Move domains on Tarout zones once the apps are live: ${colors.dim(`tarout import domains ${result.runId}`)}`);
 				}
 			} catch (err) {
 				stopSpinner();
@@ -326,6 +367,39 @@ Examples:
 				printReport(status.report);
 				if (status.state === "copying") log(colors.dim("The database copy is still running."));
 			} catch (err) {
+				handleError(err);
+			}
+		});
+
+	const importCommand = program.commands.find((command) => command.name() === "import");
+	importCommand
+		?.command("domains")
+		.argument("<runId>", "Import run id")
+		.option("--wait-minutes <n>", "How long to wait for the apps to go live", "15")
+		.description("Link the import's domains whose zone is on Tarout, once the apps are live")
+		.action(async (runId: string, options: { waitMinutes: string }) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const minutes = Number(options.waitMinutes);
+				if (!Number.isFinite(minutes) || minutes < 0) {
+					throw new InvalidArgumentError("--wait-minutes must be a number.");
+				}
+				const client = getApiClient();
+				startSpinner("Waiting for the apps to go live...");
+				const moves = await moveDomainsWhenLive(client, runId, { timeoutMs: minutes * 60_000 });
+				stopSpinner();
+				if (!moves) {
+					throw new InvalidArgumentError(
+						`The imported apps are not live yet. Check \`tarout import status ${runId}\` and try again.`,
+					);
+				}
+				if (isJsonMode()) {
+					outputData(moves);
+					return;
+				}
+				printDomainMoves(moves);
+			} catch (err) {
+				stopSpinner();
 				handleError(err);
 			}
 		});

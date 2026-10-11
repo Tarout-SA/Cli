@@ -34,7 +34,9 @@ import { setGlobalOptions } from "../src/lib/output";
 import {
 	buildSourceInput,
 	detectImportProvider,
+	moveDomainsWhenLive,
 	readDatabaseUrls,
+	readGitHubRemote,
 	readSourceToken,
 	waitForImport,
 } from "../src/lib/platform-import";
@@ -203,7 +205,7 @@ describe("tarout import", () => {
 
 	it("validates its options", async () => {
 		await expect(run(["import", "--database", "move"], { yes: true })).rejects.toThrow("__EXIT_2");
-		await expect(run(["import", "--from", "heroku"], { yes: true })).rejects.toThrow("__EXIT_2");
+		await expect(run(["import", "--from", "dokku"], { yes: true })).rejects.toThrow("__EXIT_2");
 	});
 
 	it("is project-scoped", () => {
@@ -289,5 +291,113 @@ describe("platform-import lib", () => {
 		const result = await waitForImport(client, RUN_ID, { deploy: true, timeoutMs: 0, sleepFn: async () => {} });
 		expect(result.timedOut).toBe(true);
 		expect(client.platformImport.finish.mutate).not.toHaveBeenCalled();
+	});
+});
+
+describe("phase 2 sources", () => {
+	it("detects each platform, most specific first", () => {
+		const cases: Array<[string[], string]> = [
+			[["fly.toml", "Procfile"], "fly"],
+			[["railway.toml", "Procfile"], "railway"],
+			[["netlify.toml"], "netlify"],
+			[["Procfile"], "heroku"],
+			[["app.json"], "heroku"],
+			[["render.yaml", "fly.toml"], "render"],
+		];
+		for (const [files, expected] of cases) {
+			const repo = mkdtempSync(join(tmpdir(), "tarout-detect-"));
+			for (const file of files) writeFileSync(join(repo, file), "x");
+			expect(detectImportProvider(repo), files.join(",")).toBe(expected);
+			rmSync(repo, { recursive: true, force: true });
+		}
+	});
+
+	it("falls back to the secondary token variable", () => {
+		expect(readSourceToken("railway", undefined, { RAILWAY_TOKEN: "proj" })).toBe("proj");
+		expect(readSourceToken("railway", undefined, { RAILWAY_API_TOKEN: "acct", RAILWAY_TOKEN: "proj" })).toBe("acct");
+		expect(readSourceToken("fly", undefined, { FLY_ACCESS_TOKEN: "f" })).toBe("f");
+		expect(readSourceToken("heroku", undefined, { HEROKU_API_KEY: "h" })).toBe("h");
+	});
+
+	it("reads the GitHub remote and branch of a clone and a worktree", () => {
+		const repo = mkdtempSync(join(tmpdir(), "tarout-git-"));
+		mkdirSync(join(repo, ".git/worktrees/wt"), { recursive: true });
+		writeFileSync(
+			join(repo, ".git/config"),
+			'[core]\n\tbare = false\n[remote "upstream"]\n\turl = https://github.com/other/fork.git\n[remote "origin"]\n\turl = git@github.com:acme/shop.git\n',
+		);
+		writeFileSync(join(repo, ".git/HEAD"), "ref: refs/heads/main\n");
+		expect(readGitHubRemote(repo)).toEqual({ owner: "acme", repository: "shop", branch: "main" });
+
+		const worktree = mkdtempSync(join(tmpdir(), "tarout-wt-"));
+		writeFileSync(join(worktree, ".git"), `gitdir: ${join(repo, ".git/worktrees/wt")}\n`);
+		writeFileSync(join(repo, ".git/worktrees/wt/commondir"), "../..\n");
+		writeFileSync(join(repo, ".git/worktrees/wt/HEAD"), "ref: refs/heads/feature\n");
+		expect(readGitHubRemote(worktree)).toEqual({ owner: "acme", repository: "shop", branch: "feature" });
+		rmSync(repo, { recursive: true, force: true });
+		rmSync(worktree, { recursive: true, force: true });
+	});
+
+	it("sends project, environment, services and the repo hint per provider", () => {
+		writeFileSync(join(dir, "fly.toml"), 'app = "shop"');
+		mkdirSync(join(dir, ".git"));
+		writeFileSync(join(dir, ".git/config"), '[remote "origin"]\n\turl = https://github.com/acme/shop\n');
+		writeFileSync(join(dir, ".git/HEAD"), "ref: refs/heads/main\n");
+		expect(buildSourceInput({ provider: "fly", cwd: dir, project: "shop", services: ["x"] })).toMatchObject({
+			provider: "fly",
+			project: "shop",
+			repo: { owner: "acme", repository: "shop", branch: "main" },
+			files: [{ path: "fly.toml", content: 'app = "shop"' }],
+		});
+		const railway = buildSourceInput({ provider: "railway", cwd: dir, project: "p1", environment: "staging", services: ["web"] });
+		expect(railway).toMatchObject({ project: "p1", environment: "staging", services: ["web"] });
+		const heroku = buildSourceInput({ provider: "heroku", cwd: dir, project: "app", repo: "other/repo", branch: "prod" });
+		expect(heroku.repo).toEqual({ owner: "other", repository: "repo", branch: "prod" });
+		expect(heroku).not.toHaveProperty("environment");
+		expect(() => buildSourceInput({ provider: "heroku", cwd: dir, repo: "nope" })).toThrow(/owner\/repository/);
+	});
+
+	it("waits until the apps are live, then moves the domains", async () => {
+		const moved = { moved: ["www.shop.sa"], skipped: [{ host: "shop.sa", reason: "Apex" }] };
+		const client = {
+			platformImport: {
+				moveDomains: {
+					mutate: vi
+						.fn()
+						.mockRejectedValueOnce(new Error("1 imported app(s) are not live yet."))
+						.mockResolvedValueOnce(moved),
+				},
+			},
+		};
+		const onWait = vi.fn();
+		await expect(moveDomainsWhenLive(client, RUN_ID, { timeoutMs: 60_000, sleepFn: async () => {}, onWait })).resolves.toEqual(moved);
+		expect(onWait).toHaveBeenCalledTimes(1);
+
+		const stuck = { platformImport: { moveDomains: { mutate: vi.fn().mockRejectedValue(new Error("not live yet")) } } };
+		await expect(moveDomainsWhenLive(stuck, RUN_ID, { timeoutMs: 0, sleepFn: async () => {} })).resolves.toBeNull();
+
+		const broken = { platformImport: { moveDomains: { mutate: vi.fn().mockRejectedValue(new Error("Import run not found")) } } };
+		await expect(moveDomainsWhenLive(broken, RUN_ID, { timeoutMs: 60_000, sleepFn: async () => {} })).rejects.toThrow(/not found/);
+	});
+
+	it("tarout import domains links the domains", async () => {
+		h.client.platformImport.moveDomains = {
+			mutate: vi.fn().mockResolvedValue({ moved: ["www.shop.sa"], skipped: [{ host: "shop.sa", reason: "Apex domains are linked from the Domains page." }] }),
+		};
+		await run(["import", "domains", RUN_ID]);
+		const out = stdout.join("\n");
+		expect(out).toContain("www.shop.sa now points at Tarout");
+		expect(out).toContain("shop.sa: Apex domains");
+	});
+
+	it("--move-domains runs after a finished import", async () => {
+		h.client.platformImport.status.query = vi.fn().mockResolvedValue({
+			...status("finished"),
+			report: { ...REPORT, domains: [{ ...REPORT.domains[0], onTarout: true, moved: false }] },
+		});
+		h.client.platformImport.moveDomains = { mutate: vi.fn().mockResolvedValue({ moved: ["shop.example.com"], skipped: [] }) };
+		await run(["import", "--move-domains"], { yes: true });
+		expect(h.client.platformImport.moveDomains.mutate).toHaveBeenCalledWith({ runId: RUN_ID });
+		expect(stdout.join("\n")).toContain("shop.example.com now points at Tarout");
 	});
 });

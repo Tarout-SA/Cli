@@ -10,19 +10,44 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
-export const IMPORT_PROVIDERS = ["vercel", "render"] as const;
+export const IMPORT_PROVIDERS = ["vercel", "render", "railway", "heroku", "netlify", "fly"] as const;
 export type ImportProvider = (typeof IMPORT_PROVIDERS)[number];
 
-/** Env vars read for the source token, by provider. */
-export const DEFAULT_TOKEN_ENV: Record<ImportProvider, string> = {
-	vercel: "VERCEL_TOKEN",
-	render: "RENDER_API_KEY",
+export const PROVIDER_LABEL: Record<ImportProvider, string> = {
+	vercel: "Vercel",
+	render: "Render",
+	railway: "Railway",
+	heroku: "Heroku",
+	netlify: "Netlify",
+	fly: "Fly.io",
 };
+
+/** Env vars read for the source token, by provider (first one set wins). */
+export const TOKEN_ENVS: Record<ImportProvider, string[]> = {
+	vercel: ["VERCEL_TOKEN"],
+	render: ["RENDER_API_KEY"],
+	railway: ["RAILWAY_API_TOKEN", "RAILWAY_TOKEN"],
+	heroku: ["HEROKU_API_KEY"],
+	netlify: ["NETLIFY_AUTH_TOKEN"],
+	fly: ["FLY_API_TOKEN", "FLY_ACCESS_TOKEN"],
+};
+
+/** The variable named in help and prompts. */
+export const DEFAULT_TOKEN_ENV: Record<ImportProvider, string> = Object.fromEntries(
+	IMPORT_PROVIDERS.map((provider) => [provider, TOKEN_ENVS[provider][0]]),
+) as Record<ImportProvider, string>;
 
 const CONFIG_FILES: Record<ImportProvider, string[]> = {
 	vercel: ["vercel.json", ".vercel/project.json"],
 	render: ["render.yaml", "render.yml"],
+	railway: ["railway.json", "railway.toml"],
+	heroku: ["Procfile", "app.json"],
+	netlify: ["netlify.toml"],
+	fly: ["fly.toml"],
 };
+
+// Most specific first: a Procfile also appears in Railway and Render repos.
+const DETECT_ORDER: ImportProvider[] = ["render", "fly", "railway", "netlify", "vercel", "heroku"];
 
 const MAX_FILE_BYTES = 256_000;
 const MAX_REPO_PATHS = 500;
@@ -34,9 +59,51 @@ export interface ImportFile {
 
 /** The platform the repo in `cwd` is set up for, from its config files. */
 export function detectImportProvider(cwd: string): ImportProvider | null {
-	if (CONFIG_FILES.render.some((file) => existsSync(path.join(cwd, file)))) return "render";
-	if (CONFIG_FILES.vercel.some((file) => existsSync(path.join(cwd, file)))) return "vercel";
+	for (const provider of DETECT_ORDER) {
+		if (CONFIG_FILES[provider].some((file) => existsSync(path.join(cwd, file)))) return provider;
+	}
 	return null;
+}
+
+/**
+ * The GitHub repo and branch of the local clone, from `.git` (worktrees too).
+ * Heroku and Fly do not say which repo an app builds from, so this is sent.
+ */
+export function readGitHubRemote(
+	cwd: string,
+): { owner: string; repository: string; branch?: string } | undefined {
+	try {
+		const dotGit = path.join(cwd, ".git");
+		if (!existsSync(dotGit)) return undefined;
+		// A worktree's `.git` is a file pointing at its own dir (HEAD lives
+		// there); its config lives in the common dir.
+		let headDir = dotGit;
+		let configDir = dotGit;
+		if (statSync(dotGit).isFile()) {
+			const pointer = readFileSync(dotGit, "utf8").match(/gitdir:\s*(.+)/i)?.[1]?.trim();
+			if (!pointer) return undefined;
+			headDir = path.resolve(cwd, pointer);
+			const common = path.join(headDir, "commondir");
+			configDir = existsSync(common)
+				? path.resolve(headDir, readFileSync(common, "utf8").trim())
+				: headDir;
+		}
+		const config = readFileSync(path.join(configDir, "config"), "utf8");
+		const url =
+			config.match(/\[remote "origin"\][^[]*?url\s*=\s*(\S+)/)?.[1] ??
+			config.match(/url\s*=\s*(\S+)/)?.[1];
+		const match = url?.match(/github\.com[:/]+([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i);
+		if (!match?.[1] || !match[2]) return undefined;
+		let branch: string | undefined;
+		try {
+			branch = readFileSync(path.join(headDir, "HEAD"), "utf8")
+				.match(/ref:\s*refs\/heads\/(.+)/)?.[1]
+				?.trim();
+		} catch {}
+		return { owner: match[1], repository: match[2], ...(branch ? { branch } : {}) };
+	} catch {
+		return undefined;
+	}
 }
 
 export function readImportFiles(cwd: string, provider: ImportProvider): ImportFile[] {
@@ -68,8 +135,11 @@ export function readSourceToken(
 	tokenEnv?: string,
 	env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
-	const value = env[tokenEnv || DEFAULT_TOKEN_ENV[provider]]?.trim();
-	return value || undefined;
+	for (const name of tokenEnv ? [tokenEnv] : TOKEN_ENVS[provider]) {
+		const value = env[name]?.trim();
+		if (value) return value;
+	}
+	return undefined;
 }
 
 /** `db=SOURCE_DATABASE_URL` pairs → plan database key → URL from that env var. */
@@ -95,25 +165,50 @@ export interface ImportSourceOptions {
 	provider: ImportProvider;
 	cwd: string;
 	token?: string;
+	/** Vercel project, Railway project id, Heroku app, Netlify site, Fly app. */
 	project?: string;
 	teamId?: string;
+	/** Railway environment name. */
+	environment?: string;
 	services?: string[];
+	/** `owner/repo` override; default the local git remote. */
+	repo?: string;
+	branch?: string;
+}
+
+export function parseRepoArg(value: string): { owner: string; repository: string } {
+	const [owner, repository, ...rest] = value
+		.trim()
+		.replace(/^https?:\/\/github\.com\//i, "")
+		.replace(/\.git$/, "")
+		.split("/");
+	if (!owner || !repository || rest.length > 0) {
+		throw new Error(`--repo expects owner/repository, got "${value}".`);
+	}
+	return { owner, repository };
 }
 
 export function buildSourceInput(options: ImportSourceOptions) {
+	const local = readGitHubRemote(options.cwd);
+	const override = options.repo ? parseRepoArg(options.repo) : undefined;
+	const repoBase = override ?? local;
+	const branch = options.branch ?? (override ? undefined : local?.branch);
+	const repo = repoBase
+		? { owner: repoBase.owner, repository: repoBase.repository, ...(branch ? { branch } : {}) }
+		: undefined;
+	const { provider } = options;
 	return {
-		provider: options.provider,
-		files: readImportFiles(options.cwd, options.provider),
+		provider,
+		files: readImportFiles(options.cwd, provider),
 		repoPaths: readRepoPaths(options.cwd),
 		...(options.token ? { token: options.token } : {}),
-		...(options.provider === "vercel"
-			? {
-					...(options.project ? { project: options.project } : {}),
-					...(options.teamId ? { teamId: options.teamId } : {}),
-				}
-			: options.services?.length
-				? { services: options.services }
-				: {}),
+		...(provider !== "render" && options.project ? { project: options.project } : {}),
+		...(provider === "vercel" && options.teamId ? { teamId: options.teamId } : {}),
+		...(provider === "railway" && options.environment ? { environment: options.environment } : {}),
+		...((provider === "render" || provider === "railway") && options.services?.length
+			? { services: options.services }
+			: {}),
+		...(repo ? { repo } : {}),
 	};
 }
 
@@ -161,7 +256,7 @@ export interface ImportReport {
 	moved: Array<{ kind: string; name: string; detail: string }>;
 	notMoved: Array<{ name: string; message: string; fix: string }>;
 	notes: Array<{ message: string; fix: string }>;
-	domains: Array<{ host: string; app: string; onTarout: boolean; command: string; steps: string }>;
+	domains: Array<{ host: string; app: string; onTarout: boolean; moved?: boolean; command: string; steps: string }>;
 	complete: boolean;
 }
 
@@ -216,4 +311,37 @@ export function countEnvSources(env: ReadonlyArray<{ source: string }>): Record<
 	const counts: Record<string, number> = {};
 	for (const entry of env) counts[entry.source] = (counts[entry.source] ?? 0) + 1;
 	return counts;
+}
+
+export interface MoveDomainsResult {
+	moved: string[];
+	skipped: Array<{ host: string; reason: string }>;
+}
+
+const NOT_LIVE = /not live yet/i;
+
+/**
+ * platformImport.moveDomains refuses until every import deploy is live; keep
+ * asking until it answers or the deadline passes. `null` = still not live.
+ */
+export async function moveDomainsWhenLive(
+	client: Client,
+	runId: string,
+	options: { timeoutMs: number; sleepFn?: (ms: number) => Promise<void>; onWait?: () => void },
+): Promise<MoveDomainsResult | null> {
+	const wait = options.sleepFn ?? sleep;
+	const deadline = Date.now() + options.timeoutMs;
+	for (;;) {
+		try {
+			return await client.platformImport.moveDomains.mutate({ runId });
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (!NOT_LIVE.test(message) || Date.now() >= deadline) {
+				if (NOT_LIVE.test(message)) return null;
+				throw error;
+			}
+			options.onWait?.();
+			await wait(POLL_INTERVAL_MS * 2);
+		}
+	}
 }

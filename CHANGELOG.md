@@ -9,20 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`tarout import`.** Moves a project from Vercel or Render to Tarout: reads
-  `vercel.json`, `.vercel/project.json` or `render.yaml` from the current
-  directory and, with the source token from `VERCEL_TOKEN` / `RENDER_API_KEY`
-  (or `--token-env`, or a prompt without echo), recreates the apps, copies the
-  environment variables and the Postgres data server-side, creates the cron
-  jobs and prints a report with the DNS step per domain
+- **`tarout import`.** Moves a project from Vercel, Render, Railway, Heroku,
+  Netlify or Fly.io to Tarout. Reads the platform's config file from the
+  current directory (`vercel.json`, `render.yaml`, `railway.json`/`.toml`,
+  `Procfile`/`app.json`, `netlify.toml`, `fly.toml`) and the clone's GitHub
+  remote, and with the source token from the environment (`VERCEL_TOKEN`,
+  `RENDER_API_KEY`, `RAILWAY_API_TOKEN`, `HEROKU_API_KEY`, `NETLIFY_AUTH_TOKEN`,
+  `FLY_API_TOKEN`, or `--token-env`, or a prompt without echo) recreates the
+  apps, copies the environment variables and the Postgres data server-side,
+  creates the cron jobs and prints a report with the DNS step per domain
   (`platformImport.plan`, `start`, `status`, `finish`). `--dry-run` shows the
-  plan only, `--database copy|empty|keep` chooses what happens to the
-  database, `--only` picks services, `--no-deploy` / `--no-wait` stop early,
-  and `tarout import status <runId> [--deploy]` resumes. Needs the platform's
-  `platformImport` router.
+  plan only; `--database copy|empty|keep`, `--only`, `--project`,
+  `--environment` (Railway), `--repo`/`--branch`, `--no-deploy` and `--no-wait`
+  shape the run; `tarout import status <runId> [--deploy]` resumes.
+  `--move-domains` / `tarout import domains <runId>` link domains whose zone is
+  on Tarout once the apps are live (`platformImport.moveDomains`). Needs the
+  platform's `platformImport` router.
 - **MCP tools `import_project` and `import_status`.** The same import for
-  coding agents: plan by default, `execute: true` to run. The token is read
-  from the MCP server's environment, never taken as an argument.
+  coding agents: plan by default, `execute: true` to run, `moveDomains: true`
+  on `import_status` to link domains. The token is read from the MCP server's
+  environment, never taken as an argument.
 
 ## [1.15.1] - 2026-10-10
 

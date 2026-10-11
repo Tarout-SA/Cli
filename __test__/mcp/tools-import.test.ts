@@ -26,6 +26,7 @@ const fakeClient = {
 		start: { mutate: vi.fn() },
 		status: { query: vi.fn() },
 		finish: { mutate: vi.fn() },
+		moveDomains: { mutate: vi.fn() },
 	},
 };
 
@@ -116,5 +117,17 @@ describe("import tools", () => {
 		const r = await invoke("import_status", { runId: RUN_ID, deploy: true });
 		expect(fakeClient.platformImport.finish.mutate).toHaveBeenCalledWith({ runId: RUN_ID });
 		expect(JSON.parse(r.content[0].text).state).toBe("finished");
+	});
+});
+
+describe("import_status moveDomains", () => {
+	it("moves domains when asked and says when the apps are not live yet", async () => {
+		fakeClient.platformImport.moveDomains.mutate.mockResolvedValueOnce({ moved: ["www.shop.sa"], skipped: [] });
+		const moved = JSON.parse((await invoke("import_status", { runId: RUN_ID, deploy: false, moveDomains: true })).content[0].text);
+		expect(moved.domainMoves).toEqual({ moved: ["www.shop.sa"], skipped: [] });
+
+		fakeClient.platformImport.moveDomains.mutate.mockRejectedValueOnce(new Error("2 imported app(s) are not live yet."));
+		const waiting = JSON.parse((await invoke("import_status", { runId: RUN_ID, deploy: false, moveDomains: true })).content[0].text);
+		expect(waiting.domainMoves.next).toMatch(/not live yet/);
 	});
 });
