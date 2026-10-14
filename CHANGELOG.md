@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.2] - 2026-10-14
+
 ### Changed
 
 - `--commit-token` no longer warns that a browser-login token expires after
