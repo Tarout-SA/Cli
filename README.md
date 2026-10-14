@@ -816,8 +816,7 @@ By default every person who clones the repo signs in for themselves with
 share one login that comes with the clone, commit the credential:
 
 ```bash
-# Use a dashboard key: it does not expire. A browser-login token expires after
-# 30 days, which would sign everyone out at once.
+# Neither a dashboard key nor a browser-login token expires.
 tarout login --token <key> --commit-token   # key from https://tarout.sa/dashboard/agent/keys
 git add .tarout/.gitignore .tarout/auth.json
 

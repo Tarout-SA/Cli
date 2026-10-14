@@ -140,7 +140,7 @@ export function warnIfUntrustedHost(apiUrl: string): void {
 
 /**
  * Sign out of the CURRENT profile only. Best-effort revokes the server-side CLI
- * key first (so it can't outlive logout for its 30-day lifespan), then drops the
+ * key first (it never expires on its own, so it would outlive logout), then drops the
  * local credential. A network failure or an older server without the revoke
  * endpoint must never block logout — we warn and still clear local state. Other
  * saved profiles are left untouched; when the current profile was the last one,
@@ -288,18 +288,6 @@ export async function performLogout(
 	}
 }
 
-/**
- * Credential sources minted by a browser sign-in. Those CLI keys expire after
- * 30 days (the platform's `/api/cli/exchange`, and the device flow's token
- * endpoint, which returns the same credential), so a committed copy signs the
- * whole team out at once. Dashboard keys never expire unless asked to.
- */
-const EXPIRING_CREDENTIAL_SOURCES = new Set([
-	"login",
-	"login --device",
-	"register",
-]);
-
 /** The "Credential:" line of the account box. */
 function credentialLine(
 	credentialPath: string | undefined,
@@ -377,11 +365,6 @@ export function applyTokenCommitChoice(
 		if (changed) {
 			warnings.push(
 				`Anyone who can read this repository can deploy and manage resources as ${credential.userEmail}, and so can anything that builds from it. Only commit the token to a private repo.`,
-			);
-		}
-		if (credential.source && EXPIRING_CREDENTIAL_SOURCES.has(credential.source)) {
-			warnings.push(
-				`This token came from a browser login and expires after 30 days, which signs everyone out at once. For a shared login, create a key at ${keysUrl} and run: tarout login --token <key> --commit-token`,
 			);
 		}
 		if (git.ignored === true) {

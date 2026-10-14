@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `--commit-token` no longer warns that a browser-login token expires after
+  30 days. Since 2026-10-14 the platform mints CLI login keys
+  (`tarout login`, `login --device`, `agent connect --handoff`) without an
+  expiry, the same as dashboard keys.
+
 ## [1.15.1] - 2026-10-10
 
 ### Removed

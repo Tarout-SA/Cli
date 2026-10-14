@@ -534,16 +534,14 @@ describe("--commit-token", () => {
 		expect(successPayload()?.tokenCommitted).toBe(false);
 	});
 
-	it("warns that a browser-login token expires for the whole team", () => {
+	it("does not warn that a browser-login token expires", () => {
+		// CLI login keys never expire since 2026-10-14, like dashboard keys.
 		const outcome = applyTokenCommitChoice("/tmp/project", true, {
 			userEmail: "owner@example.com",
 			apiUrl: "https://tarout.sa",
 			source: "login",
 		});
-		const text = outcome.warnings.join(" ");
-		expect(text).toMatch(/30 days/);
-		expect(text).toContain("https://tarout.sa/dashboard/agent/keys");
-		expect(text).toContain("tarout login --token <key> --commit-token");
+		expect(outcome.warnings.join(" ")).not.toMatch(/expire/);
 	});
 
 	it("warns when a parent .gitignore still hides the token", () => {
