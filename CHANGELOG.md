@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.0] - 2026-10-23
+
+### Added
+
+- **OCR region.** `tarout ai ocr --region global` (or `-r global`) reads the
+  pages outside Saudi Arabia (`tarout-ocr-global`); `local`, the default,
+  reads them in Saudi Arabia (`tarout-ocr`). The MCP tool `ocr_process` takes
+  the same choice as `region: "local" | "global"`. An unknown region is
+  refused before any request is sent.
+
+### Fixed
+
+- `tarout ai ocr` showed a cost below one halala as `0.00 SAR`. It now shows
+  it with four decimals, e.g. `0.0039 SAR`.
+
 ## [1.15.2] - 2026-10-14
 
 ### Changed

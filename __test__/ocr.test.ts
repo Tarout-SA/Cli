@@ -5,8 +5,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CliError } from "../src/lib/errors.js";
 import {
 	buildOcrDocument,
+	formatBilledSar,
 	joinOcrPages,
 	type OcrResult,
+	ocrModelForRegion,
 	parsePageList,
 } from "../src/lib/ocr.js";
 
@@ -71,5 +73,25 @@ describe("joinOcrPages", () => {
 		} as unknown as OcrResult;
 		expect(joinOcrPages(result, "markdown")).toBe("# One\n\n---\n\n# Two");
 		expect(joinOcrPages(result, "text")).toBe("One\n\nTwo");
+	});
+});
+
+describe("ocrModelForRegion", () => {
+	it("maps local (the default) and global to the API models", () => {
+		expect(ocrModelForRegion(undefined)).toBe("tarout-ocr");
+		expect(ocrModelForRegion("local")).toBe("tarout-ocr");
+		expect(ocrModelForRegion(" Global ")).toBe("tarout-ocr-global");
+	});
+
+	it("rejects anything else", () => {
+		expect(() => ocrModelForRegion("eu")).toThrow(CliError);
+	});
+});
+
+describe("formatBilledSar", () => {
+	it("keeps a fraction of a halala visible", () => {
+		expect(formatBilledSar(0.39)).toBe("0.0039 SAR");
+		expect(formatBilledSar(0)).toBe("0.00 SAR");
+		expect(formatBilledSar(125)).toBe("1.25 SAR");
 	});
 });

@@ -71,6 +71,23 @@ export async function buildOcrDocument(source: string): Promise<OcrDocument> {
 		: { type: "image_url", image_url: dataUrl };
 }
 
+export const OCR_REGIONS = ["local", "global"] as const;
+export type OcrRegion = (typeof OCR_REGIONS)[number];
+
+/** Region to API model: Local reads pages in Saudi Arabia, Global outside it. */
+export function ocrModelForRegion(region: string | undefined): "tarout-ocr" | "tarout-ocr-global" {
+	const value = (region ?? "local").trim().toLowerCase();
+	if (value === "local") return "tarout-ocr";
+	if (value === "global") return "tarout-ocr-global";
+	throw new CliError(`Unknown region "${region}". Use local (Saudi Arabia) or global.`);
+}
+
+/** SAR with enough decimals that a fraction of a halala does not read as 0.00. */
+export function formatBilledSar(halalas: number): string {
+	const sar = halalas / 100;
+	return `${sar === 0 || sar >= 0.01 ? sar.toFixed(2) : sar.toFixed(4)} SAR`;
+}
+
 /** "1-3,5" (1-based, inclusive) to [0, 1, 2, 4]. */
 export function parsePageList(spec: string): number[] {
 	const pages = new Set<number>();
