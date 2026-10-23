@@ -11,7 +11,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CliError } from "../../lib/errors.js";
-import { buildOcrDocument, type OcrResult } from "../../lib/ocr.js";
+import { buildOcrDocument, OCR_REGIONS, type OcrResult, ocrModelForRegion } from "../../lib/ocr.js";
 import { withAuth } from "../runtime.js";
 
 export function registerOcrTools(server: McpServer): void {
@@ -20,10 +20,14 @@ export function registerOcrTools(server: McpServer): void {
 		{
 			title: "Read a document with Tarout OCR",
 			description:
-				"Wraps aiGateway.ocrProcess. Reads a PDF, scan or photo (Arabic and English) into per-page Markdown, plain text and tables. Pass exactly one of `path` (a local file, up to 10 MB) or `url` (public). Billed per successful page to the organization's wallet through `keyId` (default: the newest enabled AI Gateway key). Arabic-Indic digits are kept as printed unless latinDigits is true.",
+				"Wraps aiGateway.ocrProcess. Reads a PDF, scan or photo (Arabic and English) into per-page Markdown, plain text and tables. Pass exactly one of `path` (a local file, up to 10 MB) or `url` (public). Billed per successful page to the organization's wallet through `keyId` (default: the newest enabled AI Gateway key). `region` picks where pages are read: local (default, in Saudi Arabia) or global. Arabic-Indic digits are kept as printed unless latinDigits is true.",
 			inputSchema: {
 				path: z.string().optional().describe("Local file path (PDF, PNG, JPEG, WebP, TIFF, GIF, AVIF)."),
 				url: z.string().url().optional().describe("Public http(s) URL of the document."),
+				region: z
+					.enum(OCR_REGIONS)
+					.optional()
+					.describe("local (default): pages are read in Saudi Arabia. global: read outside Saudi Arabia."),
 				pages: z
 					.array(z.number().int().min(0))
 					.optional()
@@ -32,7 +36,7 @@ export function registerOcrTools(server: McpServer): void {
 				latinDigits: z.boolean().optional().describe("Convert Arabic-Indic digits to 0-9."),
 			},
 		},
-		async ({ path, url, pages, keyId, latinDigits }) =>
+		async ({ path, url, region, pages, keyId, latinDigits }) =>
 			withAuth(async (client) => {
 				if (Boolean(path) === Boolean(url)) {
 					throw new CliError("Pass exactly one of path or url.");
@@ -41,7 +45,7 @@ export function registerOcrTools(server: McpServer): void {
 				const result = (await client.aiGateway.ocrProcess.mutate({
 					...(keyId ? { keyId } : {}),
 					request: {
-						model: "tarout-ocr",
+						model: ocrModelForRegion(region),
 						document,
 						...(pages?.length ? { pages } : {}),
 						...(latinDigits ? { normalize: { digits: "latin" } } : {}),

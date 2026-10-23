@@ -5,8 +5,10 @@ import { isLoggedIn } from "../lib/config.js";
 import { AuthError, CliError, handleError } from "../lib/errors.js";
 import {
 	buildOcrDocument,
+	formatBilledSar,
 	joinOcrPages,
 	type OcrResult,
+	ocrModelForRegion,
 	parsePageList,
 } from "../lib/ocr.js";
 import { colors, isJsonMode, log, outputData, warn } from "../lib/output.js";
@@ -20,6 +22,7 @@ import { startSpinner, succeedSpinner } from "../utils/spinner.js";
 export function registerAiOcrCommand(ai: Command) {
 	ai.command("ocr <source>")
 		.description("Read a PDF or image (local path or URL) into Markdown, text or JSON")
+		.option("-r, --region <region>", "local (read in Saudi Arabia) or global", "local")
 		.option("-p, --pages <list>", "Pages to read, 1-based (e.g. 1-3,5); default all")
 		.option("-f, --format <format>", "md, txt or json", "md")
 		.option("-o, --out <file>", "Write the result to a file instead of stdout")
@@ -33,12 +36,13 @@ export function registerAiOcrCommand(ai: Command) {
 					throw new CliError(`Unknown format "${format}". Use md, txt or json.`);
 				}
 
+				const model = ocrModelForRegion(String(options.region));
 				const document = await buildOcrDocument(source);
 				const _spinner = startSpinner("Reading document...");
 				const result = (await getApiClient().aiGateway.ocrProcess.mutate({
 					...(options.key ? { keyId: String(options.key) } : {}),
 					request: {
-						model: "tarout-ocr",
+						model,
 						document,
 						...(options.pages ? { pages: parsePageList(String(options.pages)) } : {}),
 						...(options.latinDigits ? { normalize: { digits: "latin" } } : {}),
@@ -63,7 +67,7 @@ export function registerAiOcrCommand(ai: Command) {
 				}
 
 				const usage = result.usage_info;
-				const summary = `${usage.pages_processed} page${usage.pages_processed === 1 ? "" : "s"} read in ${(result.latency_ms / 1000).toFixed(1)}s, billed ${(usage.billed_halalas / 100).toFixed(2)} SAR`;
+				const summary = `${usage.pages_processed} page${usage.pages_processed === 1 ? "" : "s"} read in ${(result.latency_ms / 1000).toFixed(1)}s, billed ${formatBilledSar(usage.billed_halalas)}`;
 				process.stderr.write(`${colors.dim(summary)}\n`);
 				for (const page of result.pages.filter((item) => item.status === "failed")) {
 					warn(`Page ${page.index + 1} failed and was not billed: ${page.error?.message ?? "unknown error"}`);
