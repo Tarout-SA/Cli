@@ -20,14 +20,14 @@ const SENSITIVE_KEY_SUBSTRINGS = [
 
 // Curated MCP tools whose whole point is to surface connection credentials to
 // the caller (see src/mcp/tools/db.ts and storage.ts). Their results skip
-// sanitization so the agent still gets usable credentials. Every OTHER tool —
+// sanitization so the agent still gets usable credentials. Every OTHER tool,
 // including db_info/db_create, the raw `call` escape hatch, and db_sql query
-// rows — is sanitized. Keep this list narrow: some ordinary platform responses
+// rows, is sanitized. Keep this list narrow: some ordinary platform responses
 // can contain credential-bearing fields even when that is not the tool's goal.
 export const CREDENTIAL_ALLOWLISTED_TOOLS = new Set([
 	"db_credentials",
 	"storage_credentials",
-	// Mints a new S3 access key and returns its ONE-TIME secret — the whole
+	// Mints a new S3 access key and returns its ONE-TIME secret, the whole
 	// point of the tool. Without this the sanitizer masks the `secret` field and
 	// the caller can never recover it (the platform never shows it again).
 	"storage_access_key_create",
@@ -57,7 +57,7 @@ function redactUrlPassword(value: string): string {
 // Matches a dotenv-style `KEY=VALUE` line (optionally `export KEY=…`). A full
 // secret export (e.g. envVariable.export/getAsString) arrives as ONE string
 // value under a non-sensitive key ("content"/"text"), so the per-key object
-// redaction never sees these keys — this recovers that protection line-by-line
+// redaction never sees these keys; this recovers that protection line-by-line
 // by masking the RHS of any line whose key name looks credential-bearing.
 const DOTENV_LINE_PATTERN =
 	/^([ \t]*(?:export[ \t]+)?)([A-Za-z_][A-Za-z0-9_.]*)([ \t]*=[ \t]*)(.+)$/gm;
@@ -94,7 +94,7 @@ const TOKEN_VALUE_PATTERNS: RegExp[] = [
 	/\bAIza[A-Za-z0-9_-]{35}\b/g,
 	// SendGrid API keys
 	/\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g,
-	// Tarout Email API key: `te_` + base64url(24 random bytes) = 35 chars — too
+	// Tarout Email API key: `te_` + base64url(24 random bytes) = 35 chars, too
 	// short for the high-entropy catch below, and matched no vendor shape.
 	/\bte_[A-Za-z0-9_-]{30,}/g,
 	// Tarout platform API keys (better-auth): the issued prefix followed by 64
@@ -118,7 +118,7 @@ function redactTokenValues(value: string): string {
 
 // Last-resort catch for a prefix-less, key-less credential: a long, high-entropy
 // run that mixes upper, lower AND digits (the shape of a random API key/bearer
-// token). Thresholds are deliberately strict so ordinary identifiers survive —
+// token). Thresholds are deliberately strict so ordinary identifiers survive:
 // UUIDs, single-case git SHAs / container hashes and slugs lack the case+digit
 // mix, and short values never reach the length bar.
 const HIGH_ENTROPY_CANDIDATE = /[A-Za-z0-9+/=_-]{40,}/g;
@@ -158,6 +158,36 @@ function redactSecretValues(value: string): string {
 	return out;
 }
 
+// Keys under which a tool reports a local file it wrote (ai_speak's `path`,
+// ai_image_generate's `files`, ...). A local path mixes case and digits (temp
+// folders, generated ids), so the generic high-entropy catch would redact the
+// one thing the caller needs. Such values skip only that rule: every other
+// value rule still runs, and anything that is not an absolute local path (a
+// URL, a relative string) is sanitized as usual.
+const LOCAL_PATH_KEYS = new Set(["path", "paths", "files", "outpath", "outdir", "errorspath"]);
+
+function isLocalPathValue(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		/^(?:\/|[A-Za-z]:[\\/])/.test(value) &&
+		!value.includes("://") &&
+		!/[\r\n]/.test(value)
+	);
+}
+
+function redactLocalPath(value: string): string {
+	return redactTokenValues(redactUrlPassword(value));
+}
+
+function sanitizeLocalPaths(key: string, item: unknown): unknown {
+	if (!LOCAL_PATH_KEYS.has(normalizeKey(key))) return undefined;
+	if (isLocalPathValue(item)) return redactLocalPath(item);
+	if (Array.isArray(item) && item.length > 0 && item.every(isLocalPathValue)) {
+		return item.map(redactLocalPath);
+	}
+	return undefined;
+}
+
 function sanitizeString(value: string): string {
 	const withoutInlineImages = redactInlineImages(value);
 	const trimmed = withoutInlineImages.trimStart();
@@ -169,7 +199,7 @@ function sanitizeString(value: string): string {
 				2,
 			);
 		} catch {
-			// Not valid JSON after all — fall through to plain-string redaction.
+			// Not valid JSON after all: fall through to plain-string redaction.
 		}
 	}
 	return redactSecretValues(withoutInlineImages);
@@ -180,8 +210,8 @@ function sanitizeString(value: string): string {
  * sanitizes these server-side. Recurses through nested objects AND arrays,
  * redacts credential-bearing keys, and applies value-based redaction to string
  * values (URL passwords, dotenv secret lines, known token shapes and generic
- * high-entropy tokens) so raw secrets embedded in free-form output — e.g. a
- * dotenv blob from the `call` escape hatch — do not reach the agent. */
+ * high-entropy tokens) so raw secrets embedded in free-form output (e.g. a
+ * dotenv blob from the `call` escape hatch) do not reach the agent. */
 export function sanitizeMcpCallResult<T>(value: T): T {
 	if (typeof value === "string") return sanitizeString(value) as T;
 	if (Array.isArray(value)) return value.map(sanitizeMcpCallResult) as T;
@@ -197,6 +227,8 @@ export function sanitizeMcpCallResult<T>(value: T): T {
 			) {
 				return [key, SECRET_PLACEHOLDER];
 			}
+			const localPath = sanitizeLocalPaths(key, item);
+			if (localPath !== undefined) return [key, localPath];
 			return [key, sanitizeMcpCallResult(item)];
 		}),
 	) as T;

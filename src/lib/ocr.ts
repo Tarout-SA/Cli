@@ -82,11 +82,8 @@ export function ocrModelForRegion(region: string | undefined): "tarout-ocr" | "t
 	throw new CliError(`Unknown region "${region}". Use local (Saudi Arabia) or global.`);
 }
 
-/** SAR with enough decimals that a fraction of a halala does not read as 0.00. */
-export function formatBilledSar(halalas: number): string {
-	const sar = halalas / 100;
-	return `${sar === 0 || sar >= 0.01 ? sar.toFixed(2) : sar.toFixed(4)} SAR`;
-}
+/** Moved to ai-billing.ts (every AI family uses it); kept here for older imports. */
+export { formatBilledSar } from "./ai-billing.js";
 
 /** "1-3,5" (1-based, inclusive) to [0, 1, 2, 4]. */
 export function parsePageList(spec: string): number[] {

@@ -94,4 +94,8 @@ describe("formatBilledSar", () => {
 		expect(formatBilledSar(0)).toBe("0.00 SAR");
 		expect(formatBilledSar(125)).toBe("1.25 SAR");
 	});
+
+	it("keeps a ten-thousandth of a halala visible too (one embedding call)", () => {
+		expect(formatBilledSar(0.0042)).toBe("0.000042 SAR");
+	});
 });

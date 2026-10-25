@@ -1,4 +1,5 @@
 import { type Command, Option } from "commander";
+import { AI_FAMILY_LABELS } from "../lib/ai-catalog.js";
 import { getApiClient } from "../lib/api.js";
 import { paymentBrowserOpener } from "../lib/browser.js";
 import { isLoggedIn } from "../lib/config.js";
@@ -120,9 +121,9 @@ export function registerWalletCommands(program: Command) {
 
 				log("");
 				log(colors.bold("Spending breakdown:"));
-				log(
-					`  AI Gateway: ${colors.cyan(formatSar(breakdown.aiGatewayHalalas))}   Cloud Servers: ${colors.cyan(formatSar(breakdown.cloudServerHalalas))}`,
-				);
+				for (const line of spendingBreakdownLines(breakdown)) {
+					log(`  ${line}`);
+				}
 				log("");
 			} catch (err) {
 				handleError(err);
@@ -333,6 +334,41 @@ export function registerWalletCommands(program: Command) {
 				handleError(err);
 			}
 		});
+}
+
+interface SpendingBreakdown {
+	aiGatewayHalalas?: string | number;
+	ocrHalalas?: string | number;
+	cloudServerHalalas?: string | number;
+	aiTotalHalalas?: string | number;
+	/** Per AI service family (chat, ocr, embeddings, ...); platforms from 2026-10 on. */
+	aiByFamily?: Record<string, string | number>;
+}
+
+/**
+ * The ledger's spending lines. With `aiByFamily` (newer platforms): one line
+ * per AI family that spent anything, the AI total, then cloud servers. Older
+ * platforms: the single AI Gateway line, as before.
+ */
+export function spendingBreakdownLines(breakdown: SpendingBreakdown): string[] {
+	const servers = `Cloud Servers: ${colors.cyan(formatSar(breakdown.cloudServerHalalas ?? 0))}`;
+	const byFamily = breakdown.aiByFamily;
+	if (!byFamily || typeof byFamily !== "object") {
+		return [
+			`AI Gateway: ${colors.cyan(formatSar(breakdown.aiGatewayHalalas ?? 0))}   ${servers}`,
+		];
+	}
+	const lines = Object.entries(byFamily)
+		.filter(([, halalas]) => Number(halalas) > 0)
+		.map(
+			([family, halalas]) =>
+				`AI ${AI_FAMILY_LABELS[family] ?? family}: ${colors.cyan(formatSar(halalas))}`,
+		);
+	const total =
+		breakdown.aiTotalHalalas ??
+		Object.values(byFamily).reduce<number>((sum, halalas) => sum + Number(halalas), 0);
+	lines.push(`AI total: ${colors.cyan(formatSar(total))}`, servers);
+	return lines;
 }
 
 /** Smallest top-up the platform accepts (500 halalas). */

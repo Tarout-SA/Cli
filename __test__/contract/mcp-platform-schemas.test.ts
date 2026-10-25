@@ -1,22 +1,22 @@
 /**
- * Contract test — the systemic guard against the "silently-drifting payload"
+ * Contract test: the systemic guard against the "silently-drifting payload"
  * bug class.
  *
  * Every other MCP/CLI test mocks the tRPC client, so the payloads our tools
- * build are only ever asserted against OUR OWN expectations — never against the
+ * build are only ever asserted against OUR OWN expectations, never against the
  * PLATFORM's real Zod input schemas. That gap let six tools ship broken
  * payloads (app_create/db_create missing appName+organizationId, env_unset
  * hitting a superRefine reject, billing_upgrade dropping quantity, phantom
  * procedure names). This test closes it: we capture the EXACT payload objects
  * the MCP tool handlers build (via a recording tRPC client), then validate each
- * one against the platform's actual schema — and assert every procedure the
+ * one against the platform's actual schema, and assert every procedure the
  * tools reference exists in the platform's appRouter.
  *
  * Sibling-aware: the platform repo is expected as a sibling checkout. When it
  * isn't present (CLI CI in isolation) the whole suite SKIPS cleanly so CI stays
  * green; when it IS present (local dev) it RUNS. Validation runs INSIDE the
  * platform repo via a spawned `bun` process (cwd = platform) so the platform's
- * own tsconfig `@/*` path aliases and node_modules resolve — importing the
+ * own tsconfig `@/*` path aliases and node_modules resolve; importing the
  * platform's TS by hand from here would break on those aliases.
  */
 import { spawnSync } from "node:child_process";
@@ -33,20 +33,20 @@ import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
 /**
- * Resolve the platform checkout portably — never assume a single machine's
+ * Resolve the platform checkout portably; never assume a single machine's
  * absolute path (that skips forever on any other checkout/CI while looking
  * green). Order:
- *   1. TAROUT_PLATFORM_DIR env var — explicit override (e.g. a CI job that
+ *   1. TAROUT_PLATFORM_DIR env var: explicit override (e.g. a CI job that
  *      knows where it put the platform checkout).
  *   2. Sibling-relative: this test file lives at <cli>/__test__/contract/, so
  *      the CLI repo root is two dirs up and the platform checkout is expected
- *      as its sibling. Computed from import.meta.url — NOT cwd, so it holds
+ *      as its sibling. Computed from import.meta.url, NOT cwd, so it holds
  *      regardless of where the runner is invoked from.
  *
  * The sibling is tried under BOTH names. The platform repo was renamed
  * `platform/` -> `cloud/` in the July 2026 workspace reorg, and because this
  * probe only knew the old name it silently skipped every assertion on every
- * developer machine — a contract gate that reported green while checking
+ * developer machine: a contract gate that reported green while checking
  * nothing. Keep both names: an older checkout still uses `platform/`.
  */
 const SIBLING_NAMES = ["cloud", "platform"] as const;
@@ -73,7 +73,7 @@ const siblingPresent = existsSync(
 );
 
 // Strict mode: an intentional contract run (REQUIRE_PLATFORM_CONTRACT set to
-// any truthy value) must NEVER silently skip — a missing checkout FAILS the
+// any truthy value) must NEVER silently skip; a missing checkout FAILS the
 // suite instead, so a CI job that means to run the contract can't pass blind.
 const requirePlatformContract = Boolean(
 	process.env.REQUIRE_PLATFORM_CONTRACT &&
@@ -82,7 +82,7 @@ const requirePlatformContract = Boolean(
 );
 
 // When we skip (not strict, sibling absent), say so loudly and explain how to
-// point the suite at a platform checkout — a silent skip is the bug we're fixing.
+// point the suite at a platform checkout: a silent skip is the bug we're fixing.
 if (!siblingPresent && !requirePlatformContract) {
 	console.warn(
 		`[contract] SKIPPING MCP↔platform schema contract: no platform checkout found at "${PLATFORM_ROOT}". ` +
@@ -97,6 +97,21 @@ const BILLING_LIB = join(HERE, "../../src/lib/billing-upgrade.ts");
 
 const BUILD_EXPLAIN_LIB = join(HERE, "../../src/lib/build-explain.ts");
 
+// The AI tools run their procedures through these shared helpers.
+const AI_TOOL_SOURCES = [
+	"../../src/lib/ai-catalog.ts",
+	"../../src/lib/ai-files.ts",
+	"../../src/commands/ai-batches.ts",
+	"../../src/commands/ai-image.ts",
+	"../../src/commands/ai-speak.ts",
+	"../../src/commands/ai-transcribe.ts",
+	"../../src/commands/ai-vector-stores.ts",
+	"../../src/commands/ai-video.ts",
+].map((path) => join(HERE, path));
+
+/** A file id in the platform's format, and the signed upload the recording client answers. */
+const AI_FILE_ID = "file-AbCdEfGhIjKlMnOpQrStUvWx";
+
 // ---------------------------------------------------------------------------
 // Recording tRPC client. A Proxy that turns any `client.<router>.<proc>.
 // (query|mutate)(payload)` chain into a recorded { procedure, payload } entry
@@ -109,11 +124,40 @@ const BUILD_EXPLAIN_LIB = join(HERE, "../../src/lib/build-explain.ts");
 const h = vi.hoisted(() => {
 	const calls: Array<{ procedure: string; payload: unknown }> = [];
 	const APPS = [{ applicationId: "app_1", name: "web" }];
+	const state: { catalog: unknown } = { catalog: { families: [], models: [] } };
+	const FILE_ID = "file-AbCdEfGhIjKlMnOpQrStUvWx";
+	// Enough of each AI answer for the tool's own flow to reach its next call.
+	const AI_ANSWERS: Record<string, unknown> = {
+		"aiGateway.filesCreateUpload": {
+			file_id: FILE_ID,
+			upload_url: "https://upload.test/put",
+			method: "PUT",
+			required_headers: { "Content-Type": "audio/mpeg" },
+		},
+		"aiGateway.filesCompleteUpload": { id: FILE_ID, object: "file", status: "processed" },
+		"aiGateway.audioSpeechCreate": {
+			audio_url: "https://download.test/speech.mp3",
+			response_format: "mp3",
+			characters: 5,
+		},
+		"aiGateway.imagesGenerate": { created: 1, data: [], output_format: "png" },
+		"aiGateway.videosCreate": { id: "video_1", status: "queued" },
+		"aiGateway.videosRetrieve": { id: "video_1", status: "queued" },
+		"aiGateway.embeddingsCreate": { data: [], model: "m", usage: {} },
+		"aiGateway.rerankCreate": { model: "m", results: [] },
+		"aiGateway.vectorStoreFilesAdd": { id: FILE_ID, status: "completed" },
+		"aiGateway.vectorStoresSearch": { data: [] },
+		"aiGateway.batchesCreate": { id: "batch_1", status: "validating" },
+		"aiGateway.batchesRetrieve": { id: "batch_1", status: "in_progress" },
+		"aiGateway.filesList": { data: [] },
+	};
 	function benign(path: string): unknown {
 		if (path.endsWith("allByOrganization")) return APPS;
 		if (path === "application.explainBuild") {
 			return { status: "pending", jobId: "explain-contract_1" };
 		}
+		if (path === "aiGateway.getServiceCatalog") return state.catalog;
+		if (path in AI_ANSWERS) return AI_ANSWERS[path];
 		return {};
 	}
 	function node(path: string[]): unknown {
@@ -131,7 +175,7 @@ const h = vi.hoisted(() => {
 			},
 		});
 	}
-	return { calls, client: node([]) };
+	return { calls, client: node([]), state };
 });
 
 vi.mock("../../src/lib/config", () => ({
@@ -151,10 +195,35 @@ import {
 	EXEC_MAX_COMMAND_LENGTH,
 	EXEC_MAX_TIMEOUT_SECONDS,
 } from "../../src/commands/exec";
+import { registerAiTools } from "../../src/mcp/tools/ai";
 import { registerAppsTools } from "../../src/mcp/tools/apps";
 import { registerBillingTools } from "../../src/mcp/tools/billing";
 import { registerDbTools } from "../../src/mcp/tools/db";
 import { registerEnvTools } from "../../src/mcp/tools/env";
+import { serviceCatalog } from "../fixtures/ai";
+
+/** One captured payload per AI tool call path, each checked against its procedure's input. */
+const AI_PAYLOAD_IDS = [
+	"ai_embed",
+	"ai_rerank",
+	"ai_transcribe.url",
+	"ai_transcribe.upload",
+	"ai_transcribe.file_id",
+	"ai_speak",
+	"ai_image_generate",
+	"ai_video_generate",
+	"ai_video_status",
+	"ai_files_upload",
+	"ai_files_upload.complete",
+	"ai_files_list",
+	"ai_files_delete",
+	"ai_vector_store_create",
+	"ai_vector_store_add_files",
+	"ai_vector_store_search",
+	"ai_vector_store_delete",
+	"ai_batch_create",
+	"ai_batch_status",
+];
 
 interface ValidatorResult {
 	results: Array<{
@@ -209,8 +278,13 @@ const registry = {
 	changePlanInput: subMod.changePlanInput,
 	setPlanQuantityInput: subMod.setPlanQuantityInput,
 };
+// "proc:<router>.<procedure>" names a procedure's own input schema.
+const schemaFor = (name) =>
+	name.startsWith("proc:")
+		? appRouter._def.procedures[name.slice(5)]?._def?.inputs?.[0]
+		: registry[name];
 const results = input.payloads.map((p) => {
-	const schema = registry[p.schema];
+	const schema = schemaFor(p.schema);
 	if (!schema) {
 		return { id: p.id, schema: p.schema, valid: false, errors: ["schema '" + p.schema + "' not in validator registry"] };
 	}
@@ -244,6 +318,8 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 		registerDbTools(server);
 		registerEnvTools(server);
 		registerBillingTools(server);
+		registerAiTools(server);
+		h.state.catalog = serviceCatalog();
 
 		// biome-ignore lint/suspicious/noExplicitAny: RegisteredTool.handler is private-ish.
 		const tools = (server as any)._registeredTools as Record<
@@ -292,6 +368,86 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 		// env_push reads a real dotenv file off disk, so stage one.
 		const scratch = mkdtempSync(join(tmpdir(), "tarout-contract-"));
 		writeFileSync(join(scratch, ".env.contract"), "FOO=bar\nBAZ=qux\n");
+		// The AI tools upload and download through signed URLs: never the network here.
+		writeFileSync(join(scratch, "clip.mp3"), "audio");
+		writeFileSync(join(scratch, "notes.md"), "# notes");
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (_url: unknown, init?: { method?: string }) =>
+				init?.method === "PUT" ? new Response(null, { status: 200 }) : new Response("bytes"),
+			),
+		);
+		const aiCaptures: Array<[string, string, Record<string, unknown>, string]> = [
+			["ai_embed", "ai_embed", { input: ["a", "b"], dimensions: 256, keyId: "key_1" }, "aiGateway.embeddingsCreate"],
+			["ai_rerank", "ai_rerank", { query: "q", documents: ["a", "b"], topN: 1 }, "aiGateway.rerankCreate"],
+			[
+				"ai_transcribe.url",
+				"ai_transcribe",
+				{ url: "https://example.com/a.mp3", format: "text", language: "ar" },
+				"aiGateway.audioTranscriptionsCreate",
+			],
+			["ai_transcribe.upload", "ai_transcribe", { path: join(scratch, "clip.mp3") }, "aiGateway.filesCreateUpload"],
+			["ai_transcribe.file_id", "ai_transcribe", { path: join(scratch, "clip.mp3"), format: "json" }, "aiGateway.audioTranscriptionsCreate"],
+			[
+				"ai_speak",
+				"ai_speak",
+				{ text: "hello", outPath: join(scratch, "speech.wav"), speed: 1.25 },
+				"aiGateway.audioSpeechCreate",
+			],
+			[
+				"ai_image_generate",
+				"ai_image_generate",
+				{ prompt: "a falcon", size: "1024x1024", n: 2, outDir: join(scratch, "img") },
+				"aiGateway.imagesGenerate",
+			],
+			["ai_video_generate", "ai_video_generate", { prompt: "dunes", size: "1280x720", seconds: 5 }, "aiGateway.videosCreate"],
+			["ai_video_status", "ai_video_status", { videoId: "video_1", keyId: "key_1" }, "aiGateway.videosRetrieve"],
+			[
+				"ai_files_upload",
+				"ai_files_upload",
+				{ path: join(scratch, "notes.md"), purpose: "assistants", expiresAfterSeconds: 86400 },
+				"aiGateway.filesCreateUpload",
+			],
+			["ai_files_upload.complete", "ai_files_upload", { path: join(scratch, "notes.md") }, "aiGateway.filesCompleteUpload"],
+			["ai_files_list", "ai_files_list", { purpose: "batch", limit: 50 }, "aiGateway.filesList"],
+			["ai_files_delete", "ai_files_delete", { fileId: AI_FILE_ID }, "aiGateway.filesDelete"],
+			[
+				"ai_vector_store_create",
+				"ai_vector_store_create",
+				{ name: "handbook", region: "global", expiresAfterDays: 7 },
+				"aiGateway.vectorStoresCreate",
+			],
+			[
+				"ai_vector_store_add_files",
+				"ai_vector_store_add_files",
+				{ vectorStoreId: "vs_1", fileIds: [AI_FILE_ID], keyId: "key_1" },
+				"aiGateway.vectorStoreFilesAdd",
+			],
+			[
+				"ai_vector_store_search",
+				"ai_vector_store_search",
+				{ vectorStoreId: "vs_1", query: "leave", maxNumResults: 5, scoreThreshold: 0.3, rewriteQuery: true },
+				"aiGateway.vectorStoresSearch",
+			],
+			["ai_vector_store_delete", "ai_vector_store_delete", { vectorStoreId: "vs_1" }, "aiGateway.vectorStoresDelete"],
+			[
+				"ai_batch_create",
+				"ai_batch_create",
+				{ inputFileId: AI_FILE_ID, endpoint: "/v1/chat/completions", metadata: { job: "nightly" } },
+				"aiGateway.batchesCreate",
+			],
+			["ai_batch_status", "ai_batch_status", { batchId: "batch_1" }, "aiGateway.batchesRetrieve"],
+		];
+		const aiCaptured: CapturedPayload[] = [];
+		for (const [id, tool, args, procedure] of aiCaptures) {
+			aiCaptured.push({
+				id,
+				schema: `proc:${procedure}`,
+				payload: await capture(tool, args, procedure),
+				expectValid: true,
+			});
+		}
+		vi.unstubAllGlobals();
 
 		const captured: CapturedPayload[] = [
 			{
@@ -451,7 +607,7 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 				payload: { applicationId: "app_1", jobId: "deploy-123" },
 				expectValid: false,
 			},
-			// Omitting appName is now VALID by design — the create service
+			// Omitting appName is now VALID by design: the create service
 			// auto-generates the display name and slug (see the `name`/`appName`
 			// `.optional()` in the platform's apiCreateApplication). This used to be
 			// the negative control for the original missing-appName bug; it flipped
@@ -463,7 +619,7 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 				payload: { name: "My API", organizationId: "org_1", plan: "SHARED" },
 				expectValid: true,
 			},
-			// Negative control — the harness must still be able to REJECT something,
+			// Negative control: the harness must still be able to REJECT something,
 			// otherwise it cannot catch the bug class at all. An unknown plan is
 			// rejected by the same schema.
 			{
@@ -477,6 +633,15 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 				expectValid: false,
 			},
 		];
+
+		captured.push(...aiCaptured, {
+			// Negative control: imagesGenerate always answers URLs and is strict,
+			// so a response_format (which the tools never send) is refused.
+			id: "negative.ai_image_response_format",
+			schema: "proc:aiGateway.imagesGenerate",
+			payload: { request: { prompt: "x", response_format: "b64_json" } },
+			expectValid: false,
+		});
 
 		// `tarout exec` refuses locally past these limits; the platform must
 		// accept a payload right at them and reject one just past them.
@@ -516,6 +681,7 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 		const sources = [
 			BILLING_LIB,
 			BUILD_EXPLAIN_LIB,
+			...AI_TOOL_SOURCES,
 			...readdirSync(TOOLS_DIR)
 				.filter((f) => f.endsWith(".ts"))
 				.map((f) => join(TOOLS_DIR, f)),
@@ -596,6 +762,8 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 				"env_unset.single",
 				"app_create-without-appName",
 				"negative.app_create-bad-plan",
+				...AI_PAYLOAD_IDS,
+				"negative.ai_image_response_format",
 			].sort(),
 		);
 	});
@@ -605,7 +773,7 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 		expect(validator.results.length).toBe(payloads.length);
 	});
 
-	// One assertion per real payload — each must parse against the platform's
+	// One assertion per real payload: each must parse against the platform's
 	// actual schema. A failure here IS the drift bug, reported with the exact
 	// Zod issue.
 	for (const expected of [
@@ -624,6 +792,7 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 		"app_exec.cli-limits",
 		"app_explain_build",
 		"app_explain_build.poll",
+		...AI_PAYLOAD_IDS,
 	]) {
 		it(`${expected} payload validates against its platform schema`, () => {
 			const r = validator.results.find((x) => x.id === expected);
@@ -635,7 +804,7 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 		});
 	}
 
-	it("app_create WITHOUT appName is ACCEPTED — names are auto-generated", () => {
+	it("app_create WITHOUT appName is ACCEPTED: names are auto-generated", () => {
 		const r = validator.results.find(
 			(x) => x.id === "app_create-without-appName",
 		);
@@ -661,6 +830,12 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 		expect(r?.errors.some((e) => e.startsWith("jobId:"))).toBe(true);
 	});
 
+	it("negative control: imagesGenerate REJECTS response_format (the tools never send it)", () => {
+		const r = validator.results.find((x) => x.id === "negative.ai_image_response_format");
+		expect(r, "no validator result").toBeDefined();
+		expect(r?.valid).toBe(false);
+	});
+
 	it("negative control: an unknown plan is REJECTED by the schema", () => {
 		const r = validator.results.find(
 			(x) => x.id === "negative.app_create-bad-plan",
@@ -669,7 +844,7 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 		expect(r?.errors.join("; ")).toMatch(/plan/i);
 	});
 
-	it("no phantom procedures — every referenced tRPC path exists in appRouter", () => {
+	it("no phantom procedures: every referenced tRPC path exists in appRouter", () => {
 		expect(referenced.length).toBeGreaterThan(10);
 		expect(
 			validator.missingProcedures,
@@ -681,7 +856,7 @@ describe.skipIf(!siblingPresent)("MCP payloads ↔ platform Zod schemas", () => 
 });
 
 // Strict mode only: when REQUIRE_PLATFORM_CONTRACT is set but no platform
-// checkout is present, the contract must FAIL rather than skip — otherwise a CI
+// checkout is present, the contract must FAIL rather than skip; otherwise a CI
 // job that intends to run it would go green having asserted nothing.
 describe.runIf(requirePlatformContract && !siblingPresent)(
 	"MCP payloads ↔ platform Zod schemas (strict mode)",

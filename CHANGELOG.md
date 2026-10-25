@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.17.0] - 2026-10-24
+
+### Added
+
+- **AI services on the CLI.** New `tarout ai` commands for the AI Gateway
+  services beyond chat and OCR. Every billed command takes `-r, --region`
+  (`local`, the default, runs in Saudi Arabia; `global` runs outside it),
+  `-m, --model` (default: the first available model of the kind in that
+  region, read from `aiGateway.getServiceCatalog`, so the CLI hard-codes no
+  model id) and `-k, --key` (the AI Gateway key to bill; default the newest
+  enabled key). Each prints its charge on stderr; a failed call is free.
+  They need a key with the AI Gateway scope.
+  - `tarout ai embed <text...>` (`--file`, `--dimensions`, `-o`):
+    embeddings, printed or written as the OpenAI JSON response.
+  - `tarout ai rerank <query> --doc <text>... | --docs <file>` (`--top`):
+    documents ordered by relevance.
+  - `tarout ai transcribe <file|url>` (`--format text|json|verbose_json|srt|vtt`,
+    `--language`, `--prompt`, `-o`): speech to text. A local file is uploaded
+    for the call and expires after an hour; it is not deleted explicitly,
+    because a file delete waits for approval on operator-tier agent keys.
+    Local answers `text` and `json` only; the CLI says so before uploading
+    anything.
+  - `tarout ai speak <text|-> -o out.mp3` (`--voice`, `--format`, `--speed`,
+    `--instructions`): text to speech, written to the file. The CLI never
+    plays audio.
+  - `tarout ai image "<prompt>"` (`--size`, `--n`, `-o <dir>`): image
+    generation, saved to a folder or printed as short-lived links.
+  - `tarout ai video "<prompt>"` (`--size`, `--seconds`, `-o`, `--no-wait`,
+    `--timeout`), `tarout ai video status <id>`, `tarout ai video download
+    <id> -o clip.mp4`: video generation (Local), charged only once the video
+    is ready.
+  - `tarout ai files upload|list|get|rm|download`: the Files API. Uploads go
+    straight to storage through a signed URL (`aiGateway.filesCreateUpload`,
+    then `filesCompleteUpload`), so files are not limited by the 4 MB API body
+    cap.
+  - `tarout ai vector-stores create|list|get|rm|add|files|search` (alias
+    `vs`): file search. `add` takes local paths (uploaded first) or file ids,
+    and `--wait` waits for indexing.
+  - `tarout ai batches create <jsonl> --endpoint <path>|list|get|cancel|results`:
+    the Batch API (`--wait` waits for the batch; `results -o` saves the
+    output file, `--errors` the error file). There is no batch discount.
+- **MCP tools for the AI services:** `ai_embed` (dimensions and the first 8
+  values; full vectors only to `outPath`), `ai_rerank`, `ai_transcribe`,
+  `ai_speak`, `ai_image_generate`, `ai_video_generate`, `ai_video_status`,
+  `ai_files_upload`, `ai_files_list`, `ai_files_delete`,
+  `ai_vector_store_create`, `ai_vector_store_add_files`,
+  `ai_vector_store_search`, `ai_vector_store_delete`, `ai_batch_create` and
+  `ai_batch_status`, bringing the stdio server to 101 tools. `ai_files_delete`
+  and `ai_vector_store_delete` are marked destructive. Media is saved to a
+  local path (default under the system temp folder) and never returned as a
+  signed URL.
+
+### Changed
+
+- `tarout ai models` reads the service catalog: every kind of model with
+  KIND, REGION (Local or Global) and a per-unit PRICE column, plus `--kind`
+  and `--region` filters. Against an older platform it falls back to the chat
+  catalog.
+- `tarout ai status` shows every AI service, open or closed, Local and Global.
+- The fast chat models are listed as Global, not "Saudi Arabia": they run
+  outside the Kingdom.
+- `tarout wallet ledger` prints one spending line per AI service (chat, OCR,
+  embeddings, ...) when the platform reports them.
+- A charge below a hundredth of a halala now shows enough decimals to read as
+  non-zero (`0.000042 SAR`).
+- The key management link points at the dashboard's Settings > API keys.
+
 ## [1.16.0] - 2026-10-23
 
 ### Added

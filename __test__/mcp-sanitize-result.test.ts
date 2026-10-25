@@ -114,6 +114,34 @@ describe("MCP result sanitization", () => {
 	});
 });
 
+describe("local file paths a tool wrote", () => {
+	const tmpPath = "/var/folders/7l/1bj8h4x52sq5k3n0w0bqgxx40000gn/T/tarout-ai-Ab3XyZ/speech.mp3";
+
+	it("keep mixed-case, digit-heavy paths under path keys (ai_speak, ai_image_generate)", () => {
+		const out = sanitizeMcpCallResult({
+			path: tmpPath,
+			files: ["/tmp/tarout-ai-Ab3XyZ/att_cmh1x2y3z0000abcd1234efgh-1.png"],
+		});
+		expect(out.path).toBe(tmpPath);
+		expect(out.files[0]).toBe("/tmp/tarout-ai-Ab3XyZ/att_cmh1x2y3z0000abcd1234efgh-1.png");
+	});
+
+	it("still redacts token shapes inside a path, and the same string under any other key", () => {
+		const out = sanitizeMcpCallResult({
+			outPath: "/Users/x/out/sk_live_ABCDEFGHIJKLMNOPQRSTUVWX.json",
+			note: tmpPath,
+		});
+		expect(out.outPath).not.toContain("sk_live_");
+		expect(out.note).toContain("[redacted from MCP response]");
+	});
+
+	it("never exempts a URL under a path key", () => {
+		const url =
+			"https://storage.googleapis.com/b/tmp/media-images/Xk3pQ9rT2vW8yZ1aB4cD6eF7gH0jK5mN/a.mp3";
+		expect(sanitizeMcpCallResult({ path: url }).path).toContain("[redacted from MCP response]");
+	});
+});
+
 describe("sanitizeToolResult allowlist", () => {
 	const secretPayload = {
 		content: [

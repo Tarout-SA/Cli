@@ -112,13 +112,30 @@ const EXPECTED_TOOLS = [
 	"template_deploy",
 	// Tarout OCR
 	"ocr_process",
+	// AI Gateway services
+	"ai_embed",
+	"ai_rerank",
+	"ai_transcribe",
+	"ai_speak",
+	"ai_image_generate",
+	"ai_video_generate",
+	"ai_video_status",
+	"ai_files_upload",
+	"ai_files_list",
+	"ai_files_delete",
+	"ai_vector_store_create",
+	"ai_vector_store_add_files",
+	"ai_vector_store_search",
+	"ai_vector_store_delete",
+	"ai_batch_create",
+	"ai_batch_status",
 	// Referrals
 	"referral_status",
 ] as const;
 
 const NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 
-describe("MCP integration — catalog + auth envelope", () => {
+describe("MCP integration: catalog + auth envelope", () => {
 	it("advertises every curated + discovery tool with legal names", async () => {
 		const [ct, st] = InMemoryTransport.createLinkedPair();
 		const server = createMcpServer();
@@ -133,7 +150,7 @@ describe("MCP integration — catalog + auth envelope", () => {
 			const names = list.tools.map((t) => t.name).sort();
 			const expected = [...EXPECTED_TOOLS].sort();
 			expect(names).toEqual(expected);
-			expect(names).toHaveLength(85);
+			expect(names).toHaveLength(101);
 			for (const name of names) {
 				expect(name).toMatch(NAME_RE);
 			}
