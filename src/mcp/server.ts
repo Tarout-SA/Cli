@@ -1,9 +1,10 @@
 /**
  * Assembles the McpServer. Each src/mcp/tools/<domain>.ts exports
- * registerTools(server) — server.ts is the only place that lists them.
+ * registerTools(server); server.ts is the only place that lists them.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import packageJson from "../../package.json" with { type: "json" };
+import { registerAiTools } from "./tools/ai.js";
 import { registerAppsTools } from "./tools/apps.js";
 import { registerApprovalsTools } from "./tools/approvals.js";
 import { registerBillingTools } from "./tools/billing.js";
@@ -40,6 +41,7 @@ export function createMcpServer(): McpServer {
 	registerDeployTools(server);
 	registerJobsTools(server);
 	registerOcrTools(server);
+	registerAiTools(server);
 	registerApprovalsTools(server);
 	registerTemplateTools(server);
 	return server;

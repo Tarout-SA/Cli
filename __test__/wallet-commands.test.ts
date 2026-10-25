@@ -280,3 +280,63 @@ describe("tarout wallet agree", () => {
 		expect(stderr.join("\n")).toContain("Only the organization owner");
 	});
 });
+
+describe("tarout wallet ledger spending breakdown", () => {
+	const entry = {
+		type: "ai_gateway_usage",
+		amountHalalas: "-250",
+		balanceAfterHalalas: "9750",
+		refType: "ai_gateway_billing_attempt",
+		refId: "att_1",
+		description: "embeddings/local/qwen/qwen3-embedding-8b",
+		aiFamily: "embeddings",
+		createdAt: "2026-10-23T10:00:00.000Z",
+	};
+
+	function mockLedger(breakdown: Record<string, unknown>) {
+		h.client = {
+			wallet: {
+				getLedger: { query: async () => ({ entries: [entry], breakdown, since: "2026-09-23T00:00:00.000Z" }) },
+			},
+		};
+	}
+
+	it("prints one line per AI family that spent anything, then the AI total and servers", async () => {
+		mockLedger({
+			aiGatewayHalalas: "1250",
+			ocrHalalas: "100",
+			cloudServerHalalas: "5000",
+			aiTotalHalalas: "1350",
+			aiByFamily: {
+				chat: "1000",
+				ocr: "100",
+				embeddings: "250",
+				rerank: "0",
+				moderation: "0",
+				transcription: "0",
+				speech: "0",
+				images: "0",
+				video: "0",
+				file_search: "0",
+			},
+		});
+
+		await run(["wallet", "ledger"]);
+
+		const lines = stdout.join("\n");
+		expect(lines).toContain("AI Chat: 10.00 SAR");
+		expect(lines).toContain("AI OCR: 1.00 SAR");
+		expect(lines).toContain("AI Embeddings: 2.50 SAR");
+		expect(lines).not.toContain("AI Rerank");
+		expect(lines).toContain("AI total: 13.50 SAR");
+		expect(lines).toContain("Cloud Servers: 50.00 SAR");
+	});
+
+	it("keeps the single AI Gateway line for a platform without aiByFamily", async () => {
+		mockLedger({ aiGatewayHalalas: "1250", cloudServerHalalas: "0" });
+
+		await run(["wallet", "ledger"]);
+
+		expect(stdout.join("\n")).toContain("AI Gateway: 12.50 SAR   Cloud Servers: 0.00 SAR");
+	});
+});

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 /**
  * Quiet-mode (`-q`) coverage spot-checks. In quiet mode every human helper
  * (`log`, `box`, `table` header/borders, spinners) is silenced, so the ONLY
- * thing a command writes to stdout is its `quietOutput(...)` call — the essential
+ * thing a command writes to stdout is its `quietOutput(...)` call: the essential
  * identifier(s). These tests drive a representative command from several files
  * and assert exactly those bare id/value lines land on stdout.
  */
@@ -19,7 +19,7 @@ vi.mock("../src/lib/config.js", () => ({
 	getToken: () => "tok_test",
 }));
 
-// Spinners must never write to stdout — they're no-ops in quiet mode anyway,
+// Spinners must never write to stdout; they're no-ops in quiet mode anyway,
 // but mocking them keeps the captured output limited to quietOutput().
 vi.mock("../src/utils/spinner.js", () => ({
 	startSpinner: vi.fn(() => null),
@@ -54,7 +54,7 @@ beforeEach(() => {
 	vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => {
 		logs.push(a.map(String).join(" "));
 	});
-	// Errors (handleError) go to stderr — swallow so a failing path is visible
+	// Errors (handleError) go to stderr; swallow so a failing path is visible
 	// only through the missing expected stdout line.
 	vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -126,20 +126,16 @@ describe("quiet-mode coverage sweep", () => {
 	});
 
 	it("ai models emits one model id per line", async () => {
+		const tokens = { unit: "tokens", inputPer1M: 1, outputPer1M: 2 };
 		h.client = {
 			aiGateway: {
-				getAvailableModels: {
+				getServiceCatalog: {
 					query: async () => ({
-						global: {
-							isEnabled: true,
-							models: [{ id: "z-ai/glm-5.3", providerStatus: "available" }],
-						},
-						saudi: {
-							isEnabled: true,
-							models: [
-								{ id: "groq/openai/gpt-oss-20b", providerStatus: "available" },
-							],
-						},
+						families: [{ family: "chat", enabled: { local: true, global: true } }],
+						models: [
+							{ id: "z-ai/glm-5.3", kind: "chat", residency: "global", providerStatus: "available", pricing: tokens },
+							{ id: "groq/openai/gpt-oss-20b", kind: "chat", residency: "global", providerStatus: "available", pricing: tokens },
+						],
 					}),
 				},
 			},

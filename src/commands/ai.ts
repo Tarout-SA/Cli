@@ -1,7 +1,23 @@
 import type { Command } from "commander";
+import {
+	AI_FAMILY_LABELS,
+	type AiCatalogModel,
+	type AiServiceCatalog,
+	fetchServiceCatalog,
+	formatPricing,
+	isCallableModel,
+	parseAiKind,
+	parseAiRegion,
+	regionLabel,
+} from "../lib/ai-catalog.js";
 import { getApiClient } from "../lib/api.js";
 import { isLoggedIn } from "../lib/config.js";
-import { AuthError, CliError, handleError } from "../lib/errors.js";
+import {
+	AuthError,
+	CliError,
+	handleError,
+	isMissingProcedureError,
+} from "../lib/errors.js";
 import {
 	box,
 	colors,
@@ -17,7 +33,16 @@ import {
 import { ExitCode } from "../utils/exit-codes.js";
 import { confirm, input } from "../utils/prompts.js";
 import { startSpinner, succeedSpinner } from "../utils/spinner.js";
+import { registerAiBatchesCommand } from "./ai-batches.js";
+import { registerAiEmbedCommand } from "./ai-embed.js";
+import { registerAiFilesCommand } from "./ai-files.js";
+import { registerAiImageCommand } from "./ai-image.js";
 import { registerAiOcrCommand } from "./ai-ocr.js";
+import { registerAiRerankCommand } from "./ai-rerank.js";
+import { registerAiSpeakCommand } from "./ai-speak.js";
+import { registerAiTranscribeCommand } from "./ai-transcribe.js";
+import { registerAiVectorStoresCommand } from "./ai-vector-stores.js";
+import { registerAiVideoCommand } from "./ai-video.js";
 
 /**
  * AI Gateway key management over the CLI.
@@ -40,35 +65,68 @@ import { registerAiOcrCommand } from "./ai-ocr.js";
  * `modelId`; it is informational and no longer restricts what the key calls.
  */
 const KEY_MANAGEMENT_DASHBOARD_URL =
-	"https://tarout.sa/dashboard/ai-models/keys";
+	"https://tarout.sa/dashboard/settings/api-keys";
 
 export function registerAiCommands(program: Command) {
 	const ai = program
 		.command("ai")
-		.description("Manage AI Gateway models and API keys, and read documents with OCR");
+		.description(
+			"Use the AI Gateway: models, keys, OCR, embeddings, rerank, speech, images, video, files, vector stores and batches",
+		);
 
 	registerAiOcrCommand(ai);
+	registerAiEmbedCommand(ai);
+	registerAiRerankCommand(ai);
+	registerAiTranscribeCommand(ai);
+	registerAiSpeakCommand(ai);
+	registerAiImageCommand(ai);
+	registerAiVideoCommand(ai);
+	registerAiFilesCommand(ai);
+	registerAiVectorStoresCommand(ai);
+	registerAiBatchesCommand(ai);
 
-	// List available models
+	// List the catalog: every kind of model, Local and Global.
 	ai.command("models")
-		.description("List available AI models")
-		.action(async () => {
+		.description("List AI models of every kind, Local (in Saudi Arabia) and Global")
+		.option(
+			"--kind <kind>",
+			"Only this kind: chat, embedding, rerank, moderation, transcription, speech, image or video",
+		)
+		.option("-r, --region <region>", "Only local (in Saudi Arabia) or global models")
+		.action(async (options: { kind?: string; region?: string }) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
+				const kind = options.kind === undefined ? undefined : parseAiKind(options.kind);
+				const region =
+					options.region === undefined ? undefined : parseAiRegion(options.region);
 
 				const client = getApiClient();
 				const _spinner = startSpinner("Fetching AI models...");
-
-				const catalog = await client.aiGateway.getAvailableModels.query();
-
+				const rows = await listCatalogRows(client);
 				succeedSpinner();
 
+				const modelList = rows.models.filter(
+					(model) =>
+						(kind === undefined || model.kind === kind) &&
+						(region === undefined || model.region === region),
+				);
+
 				if (isJsonMode()) {
-					outputData(catalog);
+					outputData(
+						rows.catalog
+							? {
+									families: rows.catalog.families,
+									models: rows.catalog.models.filter(
+										(model) =>
+											(kind === undefined || model.kind === kind) &&
+											(region === undefined || model.residency === region),
+									),
+								}
+							: modelList,
+					);
 					return;
 				}
 
-				const modelList = flattenModelCatalog(catalog);
 				if (!modelList.length) {
 					log("");
 					log("No AI models available.");
@@ -86,17 +144,16 @@ export function registerAiCommands(program: Command) {
 
 				log("");
 				// Prices are what the customer pays (markup included), in USD per
-				// million tokens, exactly as the catalog reports them. Usage is
-				// billed in SAR; `tarout ai usage` shows spend in SAR.
+				// unit, exactly as the catalog reports them. Usage is billed in SAR;
+				// `tarout ai usage` shows spend in SAR.
 				table(
-					["MODEL", "NAME", "REGION", "CONTEXT", "IN $/1M", "OUT $/1M", "STATUS"],
+					["MODEL", "NAME", "KIND", "REGION", "PRICE", "STATUS"],
 					modelList.map((model) => [
 						colors.cyan(model.id),
 						model.name,
-						model.region,
-						model.contextWindow ? model.contextWindow.toLocaleString("en-US") : "-",
-						formatUsd(model.input),
-						formatUsd(model.output),
+						model.kind,
+						regionLabel(model.region),
+						model.price,
 						model.available
 							? colors.success("available")
 							: colors.error("unavailable"),
@@ -105,7 +162,7 @@ export function registerAiCommands(program: Command) {
 				log("");
 				log(
 					colors.dim(
-						"Any key calls any available model: set `model` in each request. Aliases (glm, gpt-oss-local, ...) also work.",
+						"Any key with the AI Gateway scope calls any available model: set `model` in each request. Aliases (local/qwen3.8-flash, ...) also work.",
 					),
 				);
 			} catch (err) {
@@ -113,32 +170,61 @@ export function registerAiCommands(program: Command) {
 			}
 		});
 
-	// Check provider availability
+	// Which service families are open, per region.
 	ai.command("status")
-		.description("Check AI provider availability")
+		.description("Show which AI services are open, Local and Global")
 		.action(async () => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
 				const client = getApiClient();
-				const _spinner = startSpinner("Checking provider status...");
+				const _spinner = startSpinner("Checking AI services...");
 
-				const status = await client.aiGateway.checkProviderAvailability.query();
+				let catalog: AiServiceCatalog | null = null;
+				try {
+					catalog = await fetchServiceCatalog(client);
+				} catch (err) {
+					// A platform older than the service catalog: report the chat
+					// routes the old way.
+					if (!isMissingProcedureError(err)) throw err;
+				}
+				const legacy = catalog
+					? null
+					: await client.aiGateway.checkProviderAvailability.query();
 
 				succeedSpinner();
 
 				if (isJsonMode()) {
-					outputData(status);
+					outputData(catalog ? { families: catalog.families } : legacy);
 					return;
 				}
 
 				log("");
-				log(colors.bold("AI Provider Status"));
+				log(colors.bold("AI services"));
 				log("");
-				for (const [region, available] of Object.entries(status || {})) {
-					log(
-						`  ${region}: ${available ? colors.success("available") : colors.error("unavailable")}`,
+				if (catalog) {
+					const mark = (open: boolean) =>
+						open ? colors.success("open") : colors.dim("closed");
+					table(
+						["SERVICE", "LOCAL", "GLOBAL"],
+						catalog.families.map((family) => [
+							AI_FAMILY_LABELS[family.family] ?? family.family,
+							mark(family.enabled?.local === true),
+							mark(family.enabled?.global === true),
+						]),
 					);
+					log("");
+					log(
+						colors.dim(
+							"Local runs in Saudi Arabia; Global runs outside it. A closed service answers 503 and charges nothing.",
+						),
+					);
+				} else {
+					for (const [route, available] of Object.entries(legacy || {})) {
+						log(
+							`  ${regionLabel(route)} chat (${route}): ${available ? colors.success("available") : colors.error("unavailable")}`,
+						);
+					}
 				}
 				log("");
 			} catch (err) {
@@ -917,6 +1003,7 @@ interface CatalogModel {
 interface ListedModel {
 	id: string;
 	name: string;
+	/** "Local" (in Saudi Arabia) or "Global". */
 	region: string;
 	contextWindow: number;
 	input: number | null;
@@ -924,10 +1011,65 @@ interface ListedModel {
 	available: boolean;
 }
 
+/** One row of `tarout ai models`. */
+interface CatalogRow {
+	id: string;
+	name: string;
+	kind: string;
+	region: "local" | "global";
+	price: string;
+	available: boolean;
+}
+
 /**
- * `aiGateway.getAvailableModels` returns the catalog per product
- * (`{ global: { isEnabled, models }, saudi: {...} }`). The CLI used to expect a
- * flat array and printed "No AI models available" for every account.
+ * The model rows from `aiGateway.getServiceCatalog`, or, on a platform older
+ * than the service catalog, the chat models of `getAvailableModels`.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: tRPC proxy client is untyped in the CLI package.
+async function listCatalogRows(client: any): Promise<{
+	catalog: AiServiceCatalog | null;
+	models: CatalogRow[];
+}> {
+	try {
+		const catalog = await fetchServiceCatalog(client);
+		return {
+			catalog,
+			models: catalog.models.map((model: AiCatalogModel) => ({
+				id: model.id,
+				name: model.name ?? model.id,
+				kind: model.kind,
+				region: model.residency === "local" ? "local" : "global",
+				price: formatPricing(model.pricing),
+				available: isCallableModel(model, catalog),
+			})),
+		};
+	} catch (err) {
+		if (!isMissingProcedureError(err)) throw err;
+	}
+	const legacy = await client.aiGateway.getAvailableModels.query();
+	return {
+		catalog: null,
+		models: flattenModelCatalog(legacy).map((model) => ({
+			id: model.id,
+			name: model.name,
+			kind: "chat",
+			region: model.region === "Local" ? "local" : "global",
+			price: formatPricing({
+				unit: "tokens",
+				inputPer1M: model.input,
+				outputPer1M: model.output,
+			}),
+			available: model.available,
+		})),
+	};
+}
+
+/**
+ * `aiGateway.getAvailableModels` returns the chat catalog per route
+ * (`{ global: { isEnabled, models }, saudi: {...}, local: {...} }`). The CLI
+ * used to expect a flat array and printed "No AI models available" for every
+ * account. A model's `region` is mapped through residency: `local` runs in
+ * Saudi Arabia, every other route (the fast `saudi` route included) is Global.
  */
 export function flattenModelCatalog(catalog: unknown): ListedModel[] {
 	if (!catalog || typeof catalog !== "object") return [];
@@ -946,7 +1088,7 @@ export function flattenModelCatalog(catalog: unknown): ListedModel[] {
 			rows.push({
 				id: model.id,
 				name: model.name ?? model.id,
-				region: model.region === "saudi" ? "Saudi Arabia" : "Global",
+				region: regionLabel(model.region),
 				contextWindow: model.contextWindow ?? 0,
 				input: model.costPer1MTokens?.input ?? null,
 				output: model.costPer1MTokens?.output ?? null,
@@ -956,10 +1098,6 @@ export function flattenModelCatalog(catalog: unknown): ListedModel[] {
 		}
 	}
 	return rows;
-}
-
-function formatUsd(value: number | null): string {
-	return value === null ? "-" : `$${value.toFixed(2)}`;
 }
 
 function formatSar(halalas: number): string {

@@ -37,8 +37,9 @@ vi.mock("../src/utils/prompts.js", () => ({
 }));
 
 import { Command } from "commander";
-import { registerAiCommands } from "../src/commands/ai";
+import { flattenModelCatalog, registerAiCommands } from "../src/commands/ai";
 import { setGlobalOptions } from "../src/lib/output";
+import { serviceCatalog } from "./fixtures/ai";
 
 const RESET = {
 	json: false,
@@ -49,7 +50,8 @@ const RESET = {
 	nonInteractive: false,
 };
 
-const ANSI = /\[[0-9;]*m/g;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escapes are control chars.
+const ANSI = /\x1b\[[0-9;]*m/g;
 
 let stdout: string[];
 let stderr: string[];
@@ -274,34 +276,133 @@ const ACTIVITY = {
 	byKey: [],
 };
 
+/** What a platform older than aiGateway.getServiceCatalog answers for it. */
+function missingProcedure(path: string) {
+	return Object.assign(new Error(`No "query"-procedure on path "${path}"`), {
+		data: { code: "NOT_FOUND" },
+	});
+}
+
 describe("tarout ai (end-to-end command shapes)", () => {
-	it("models lists every product's models from the real {global, saudi} response", async () => {
+	it("models lists every kind from the service catalog with KIND, REGION and a per-unit PRICE", async () => {
 		h.client = {
-			aiGateway: { getAvailableModels: { query: async () => CATALOG } },
+			aiGateway: { getServiceCatalog: { query: async () => serviceCatalog() } },
 		};
 
 		await run(["ai", "models"]);
 
 		const out = stdout.join("\n");
-		expect(out).not.toContain("No AI models available");
-		expect(out).toContain("z-ai/glm-5.3");
-		expect(out).toContain("groq/openai/gpt-oss-20b");
-		expect(out).toContain("Saudi Arabia");
-		expect(out).toContain("$2.10");
-		expect(out).toContain("unavailable");
+		expect(out).toMatch(/MODEL\s+NAME\s+KIND\s+REGION\s+PRICE\s+STATUS/);
+		expect(out).toMatch(/local\/qwen\/qwen3-embedding-8b\s+.*embedding\s+Local\s+\$0\.02 per 1M tokens\s+available/);
+		expect(out).toMatch(/qwen\/qwen3-embedding-8b\s+.*Global\s+up to \$0\.01 per 1M tokens/);
+		expect(out).toContain("$0.01 per audio minute");
+		// An unpriced model is listed but cannot be called.
+		expect(out).toMatch(/local\/deepseek-ai\/deepseek-v4\.1-flash.*-\s+unavailable/);
+		expect(out).not.toContain("Saudi Arabia");
+		// The footer example is a Local alias that exists.
+		expect(out).toContain("local/qwen3.8-flash");
+		expect(out).not.toMatch(/-ksa|kimi|gpt-oss-local/);
 	});
 
-	it("models --quiet prints only callable model ids", async () => {
+	it("models --kind and --region filter the catalog", async () => {
 		h.client = {
-			aiGateway: { getAvailableModels: { query: async () => CATALOG } },
+			aiGateway: { getServiceCatalog: { query: async () => serviceCatalog() } },
 		};
 		setGlobalOptions({ ...RESET, quiet: true });
 		const program = new Command();
 		program.exitOverride();
 		registerAiCommands(program);
-		await program.parseAsync(["node", "tarout", "ai", "models"]);
+		await program.parseAsync(["node", "tarout", "ai", "models", "--kind", "transcription", "-r", "global"]);
 
-		expect(stdout).toEqual(["z-ai/glm-5.3", "groq/openai/gpt-oss-20b"]);
+		expect(stdout).toEqual(["tarout-transcribe-global"]);
+	});
+
+	it("models --quiet prints only callable model ids (priced, family open)", async () => {
+		h.client = {
+			aiGateway: {
+				getServiceCatalog: {
+					query: async () => serviceCatalog({ closed: [["images", "local"]] }),
+				},
+			},
+		};
+		setGlobalOptions({ ...RESET, quiet: true });
+		const program = new Command();
+		program.exitOverride();
+		registerAiCommands(program);
+		await program.parseAsync(["node", "tarout", "ai", "models", "--kind", "image"]);
+		await program.parseAsync(["node", "tarout", "ai", "models", "--kind", "chat"]);
+
+		expect(stdout).toEqual(["local/qwen/qwen3.8-flash-next", "z-ai/glm-5.3"]);
+	});
+
+	it("models falls back to the chat catalog on an older platform, the fast route as Global", async () => {
+		h.client = {
+			aiGateway: {
+				getServiceCatalog: {
+					query: async () => Promise.reject(missingProcedure("aiGateway.getServiceCatalog")),
+				},
+				getAvailableModels: { query: async () => CATALOG },
+			},
+		};
+
+		await run(["ai", "models"]);
+
+		const out = stdout.join("\n");
+		expect(out).toContain("groq/openai/gpt-oss-20b");
+		expect(out).not.toContain("Saudi Arabia");
+		expect(out).toMatch(/groq\/openai\/gpt-oss-20b\s+.*chat\s+Global/);
+		expect(out).toContain("$2.10 in / $6.60 out per 1M tokens");
+	});
+
+	it("flattenModelCatalog maps region through residency", () => {
+		const rows = flattenModelCatalog({
+			...CATALOG,
+			local: {
+				isEnabled: true,
+				models: [{ id: "local/qwen/qwen3.8-flash-next", region: "local", providerStatus: "available" }],
+			},
+		});
+		expect(Object.fromEntries(rows.map((row) => [row.id, row.region]))).toEqual({
+			"z-ai/glm-5.3": "Global",
+			"moonshotai/kimi-k3": "Global",
+			"groq/openai/gpt-oss-20b": "Global",
+			"local/qwen/qwen3.8-flash-next": "Local",
+		});
+	});
+
+	it("status shows every service family, Local and Global", async () => {
+		h.client = {
+			aiGateway: {
+				getServiceCatalog: {
+					query: async () => serviceCatalog({ closed: [["speech", "local"]] }),
+				},
+			},
+		};
+
+		await run(["ai", "status"]);
+
+		const out = stdout.join("\n");
+		expect(out).toMatch(/SERVICE\s+LOCAL\s+GLOBAL/);
+		expect(out).toMatch(/Text to speech\s+closed\s+open/);
+		expect(out).toMatch(/Video\s+open\s+closed/);
+		expect(out).toMatch(/File search\s+open\s+open/);
+	});
+
+	it("status falls back to the chat routes on an older platform", async () => {
+		h.client = {
+			aiGateway: {
+				getServiceCatalog: {
+					query: async () => Promise.reject(missingProcedure("aiGateway.getServiceCatalog")),
+				},
+				checkProviderAvailability: { query: async () => ({ global: true, saudi: false }) },
+			},
+		};
+
+		await run(["ai", "status"]);
+
+		const out = stdout.join("\n");
+		expect(out).toContain("Global chat (global): available");
+		expect(out).toContain("Global chat (saudi): unavailable");
 	});
 
 	it("keys list shows the full id every other command needs", async () => {

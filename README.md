@@ -67,7 +67,9 @@ deploy from the current directory, sync `.env`, run SQL against Postgres,
 schedule cron tasks (`job_*`), run a command in an app's container
 (`app_exec`), explain what a deploy would build (`app_explain_build`), deploy
 a ready-made app from a template (`template_*`), check parked approval requests
-(`approvals_*`), map a project in one read (`agent_manifest`), read the agent
+(`approvals_*`), read documents with OCR (`ocr_process`), use the AI services
+(`ai_*`: embeddings, rerank, speech to text, text to speech, images, video,
+files, vector stores and batches), map a project in one read (`agent_manifest`), read the agent
 activity timeline and credentials (`agent_events`, `agent_sessions`), switch
 org/project/env, upgrade billing, and more, with a
 `call` escape hatch covering the entire platform API.
@@ -636,7 +638,7 @@ with `--help` for its subcommands and flags):
 | `tarout billing` | Manage subscription and billing |
 | `tarout wallet` | Manage AI Gateway wallet balance |
 | `tarout referral` | Your referral code, link and compute-credit earnings (`history` for per-payment credit) |
-| `tarout ai` | Manage AI Gateway models and API keys |
+| `tarout ai` | AI Gateway: `models`, `keys`, `usage`, `status`, `ocr`, `embed`, `rerank`, `transcribe`, `speak`, `image`, `video`, `files`, `vector-stores`, `batches` (Local in Saudi Arabia, or `--region global`) |
 | `tarout monitor` | Manage uptime monitors for applications |
 | `tarout jobs` | Manage scheduled tasks (cron) for applications |
 | `tarout approvals` | See and wait on approval requests for agent actions |
@@ -658,6 +660,30 @@ with `--help` for its subcommands and flags):
 | `tarout queues` | Background job queues (platform operators only) |
 | `tarout call` | Call any platform procedure directly (see above) |
 | `tarout agent` | Set up coding agents: `setup` (skills + MCP, machine-wide), `init` (per project), `connect`; `manifest` maps the project in one read; `sessions` lists agent credentials; `events` shows (or `--follow`s) what agents did |
+
+## AI services
+
+`tarout ai` calls the AI Gateway with one of your AI Gateway keys and bills the
+organization's wallet; failed calls are free. `--region local` (the default)
+runs in Saudi Arabia, `--region global` outside it, and without `--model` the
+first available model of the kind in that region is used (`tarout ai models
+--kind <kind>` lists them, `tarout ai status` shows what is open).
+
+```bash
+tarout ai embed "first text" "second text" -o vectors.json
+tarout ai rerank "capital of Saudi Arabia" --docs docs.txt --top 3
+tarout ai transcribe meeting.m4a --language ar -o meeting.txt
+tarout ai speak "أهلا وسهلا" -o welcome.mp3       # writes a file, never plays it
+tarout ai image "a falcon over Riyadh at dawn" -n 2 -o shots/
+tarout ai video "camels crossing dunes" --seconds 5 -o clip.mp4
+tarout ai vector-stores create handbook               # prints vs_...
+tarout ai vector-stores add vs_123 handbook.pdf --wait
+tarout ai vector-stores search vs_123 "annual leave"
+tarout ai batches create lines.jsonl --endpoint chat/completions --wait
+```
+
+Files never travel through the API body: uploads go straight to storage
+through a signed URL, and generated media is downloaded the same way.
 
 ## Global Flags
 
