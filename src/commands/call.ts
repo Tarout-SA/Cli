@@ -15,6 +15,7 @@ import {
 	type ManifestEntry,
 } from "../lib/surface-manifest.js";
 import { ExitCode } from "../utils/exit-codes.js";
+import { stringifyJsonPretty } from "../utils/json.js";
 import {
 	failSpinner,
 	startSpinner,
@@ -138,7 +139,7 @@ export function registerCallCommand(program: Command) {
 					log(
 						typeof result === "string"
 							? result
-							: JSON.stringify(result, null, 2),
+							: stringifyJsonPretty(result),
 					);
 				}
 			} catch (err) {

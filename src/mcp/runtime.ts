@@ -28,6 +28,7 @@ import {
 } from "../lib/errors.js";
 import { resolveEntitlementRemedy } from "../lib/entitlement-remedy.js";
 import { ExitCode } from "../utils/exit-codes.js";
+import { stringifyJsonPretty, toJsonSafe } from "../utils/json.js";
 import { sanitizeToolResult } from "./sanitize-result.js";
 
 export interface Envelope {
@@ -136,7 +137,8 @@ export function guardServerHandlers(server: McpServer): void {
 		};
 }
 
-export function okResult(data: unknown): ToolText {
+export function okResult(raw: unknown): ToolText {
+	const data = toJsonSafe(raw);
 	const text =
 		typeof data === "string"
 			? JSON.stringify(data)
@@ -155,7 +157,7 @@ export function okResult(data: unknown): ToolText {
 
 export function errorResult(env: Envelope): ToolText {
 	return {
-		content: [{ type: "text", text: JSON.stringify(env, null, 2) }],
+		content: [{ type: "text", text: stringifyJsonPretty(env) }],
 		isError: true,
 	};
 }
