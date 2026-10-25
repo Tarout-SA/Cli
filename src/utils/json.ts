@@ -47,6 +47,25 @@ export function stringifyJson(value: unknown): string {
 	});
 }
 
+function bigintReplacer(_key: string, item: unknown): unknown {
+	return typeof item === "bigint" ? item.toString() : item;
+}
+
+/** Pretty JSON for human output; bigint-safe like `stringifyJson`. */
+export function stringifyJsonPretty(value: unknown): string {
+	return JSON.stringify(value, bigintReplacer, 2);
+}
+
+/**
+ * A JSON-safe copy of an API result (bigint -> string). superjson hands the
+ * CLI real bigints (Prisma BigInt columns), which the MCP SDK and plain
+ * JSON.stringify both reject.
+ */
+export function toJsonSafe<T>(value: T): T {
+	if (value === undefined) return value;
+	return JSON.parse(JSON.stringify(value, bigintReplacer)) as T;
+}
+
 export function jsonSuccess<T>(
 	data: T,
 	meta?: JsonSuccessResponse<T>["meta"],

@@ -36,6 +36,30 @@ const isLoggedIn = vi.mocked(configModule.isLoggedIn);
 const getApiClient = vi.mocked(apiModule.getApiClient);
 
 describe("okResult", () => {
+	it("encodes bigint values (Prisma BigInt columns) as strings", () => {
+		const r = okResult({ name: "db", storageUsageBytes: 5368709120n, rows: [{ n: 1n }] });
+		expect(JSON.parse(r.content[0]?.text ?? "")).toEqual({
+			name: "db",
+			storageUsageBytes: "5368709120",
+			rows: [{ n: "1" }],
+		});
+		expect(r.structuredContent).toEqual({
+			name: "db",
+			storageUsageBytes: "5368709120",
+			rows: [{ n: "1" }],
+		});
+	});
+
+	it("does not fail a withAuth call whose result holds a bigint", async () => {
+		isLoggedIn.mockReturnValue(true);
+		getApiClient.mockReturnValue({} as never);
+		const r = await withAuth(async () => [{ postgresId: "p", storageUsageBytes: 0n }]);
+		expect(r.isError).toBeUndefined();
+		expect(r.structuredContent).toEqual({
+			value: [{ postgresId: "p", storageUsageBytes: "0" }],
+		});
+	});
+
 	it("serializes JSON and mirrors data on structuredContent", () => {
 		const r = okResult({ x: 1 });
 		expect(r.isError).toBeUndefined();
