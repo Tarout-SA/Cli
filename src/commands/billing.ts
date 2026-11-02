@@ -1662,8 +1662,8 @@ export function registerBillingCommands(program: Command) {
 
 	billing
 		.command("pay-invoice")
-		.argument("<invoice-id>", "Invoice ID")
-		.description("Pay an outstanding invoice now (org owner only)")
+		.argument("<invoice-id>", 'Invoice ID, or "pending" for an overdue renewal')
+		.description("Pay what is owed with the saved card (org owner only)")
 		.action(async (invoiceId) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
@@ -1674,8 +1674,8 @@ export function registerBillingCommands(program: Command) {
 				});
 				succeedSpinner(
 					res?.status === "already_paid"
-						? "Invoice already paid."
-						: "Payment queued.",
+						? "Nothing to pay: already paid."
+						: "Payment complete.",
 				);
 				if (isJsonMode()) outputData(res);
 			} catch (err) {
