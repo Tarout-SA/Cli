@@ -8,6 +8,11 @@
  * that decision. There is deliberately no approve or deny command: the
  * platform refuses both to API keys, because an agent must never approve its
  * own request.
+ *
+ * `pending` is the cheap gate: one count plus the newest three requests, so a
+ * CI step or an agent loop can ask "is a human holding anything of mine?"
+ * without paging the whole inbox. It exits 11 while something is waiting (see
+ * PENDING_GATE_EXIT_CODE).
  * @module commands/approvals
  */
 
@@ -49,6 +54,131 @@ import {
 	succeedSpinner,
 	updateSpinner,
 } from "../utils/spinner.js";
+
+/**
+ * Exit code of `approvals pending` while at least one request is waiting for a
+ * human. Deliberately the same code `approvals wait` returns for a request
+ * nobody has decided yet: in both cases nothing failed, the work is simply
+ * blocked on a person and the command can be run again later.
+ */
+export const PENDING_GATE_EXIT_CODE = ExitCode.DEPLOYMENT_TIMEOUT;
+
+/** One of the newest-three rows `approvals.pendingSummary` returns. */
+export interface PendingSummaryItem {
+	id: string;
+	procedure: string;
+	/** Set when an agent policy rule parked the call. */
+	policyId?: string | null;
+	/** Set when the target resource is protected. */
+	protectedResourceId?: string | null;
+	createdAt?: string | Date | null;
+}
+
+export interface PendingSummary {
+	count: number;
+	latest: PendingSummaryItem[];
+}
+
+/**
+ * Reads `approvals.pendingSummary` defensively: a non-numeric or missing count
+ * becomes 0 rather than NaN, so the exit-code gate can never report "waiting"
+ * because of a malformed payload.
+ */
+export function normalizePendingSummary(raw: unknown): PendingSummary {
+	const payload = (raw ?? {}) as {
+		count?: unknown;
+		latest?: unknown;
+	};
+	const count = Number(payload.count);
+	const latest = Array.isArray(payload.latest)
+		? (payload.latest as PendingSummaryItem[])
+		: [];
+	return {
+		count: Number.isFinite(count) && count > 0 ? Math.floor(count) : 0,
+		latest,
+	};
+}
+
+/**
+ * The exit code for a pending count: `PENDING_GATE_EXIT_CODE` when something is
+ * waiting for a human, 0 when nothing is (or when the caller asked for a plain
+ * report with --exit-zero).
+ */
+export function pendingSummaryExitCode(
+	count: number,
+	options: { exitZero?: boolean } = {},
+): number {
+	if (options.exitZero) return ExitCode.SUCCESS;
+	return count > 0 ? PENDING_GATE_EXIT_CODE : ExitCode.SUCCESS;
+}
+
+/** What parked one request, in plain words. No colors. */
+export function describePendingParkReason(item: PendingSummaryItem): string {
+	if (item.protectedResourceId) {
+		return "the target resource is protected, so every agent change to it asks first";
+	}
+	if (item.policyId) return "an agent policy rule parks this procedure";
+	return "the operator key tier parks this destructive procedure";
+}
+
+/**
+ * Prints the pending summary (one envelope in --json) for the exit code the
+ * caller already computed.
+ */
+function reportPendingSummary(summary: PendingSummary, code: number): void {
+	if (isJsonMode()) {
+		outputData({
+			count: summary.count,
+			latest: summary.latest,
+			waiting: summary.count > 0,
+			exitCode: code,
+			dashboardUrl: approvalsDashboardUrl(),
+		});
+		return;
+	}
+
+	quietOutput(String(summary.count));
+
+	if (summary.count === 0) {
+		log("");
+		log("No approval requests are waiting for a human.");
+		log("");
+		return;
+	}
+
+	log("");
+	log(
+		colors.warn(
+			`${summary.count} approval request${summary.count === 1 ? "" : "s"} waiting for a human.`,
+		),
+	);
+	log("");
+	if (summary.latest.length) {
+		table(
+			["ID", "PROCEDURE", "PARKED", "WAITING"],
+			summary.latest.map((item) => [
+				colors.cyan(item.id),
+				item.procedure,
+				describePendingParkReason(item),
+				formatDateTime(item.createdAt),
+			]),
+		);
+		if (summary.count > summary.latest.length) {
+			log("");
+			log(
+				colors.dim(
+					`Newest ${summary.latest.length} of ${summary.count}. See them all: tarout approvals list --status pending`,
+				),
+			);
+		}
+	}
+	log("");
+	log(
+		`A human approves or denies them at ${colors.cyan(approvalsDashboardUrl())}`,
+	);
+	log(`Wait for one: ${colors.dim("tarout approvals wait <id>")}`);
+	log("");
+}
 
 export function registerApprovalsCommands(program: Command) {
 	const approvals = program
@@ -127,6 +257,57 @@ export function registerApprovalsCommands(program: Command) {
 				stopSpinner();
 				handleError(err);
 			}
+		});
+
+	approvals
+		.command("pending")
+		.alias("count")
+		.description(
+			`Show how many requests are still waiting for a human, and the newest three. Exits ${PENDING_GATE_EXIT_CODE} while anything is waiting, so a CI step or an agent loop can gate on it; pass --exit-zero to always exit 0`,
+		)
+		.option(
+			"--exit-zero",
+			`Always exit 0, even while requests are waiting (default: exit ${PENDING_GATE_EXIT_CODE} when the count is above zero)`,
+		)
+		.addHelpText(
+			"after",
+			`
+Cheaper than \`tarout approvals list\`: one count plus the newest three, with
+what parked each one. Only requests that can still be decided are counted — an
+expired request is not waiting for anybody.
+
+Exit codes:
+  0   nothing is waiting (or --exit-zero was passed)
+  ${PENDING_GATE_EXIT_CODE}  at least one request is waiting for a human; it is resumable, so this
+      is the same code \`tarout approvals wait\` uses for a request that has
+      not been decided yet
+
+Examples:
+  tarout approvals pending
+  tarout approvals pending --json
+  tarout approvals pending --exit-zero --quiet`,
+		)
+		.action(async (options: { exitZero?: boolean }) => {
+			let code: number = ExitCode.SUCCESS;
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+
+				const client = getApiClient();
+				const _spinner = startSpinner("Checking for pending approvals...");
+				const summary = normalizePendingSummary(
+					await client.approvals.pendingSummary.query(),
+				);
+				succeedSpinner();
+
+				code = pendingSummaryExitCode(summary.count, {
+					exitZero: options.exitZero,
+				});
+				reportPendingSummary(summary, code);
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+			if (code !== ExitCode.SUCCESS) exit(code);
 		});
 
 	approvals

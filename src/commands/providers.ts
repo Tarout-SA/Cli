@@ -5,6 +5,7 @@ import { isLoggedIn } from "../lib/config.js";
 import {
 	AuthError,
 	CliError,
+	findSimilar,
 	handleError,
 	InvalidArgumentError,
 	NotFoundError,
@@ -818,7 +819,299 @@ export function registerProvidersCommands(program: Command) {
 			}
 		});
 
+	// ══ Gitea sub-group ═══════════════════════════════════════════════════════════
+	const gitea = providers
+		.command("gitea")
+		.description(
+			"Inspect a Gitea connection that already exists: list the connections, their repositories and branches, and test that the stored token still works",
+		)
+		.addHelpText(
+			"after",
+			"\nNote: Gitea is retired as a Git provider — GitHub and GitLab only. A connection that already exists stays readable here and the apps on it keep deploying, but no new Gitea connection can be created from the CLI; an existing one is edited in the dashboard.",
+		);
+
+	// Gitea is retired as a Git provider — GitHub and GitLab only. `create` and
+	// `update` are deliberately absent; the platform also drops gitea.create /
+	// gitea.update from the agent surface, so `tarout call` cannot reach them
+	// either. The read commands below stay so an org with a live connection can
+	// still inspect the credential its deploys depend on.
+
+	gitea
+		.command("list")
+		.alias("ls")
+		.description(
+			"List the Gitea connections this organization already has, with the instance URL each one points at",
+		)
+		.action(async () => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching Gitea providers...");
+				const list = await client.gitea.giteaProviders.query();
+				succeedSpinner();
+				if (isJsonMode()) {
+					outputData(list);
+					return;
+				}
+				const items = readGiteaProviders(list);
+				if (items.length === 0) {
+					log("No Gitea providers found.");
+					return;
+				}
+				log("");
+				table(
+					["NAME", "ID", "URL"],
+					items.map((p) => [
+						giteaProviderName(p) || "-",
+						colors.cyan(p.giteaId || "-"),
+						p.giteaUrl || "-",
+					]),
+				);
+				log("");
+			} catch (err) {
+				failSpinner();
+				handleError(err);
+			}
+		});
+
+	gitea
+		.command("info <gitea>")
+		.description(
+			"Show one Gitea connection — its id, the instance URL it reads from, and whether an access token is stored (the token itself is never returned)",
+		)
+		.action(async (identifier: string) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching provider...");
+				const giteaId = await resolveGiteaId(client, identifier);
+				const data = await client.gitea.one.query({ giteaId });
+				succeedSpinner();
+				if (isJsonMode()) {
+					outputData(data);
+					return;
+				}
+				const p = data as any;
+				quietOutput(p.giteaId || giteaId);
+				log("");
+				log(colors.bold(giteaProviderName(p) || giteaId));
+				log(`  ID:          ${colors.cyan(p.giteaId || "-")}`);
+				log(`  Provider ID: ${colors.dim(p.gitProviderId || "-")}`);
+				log(`  URL:         ${p.giteaUrl || "-"}`);
+				log(`  Token:       ${p.accessTokenConfigured ? "stored" : "missing"}`);
+				log("");
+			} catch (err) {
+				failSpinner();
+				handleError(err);
+			}
+		});
+
+	gitea
+		.command("repos <gitea>")
+		.description(
+			"List the repositories the stored Gitea token can read, so you can see which ones an app could deploy from",
+		)
+		.action(async (identifier: string) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching repositories...");
+				const giteaId = await resolveGiteaId(client, identifier);
+				const repos = await client.gitea.getGiteaRepositories.query({
+					giteaId,
+				});
+				succeedSpinner();
+				if (isJsonMode()) {
+					outputData(repos);
+					return;
+				}
+				const list = Array.isArray(repos) ? repos : [];
+				if (list.length === 0) {
+					log("No repositories found.");
+					return;
+				}
+				for (const r of list) quietOutput(r.fullName || r.name || "");
+				log("");
+				table(
+					["REPOSITORY", "PRIVATE", "BRANCH"],
+					list.map((r: any) => [
+						colors.cyan(r.fullName || r.name || "-"),
+						r.isPrivate ? "yes" : "no",
+						r.defaultBranch || "-",
+					]),
+				);
+				log("");
+				log(colors.dim(`${list.length} repo${list.length === 1 ? "" : "s"}`));
+			} catch (err) {
+				failSpinner();
+				handleError(err);
+			}
+		});
+
+	gitea
+		.command("branches <gitea> <owner> <repo>")
+		.description(
+			"List the branches of one Gitea repository, as the stored token sees them (useful to confirm the branch an app deploys from still exists)",
+		)
+		.action(async (identifier: string, owner: string, repo: string) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching branches...");
+				const giteaId = await resolveGiteaId(client, identifier);
+				const branches = await client.gitea.getGiteaBranches.query({
+					giteaId,
+					owner,
+					repo,
+				});
+				succeedSpinner();
+				if (isJsonMode()) {
+					outputData(branches);
+					return;
+				}
+				const list = Array.isArray(branches) ? branches : [];
+				for (const b of list) quietOutput(b.name || b);
+				log("");
+				list.forEach((b: any) => log(`  ${b.name || b}`));
+				log("");
+			} catch (err) {
+				failSpinner();
+				handleError(err);
+			}
+		});
+
+	gitea
+		.command("test <gitea>")
+		.description(
+			"Check that the stored Gitea token still authenticates against the instance — run this first when a Gitea-sourced deploy starts failing",
+		)
+		.action(async (identifier: string) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Testing connection...");
+				const giteaId = await resolveGiteaId(client, identifier);
+				const result = await client.gitea.testConnection.mutate({ giteaId });
+				succeedSpinner("Connection successful.");
+				if (isJsonMode()) outputData({ ok: Boolean(result), giteaId });
+				else quietOutput(giteaId);
+			} catch (err) {
+				failSpinner();
+				handleError(err);
+			}
+		});
+
 	void select; // suppress unused import warning
+}
+
+/** One row of `gitea.giteaProviders` (and the shape `gitea.one` returns). */
+export interface GiteaProviderSummary {
+	giteaId?: string | null;
+	giteaUrl?: string | null;
+	gitProviderId?: string | null;
+	/** The display name lives on the joined git_provider row, not on gitea. */
+	git_provider?: { name?: string | null } | null;
+	gitProvider?: { name?: string | null } | null;
+	name?: string | null;
+}
+
+/**
+ * The display name of a Gitea connection. `gitea.giteaProviders` and
+ * `gitea.one` both nest it under the joined `git_provider` row — only the
+ * instance URL and ids sit on the gitea record itself — so reading `.name`
+ * alone would render every row as "-".
+ */
+export function giteaProviderName(provider: GiteaProviderSummary): string {
+	return String(
+		provider?.git_provider?.name ??
+			provider?.gitProvider?.name ??
+			provider?.name ??
+			"",
+	);
+}
+
+/** Narrows an untyped `gitea.giteaProviders` response to the rows we render. */
+export function readGiteaProviders(value: unknown): GiteaProviderSummary[] {
+	return Array.isArray(value) ? (value as GiteaProviderSummary[]) : [];
+}
+
+/**
+ * Resolves whatever an operator typed for a Gitea connection to a single
+ * `giteaId`. Accepts the full id, the connection's display name, or an
+ * unambiguous id prefix, because nobody holds a nanoid in their head and
+ * Gitea connections are now long-lived leftovers that get inspected by name.
+ *
+ * Pure so it can be unit tested: the caller supplies the list from
+ * `gitea.giteaProviders`. Ambiguity is an argument error (two connections can
+ * legitimately share a name); no match at all is a not-found with fuzzy
+ * suggestions over the names.
+ */
+export function findGiteaProvider(
+	providers: GiteaProviderSummary[],
+	identifier: string,
+): GiteaProviderSummary {
+	const idOf = (p: GiteaProviderSummary) => String(p?.giteaId || "");
+	const trimmed = (identifier ?? "").trim();
+	if (!trimmed) {
+		throw new InvalidArgumentError(
+			"Pass the Gitea connection to inspect: its id, its name, or a unique id prefix (`tarout providers gitea list` shows all three).",
+		);
+	}
+
+	const exact = providers.find((p) => idOf(p) === trimmed);
+	if (exact) return exact;
+
+	const lower = trimmed.toLowerCase();
+	const byName = providers.filter(
+		(p) => giteaProviderName(p).toLowerCase() === lower,
+	);
+	if (byName.length === 1) return byName[0] as GiteaProviderSummary;
+	if (byName.length > 1) throw ambiguousGitea(trimmed, "name", byName);
+
+	const byPrefix = providers.filter((p) => {
+		const id = idOf(p);
+		return id !== "" && id.startsWith(trimmed);
+	});
+	if (byPrefix.length === 1) return byPrefix[0] as GiteaProviderSummary;
+	if (byPrefix.length > 1) throw ambiguousGitea(trimmed, "id prefix", byPrefix);
+
+	throw new NotFoundError(
+		"Gitea provider",
+		trimmed,
+		findSimilar(
+			trimmed,
+			providers.map((p) => giteaProviderName(p)).filter(Boolean),
+		),
+	);
+}
+
+function ambiguousGitea(
+	identifier: string,
+	kind: "name" | "id prefix",
+	matches: GiteaProviderSummary[],
+): InvalidArgumentError {
+	const ids = matches
+		.map((p) => `${p.giteaId} (${giteaProviderName(p) || "unnamed"})`)
+		.join(", ");
+	return new InvalidArgumentError(
+		`Gitea ${kind} "${identifier}" matches ${matches.length} connections: ${ids}. Pass the full connection id instead.`,
+	);
+}
+
+/**
+ * Looks the connection up once per command so every `providers gitea`
+ * subcommand accepts a name as well as an id. One extra list query, and in
+ * exchange a wrong identifier fails with suggestions instead of the server's
+ * bare "Gitea provider not found.".
+ */
+async function resolveGiteaId(
+	// biome-ignore lint/suspicious/noExplicitAny: untyped tRPC proxy client.
+	client: any,
+	identifier: string,
+): Promise<string> {
+	const providers = readGiteaProviders(await client.gitea.giteaProviders.query());
+	const provider = findGiteaProvider(providers, identifier);
+	return String(provider.giteaId);
 }
 
 /**
