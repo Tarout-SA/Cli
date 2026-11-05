@@ -18,7 +18,12 @@ import {
 	table,
 } from "../lib/output.js";
 import { confirm, input } from "../utils/prompts.js";
-import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
+import {
+	failSpinner,
+	startSpinner,
+	stopSpinner,
+	succeedSpinner,
+} from "../utils/spinner.js";
 
 export function registerWalletCommands(program: Command) {
 	const wallet = program
@@ -333,6 +338,224 @@ export function registerWalletCommands(program: Command) {
 				handleError(err);
 			}
 		});
+
+	// Full wallet readiness: balance + agreement + runway
+	wallet
+		.command("status")
+		.description(
+			"Show whether the Compute Wallet is ready to run servers: the balance, whether the agreement is accepted, and the runway — how many hours the currently running cloud servers can keep going at the present burn rate, plus any server already inside its grace window or stopped for an empty wallet. Owner only.",
+		)
+		.action(async () => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching wallet status...");
+
+				const data = await client.wallet.getStatus.query();
+
+				succeedSpinner();
+
+				if (isJsonMode()) {
+					outputData(data);
+					return;
+				}
+
+				// Quiet mode: emit the raw halala balance, same scalar as `balance`.
+				quietOutput(String(data?.balanceHalalas ?? "0"));
+
+				const runway = data?.runway;
+
+				log("");
+				log(colors.bold("Compute Wallet Status"));
+				log("");
+				log(`  Balance:   ${colors.cyan(formatSar(data?.balanceHalalas ?? 0))}`);
+				log(
+					`  Agreement: ${
+						data?.agreementAcceptedAt
+							? colors.success(`accepted ${formatDate(data.agreementAcceptedAt)}`)
+							: colors.warn("not accepted — run `tarout wallet agree`")
+					}`,
+				);
+				log(
+					`  Ready:     ${data?.isReady ? colors.success("yes") : colors.warn("no")}`,
+				);
+				if (runway) {
+					log(`  Level:     ${formatRunwayLevel(runway.level)}`);
+					log(`  Burn:      ${formatSar(runway.burnPerHourHalalas ?? 0)}/hour`);
+					log(
+						`  Runway:    ${
+							typeof runway.hoursOfRunway === "number"
+								? `${runway.hoursOfRunway} hour(s)`
+								: colors.dim("not burning anything right now")
+						}`,
+					);
+					if (typeof runway.minPrepaidHours === "number") {
+						log(
+							`  ${colors.dim(`A new cloud server needs ${runway.minPrepaidHours} hour(s) of balance prepaid.`)}`,
+						);
+					}
+					const grace: any[] = Array.isArray(runway.graceServers)
+						? runway.graceServers
+						: [];
+					if (grace.length) {
+						log("");
+						log(
+							colors.warn(
+								`${grace.length} server(s) are inside the ${runway.graceHours ?? 0}-hour grace window and stop when it ends:`,
+							),
+						);
+						table(
+							["SERVER", "STOPS AT"],
+							grace.map((s: any) => [
+								s.name || s.id || "-",
+								s.stopsAt ? formatDate(s.stopsAt) : "-",
+							]),
+						);
+					}
+					const stopped: any[] = Array.isArray(runway.walletStoppedServers)
+						? runway.walletStoppedServers
+						: [];
+					if (stopped.length) {
+						log("");
+						log(
+							colors.error(
+								`${stopped.length} server(s) were already stopped for an empty wallet:`,
+							),
+						);
+						table(
+							["SERVER", "STOPPED AT"],
+							stopped.map((s: any) => [
+								s.name || s.id || "-",
+								s.stoppedAt ? formatDate(s.stoppedAt) : "-",
+							]),
+						);
+					}
+				}
+				log("");
+				log(`Top up: ${colors.dim("tarout wallet topup --amount 50")}`);
+				log("");
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	// Abandon an unpaid top-up order
+	wallet
+		.command("cancel")
+		.argument("<order-id>", 'Top-up order ID from checkout ("top_…")')
+		.option(
+			"--reason <text>",
+			"Why it was abandoned, recorded on the failure event (max 200 characters)",
+		)
+		.description(
+			`Abandon an UNPAID wallet top-up order so it stops sitting open. ${WALLET_CANCEL_NOT_A_REFUND} Owner only.`,
+		)
+		.addHelpText("after", `\n${WALLET_CANCEL_HELP_WARNING}`)
+		.action(async (orderId: string, options: { reason?: string }) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				assertWalletTopupOrderId(orderId);
+
+				if (!shouldSkipConfirmation()) {
+					log("");
+					log(colors.warn(WALLET_CANCEL_NOT_A_REFUND));
+					log("");
+					const confirmed = await confirm(
+						`Abandon unpaid top-up order ${orderId}?`,
+						false,
+						{
+							field: "confirm_wallet_cancel",
+							flag: "--yes",
+							context: { orderId, refunds: false },
+						},
+					);
+					if (!confirmed) {
+						log("Cancelled.");
+						return;
+					}
+				}
+
+				const client = getApiClient();
+				const _spinner = startSpinner("Abandoning top-up order...");
+
+				const result = await client.wallet.cancelTopup.mutate({
+					orderId,
+					...(options.reason ? { reason: options.reason } : {}),
+				});
+
+				succeedSpinner("Top-up order abandoned.");
+
+				if (isJsonMode()) {
+					outputData(result);
+					return;
+				}
+
+				quietOutput(orderId);
+
+				log("");
+				log(
+					colors.success(
+						`Top-up order ${orderId} is marked failed and will not credit the wallet.`,
+					),
+				);
+				log(colors.dim(WALLET_CANCEL_NOT_A_REFUND));
+				log(
+					`Check the balance: ${colors.dim("tarout wallet balance")}   Ledger: ${colors.dim("tarout wallet ledger")}`,
+				);
+				log("");
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+}
+
+/**
+ * The one sentence every `wallet cancel` surface has to carry. The procedure
+ * writes a failure event and nothing else: it does not call the payment
+ * provider and it does not move money, so reading it as "cancel my charge"
+ * would be wrong in the one direction that costs a customer real money.
+ */
+export const WALLET_CANCEL_NOT_A_REFUND =
+	"This is NOT a refund: it only abandons an order that was never paid. It does not contact the payment provider, does not reverse a completed payment, and does not remove credit already added to the wallet.";
+
+/** Expanded warning for `--help`, including what to do instead. */
+export const WALLET_CANCEL_HELP_WARNING = `${WALLET_CANCEL_NOT_A_REFUND}\nIf the payment already went through, the balance is credited and this command will not take it back — the platform has no self-serve refund path, so open a support ticket (\`tarout tickets create\`) instead.`;
+
+/**
+ * Refuse an order id the top-up procedure would silently ignore.
+ * `markWalletTopupFailed` returns early for anything that is not a `top_…`
+ * order, and the mutation still answers `{ success: true }` — so a subscription
+ * order id typed here would read as a successful cancellation while nothing
+ * happened at all.
+ */
+export function assertWalletTopupOrderId(orderId: string): void {
+	const id = String(orderId ?? "").trim();
+	if (id.startsWith("top_")) return;
+	if (id.startsWith("sub_")) {
+		throw new InvalidArgumentError(
+			`"${id}" is a subscription checkout, not a wallet top-up. Abandon it with \`tarout billing cancel-checkout ${id}\` instead.`,
+		);
+	}
+	throw new InvalidArgumentError(
+		`"${id}" is not a wallet top-up order ID. Top-up orders look like "top_…" and are printed by \`tarout wallet topup\`; the platform silently ignores anything else, so this would report success without cancelling anything.`,
+	);
+}
+
+/** Colour a wallet runway level without inventing new vocabulary for it. */
+export function formatRunwayLevel(level: string | null | undefined): string {
+	switch (level) {
+		case "ok":
+			return colors.success("ok");
+		case "low":
+			return colors.warn("low");
+		case "empty":
+			return colors.error("empty");
+		default:
+			return String(level ?? "-");
+	}
 }
 
 /** Smallest top-up the platform accepts (500 halalas). */
