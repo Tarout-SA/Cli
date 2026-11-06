@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The CLI now reaches every customer-facing platform capability.** An audit
+  against the platform's own `surface-scope.ts` found 104 exposed tRPC
+  procedures with no command — not from any decision, just drift. All of them
+  are now either reachable or listed with a reason in
+  `src/lib/coverage-exceptions.ts`, and a new test suite fails the build when
+  that stops being true.
+- **`tarout email`** — the whole Tarout Email product: sending domains and
+  their DNS records, API keys, event webhooks with delivery history,
+  suppressions, delivery logs and the daily quota. The product has not launched
+  yet, so every command turns the platform's launch refusal into a plain
+  explanation (and an `EMAIL_NOT_LAUNCHED` envelope under `--json`) instead of
+  a raw error, and tells an agent to stop rather than retry.
+- **`tarout agent-webhooks`** — signed HTTPS callbacks that wake an agent or a
+  CI job when a deployment fails, an app goes unhealthy, a monitor drops, a
+  backup fails, an approval is requested, or a scheduled task fails or
+  recovers. `deliveries` shows what was actually delivered.
+- **`tarout agent-policies`** — read the rules that govern agent keys and the
+  catalog of actions they cover. Read-only by design: an agent must never
+  loosen its own guardrails, the same reason it cannot approve its own request.
+- **`tarout billing retry-renewal`** — charge an already-owed renewal against
+  the saved card. Unlike every other paid command there is no hosted payment
+  page to collect consent, so it refuses to run unattended without `--yes`.
+  Also `billing summary`, `standing` (exits non-zero when billing is in
+  danger, so CI can gate on it), `discount`, `order`, `cancel-checkout`,
+  `period:preview`, `period:set`, and `billing migrate:*` for moving shared
+  apps onto a dedicated host. `wallet status` and `wallet cancel`.
+- **`tarout servers software`** and **`tarout servers incidents`** — install and
+  manage server software, and acknowledge, resolve or mute alerts that are
+  firing. Kept verbally distinct from the existing `servers alerts`, which
+  edits thresholds rather than the alerts they produce.
+- **`tarout domains saudi`** — the `.sa` document application flow, replacing a
+  hard stop that told you nothing. Plus `domains cert`, `can-connect`,
+  `renew-quote`, `cancel-payment`, `apex-mode`, and `domains app delete`,
+  which closes a real hole: until now no command could remove an app-domain
+  row, and the one named `domains delete` acts on a different resource.
+- **`tarout providers gitea`** — read-only inspection of an existing Gitea
+  connection, which the platform's surface notes already promised the CLI had.
+- **Smaller gaps filled**: `db rotate-password` (exits non-zero when it cannot
+  re-sync an attached app, rather than reporting a false success), `db
+  ssl-cert`, `db rows`, `storage browse`, `storage rm-folder`, `storage stats`,
+  `projects autofix` on/off/runs, `projects free-slot`, `orgs free-slot`, `apps
+  build-args`, `apps set-region`, `apps screenshot --url`, `env apply`, `inbox
+  get`, `inbox unread`, `ai requests`, `destinations create-native`,
+  `settings agent-tools`, `approvals pending`, and five `dashboard` views.
+
+### Notes
+
+- `env apply` replaces an application's entire variable set, where the existing
+  `env push` merges. It refuses an empty document rather than silently wiping
+  every variable.
+- `wallet cancel` only abandons an unpaid order. It is not a refund.
+
 ## [1.16.0] - 2026-10-23
 
 ### Added
