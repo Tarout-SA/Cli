@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { Command } from "commander";
 import { getApiClient } from "../lib/api.js";
+import { isManagedDbEnvPlaceholder } from "../lib/app-env.js";
 import { isLoggedIn } from "../lib/config.js";
 import {
 	AuthError,
@@ -34,6 +35,7 @@ const envSubcommands = new Set([
 	"unset",
 	"pull",
 	"push",
+	"apply",
 	"audit",
 	"reveal",
 	"get",
@@ -42,6 +44,125 @@ const envSubcommands = new Set([
 	"bulk-delete",
 	"copy",
 ]);
+
+/** One `KEY=value` pair read out of a local .env file. */
+export interface DotenvEntry {
+	key: string;
+	value: string;
+}
+
+export interface DotenvParseResult {
+	entries: DotenvEntry[];
+	/** Human-readable problems, one per offending line, with line numbers. */
+	errors: string[];
+}
+
+/**
+ * Parse a .env document the way `envVariable.saveDotenv` does on the server,
+ * so a malformed file is rejected locally with line numbers instead of coming
+ * back as one aggregated BAD_REQUEST. Blank lines and `#` comments are
+ * skipped; `export ` prefixes are tolerated; a single pair of matching quotes
+ * around a value is stripped.
+ */
+export function parseDotenvDocument(content: string): DotenvParseResult {
+	const entries: DotenvEntry[] = [];
+	const errors: string[] = [];
+	const seen = new Set<string>();
+
+	const lines = content.split(/\r?\n/);
+	for (let index = 0; index < lines.length; index++) {
+		const raw = lines[index] ?? "";
+		const line = raw.trim();
+		if (!line || line.startsWith("#")) continue;
+
+		const withoutExport = line.startsWith("export ")
+			? line.slice("export ".length).trim()
+			: line;
+		const separator = withoutExport.indexOf("=");
+		if (separator === -1) {
+			errors.push(`line ${index + 1}: no "=" in "${truncateLine(line)}"`);
+			continue;
+		}
+
+		const key = withoutExport.slice(0, separator).trim();
+		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+			errors.push(
+				`line ${index + 1}: "${truncateLine(key)}" is not a valid variable name (letters, digits and underscores; cannot start with a digit)`,
+			);
+			continue;
+		}
+		if (seen.has(key)) {
+			errors.push(`line ${index + 1}: ${key} is set more than once`);
+			continue;
+		}
+		seen.add(key);
+
+		let value = withoutExport.slice(separator + 1).trim();
+		const quoted = /^(["'])([\s\S]*)\1$/.exec(value);
+		if (quoted?.[2] !== undefined) value = quoted[2];
+		entries.push({ key, value });
+	}
+
+	return { entries, errors };
+}
+
+function truncateLine(line: string): string {
+	return line.length > 40 ? `${line.slice(0, 40)}...` : line;
+}
+
+export interface DotenvReplacePlan {
+	created: string[];
+	deleted: string[];
+	/** True when the app currently has variables and the new document has none. */
+	emptiesEverything: boolean;
+	unchanged: string[];
+	updated: string[];
+}
+
+/**
+ * Work out what `envVariable.saveDotenv` will do with a document before
+ * sending it. The server replaces the whole set — every key missing from the
+ * file is DELETED — so the caller has to be shown the deletions, and an empty
+ * document has to be recognised as "wipe everything" rather than "no-op".
+ *
+ * `placeholder` values are the platform's managed-database notice rather than
+ * a real secret; a line still holding one keeps the stored value, so it is
+ * never counted as a change.
+ */
+export function planDotenvReplace(
+	current: DotenvEntry[],
+	desired: DotenvEntry[],
+	isPlaceholder: (value: string) => boolean = () => false,
+): DotenvReplacePlan {
+	const currentByKey = new Map(current.map((entry) => [entry.key, entry.value]));
+	const desiredKeys = new Set(desired.map((entry) => entry.key));
+
+	const created: string[] = [];
+	const updated: string[] = [];
+	const unchanged: string[] = [];
+	for (const entry of desired) {
+		const existing = currentByKey.get(entry.key);
+		if (existing === undefined) {
+			created.push(entry.key);
+		} else if (isPlaceholder(entry.value) || existing === entry.value) {
+			unchanged.push(entry.key);
+		} else {
+			updated.push(entry.key);
+		}
+	}
+
+	const deleted = current
+		.map((entry) => entry.key)
+		.filter((key) => !desiredKeys.has(key));
+
+	return {
+		created,
+		deleted,
+		emptiesEverything: desired.length === 0 && current.length > 0,
+		unchanged,
+		updated,
+	};
+}
 
 /**
  * Preserve the original documented `tarout env <app> <command>` form while
@@ -492,6 +613,205 @@ export function registerEnvCommands(program: Command) {
 				handleError(err);
 			}
 		});
+
+	// Apply a .env file as the app's COMPLETE variable set.
+	//
+	// Distinct from `push`, which merges through `envVariable.import` (and whose
+	// `--replace` needs `--restart`). `saveDotenv` is the dashboard's .env
+	// editor save: it takes the revision the document was read at, so a
+	// concurrent change by a teammate or another agent is a CONFLICT instead of
+	// a silent overwrite, it keeps managed-database values whose line still
+	// holds the platform's placeholder, and any key missing from the file is
+	// deleted through the confirmed replacement (which redeploys the app and
+	// verifies the key is gone at the provider).
+	env
+		.command("apply")
+		.argument("<app>", "Application ID or name")
+		.description(
+			"Replace an application's entire environment variable set with the contents of a .env file. Unlike `env push`, which merges, this is the dashboard's .env editor save: every key missing from the file is DELETED, the file is checked against the revision it was read at so a concurrent edit fails as a conflict rather than being overwritten, and a removal redeploys the app to confirm the key is really gone. Use `env push` to add or update without deleting anything.",
+		)
+		.option("-i, --input <file>", "Input file path", ".env")
+		.option(
+			"--allow-empty",
+			"Permit an empty or comment-only file, which deletes every variable the application has",
+		)
+		.action(
+			async (
+				appIdentifier: string,
+				options: { allowEmpty?: boolean; input?: string },
+			) => {
+				try {
+					if (!isLoggedIn()) throw new AuthError();
+
+					const inputPath = options.input ?? ".env";
+					if (!existsSync(inputPath)) {
+						throw new InvalidArgumentError(`File not found: ${inputPath}`);
+					}
+					const content = readFileSync(inputPath, "utf-8");
+
+					// Refuse a malformed document here: the server aggregates the
+					// first five problems into one message, and line numbers are more
+					// use than that.
+					const parsed = parseDotenvDocument(content);
+					if (parsed.errors.length > 0) {
+						throw new InvalidArgumentError(
+							`${inputPath} has ${parsed.errors.length} problem(s) and was not sent: ${parsed.errors.slice(0, 5).join("; ")}${
+								parsed.errors.length > 5
+									? `; and ${parsed.errors.length - 5} more`
+									: ""
+							}`,
+						);
+					}
+
+					const client = getApiClient();
+
+					const _spinner = startSpinner("Reading current variables...");
+					const apps: AppSummary[] =
+						await client.application.allByOrganization.query();
+					const app = findApp(apps, appIdentifier);
+					if (!app) {
+						failSpinner();
+						const suggestions = findSimilar(
+							appIdentifier,
+							apps.map((a) => a.name),
+						);
+						throw new NotFoundError("Application", appIdentifier, suggestions);
+					}
+
+					// The revision is the server's optimistic lock: it is only valid
+					// for the set as it is right now, so it is read immediately before
+					// the save and never cached.
+					const document = (await client.envVariable.getDotenv.query({
+						applicationId: app.applicationId,
+					} as any)) as { content?: string; count?: number; revision: string };
+					succeedSpinner();
+
+					const currentEntries = parseDotenvDocument(
+						document?.content ?? "",
+					).entries;
+					const plan = planDotenvReplace(
+						currentEntries,
+						parsed.entries,
+						isManagedDbEnvPlaceholder,
+					);
+
+					// With replace semantics an empty file is not a no-op, it is a
+					// request to delete everything — almost always a wrong path or an
+					// empty heredoc rather than an intention.
+					if (plan.emptiesEverything && !options.allowEmpty) {
+						throw new InvalidArgumentError(
+							`${inputPath} contains no variables, and applying it would DELETE all ${currentEntries.length} variable(s) on "${app.name}". Re-run with --allow-empty if that is what you want, or use \`tarout env bulk-delete\` to remove specific keys.`,
+						);
+					}
+
+					const changeCount =
+						plan.created.length + plan.updated.length + plan.deleted.length;
+					if (changeCount === 0) {
+						if (isJsonMode()) {
+							outputData({
+								applicationId: app.applicationId,
+								changed: false,
+								created: [],
+								updated: [],
+								deleted: [],
+							});
+							return;
+						}
+						log("");
+						log(`${app.name} already matches ${inputPath}. Nothing to do.`);
+						log("");
+						return;
+					}
+
+					// Deletions are the dangerous half of replace semantics, so they
+					// are named rather than counted.
+					if (!shouldSkipConfirmation()) {
+						log("");
+						log(colors.bold(`Apply ${inputPath} to ${app.name}`));
+						log(`  Add:    ${plan.created.length}`);
+						log(`  Update: ${plan.updated.length}`);
+						log(
+							`  Delete: ${plan.deleted.length}${
+								plan.deleted.length > 0
+									? ` ${colors.warn(`(${plan.deleted.join(", ")})`)}`
+									: ""
+							}`,
+						);
+						if (plan.deleted.length > 0) {
+							log("");
+							log(
+								colors.warn(
+									"Deleting a variable redeploys the application so the platform can confirm it is gone.",
+								),
+							);
+						}
+						log("");
+						const confirmed = await confirm(
+							`Replace the environment of "${app.name}" with ${inputPath}?`,
+							false,
+							{
+								field: "confirm_env_apply",
+								flag: "--yes",
+								context: {
+									appName: app.name,
+									applicationId: app.applicationId,
+									deleted: plan.deleted.length,
+								},
+							},
+						);
+						if (!confirmed) {
+							log("Cancelled.");
+							return;
+						}
+					}
+
+					const _saveSpinner = startSpinner("Applying variables...");
+					const result = (await client.envVariable.saveDotenv.mutate({
+						applicationId: app.applicationId,
+						content,
+						revision: document.revision,
+					} as any)) as {
+						changed?: boolean;
+						created?: string[];
+						deleted?: string[];
+						restarted?: boolean;
+						updated?: string[];
+					};
+					succeedSpinner("Environment applied.");
+
+					if (isJsonMode()) {
+						outputData(result);
+						return;
+					}
+
+					const created = result?.created ?? [];
+					const updated = result?.updated ?? [];
+					const deleted = result?.deleted ?? [];
+					quietOutput(String(created.length + updated.length + deleted.length));
+					log("");
+					log(
+						`  ${colors.success(String(created.length))} added, ${colors.cyan(String(updated.length))} updated, ${colors.warn(String(deleted.length))} deleted`,
+					);
+					if (result?.restarted) {
+						log(
+							colors.dim(
+								"The application was redeployed to confirm the removals.",
+							),
+						);
+					} else {
+						log(
+							colors.dim(
+								`Applies on next restart: tarout apps restart ${appIdentifier}`,
+							),
+						);
+					}
+					log("");
+				} catch (err) {
+					failSpinner();
+					handleError(err);
+				}
+			},
+		);
 
 	// View env variable audit log
 	env

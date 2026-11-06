@@ -1,7 +1,12 @@
 import type { Command } from "commander";
 import { getApiClient } from "../lib/api.js";
 import { isLoggedIn } from "../lib/config.js";
-import { AuthError, handleError } from "../lib/errors.js";
+import {
+	AuthError,
+	handleError,
+	InvalidArgumentError,
+	NotFoundError,
+} from "../lib/errors.js";
 import {
 	colors,
 	isJsonMode,
@@ -13,6 +18,65 @@ import {
 } from "../lib/output.js";
 import { confirm } from "../utils/prompts.js";
 import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
+
+/** How many notifications `get` / `unread` page in to resolve an id prefix. */
+const ID_RESOLUTION_PAGE_SIZE = 100;
+
+interface NotificationSummary {
+	createdAt?: Date | string | null;
+	id: string;
+	message?: string | null;
+	read?: boolean;
+	title?: string | null;
+	type?: string | null;
+}
+
+/**
+ * Resolve a notification reference the way every other group in this CLI
+ * resolves a resource: the full id, or an unambiguous prefix of one.
+ * Notification ids are cuids, so retyping one from `inbox list` in full is
+ * exactly the step a human gets wrong — but a prefix that matches two rows has
+ * to be an error rather than a coin toss, because `unread` and `read` write.
+ */
+export function resolveNotificationId(
+	notifications: NotificationSummary[],
+	identifier: string,
+): NotificationSummary {
+	const exact = notifications.find((item) => item.id === identifier);
+	if (exact) return exact;
+
+	const matches = notifications.filter((item) =>
+		item.id.startsWith(identifier),
+	);
+	if (matches.length === 1 && matches[0]) return matches[0];
+	if (matches.length > 1) {
+		throw new InvalidArgumentError(
+			`"${identifier}" matches ${matches.length} notifications (${matches
+				.slice(0, 3)
+				.map((item) => item.id)
+				.join(", ")}${matches.length > 3 ? ", ..." : ""}). Pass more of the id.`,
+		);
+	}
+	throw new NotFoundError("Notification", identifier);
+}
+
+/**
+ * One page of the inbox is enough to turn a reference into an id: the two
+ * commands that need it act on something the caller just saw in `inbox list`.
+ */
+async function resolveNotificationRef(
+	client: ReturnType<typeof getApiClient>,
+	identifier: string,
+): Promise<NotificationSummary> {
+	const page = (await client.appNotification.list.query({
+		limit: ID_RESOLUTION_PAGE_SIZE,
+		unreadOnly: false,
+	} as any)) as
+		| NotificationSummary[]
+		| { notifications?: NotificationSummary[] };
+	const notifications = Array.isArray(page) ? page : (page?.notifications ?? []);
+	return resolveNotificationId(notifications, identifier);
+}
 
 export function registerInboxCommands(program: Command) {
 	const inbox = program
@@ -88,6 +152,85 @@ export function registerInboxCommands(program: Command) {
 				const count = (result as any)?.count ?? result;
 				quietOutput(String(count));
 				log(`Unread notifications: ${colors.cyan(String(count))}`);
+			} catch (err) {
+				failSpinner();
+				handleError(err);
+			}
+		});
+
+	// ── Show one notification ────────────────────────────────────────────────────
+	inbox
+		.command("get <notification-id>")
+		.description(
+			"Show one notification in full: its type, title, whole message, read state and the structured payload the platform attached to it (deployment or application ids, for example), which `inbox list` truncates to 50 characters. Accepts the full id or an unambiguous prefix of one, and does not change the read state.",
+		)
+		.action(async (notificationId: string) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching notification...");
+				const target = await resolveNotificationRef(client, notificationId);
+				const notification = (await client.appNotification.getById.query({
+					notificationId: target.id,
+				} as any)) as NotificationSummary & {
+					data?: unknown;
+					organizationName?: string | null;
+				};
+				succeedSpinner();
+
+				if (isJsonMode()) {
+					outputData(notification);
+					return;
+				}
+
+				quietOutput(notification.id);
+				log("");
+				log(colors.bold(notification.title || "(untitled)"));
+				log(colors.dim(notification.id));
+				log("");
+				log(`  Type:    ${notification.type ?? colors.dim("-")}`);
+				log(
+					`  State:   ${notification.read ? colors.dim("read") : colors.cyan("unread")}`,
+				);
+				log(
+					`  Date:    ${
+						notification.createdAt
+							? new Date(notification.createdAt).toLocaleString()
+							: colors.dim("-")
+					}`,
+				);
+				log("");
+				log(notification.message || colors.dim("(no message)"));
+				if (notification.data !== null && notification.data !== undefined) {
+					log("");
+					log(colors.bold("Payload"));
+					log(colors.dim(JSON.stringify(notification.data, null, 2)));
+				}
+				log("");
+			} catch (err) {
+				failSpinner();
+				handleError(err);
+			}
+		});
+
+	// ── Mark as unread ───────────────────────────────────────────────────────────
+	inbox
+		.command("unread <notification-id>")
+		.description(
+			"Put a notification back into the unread state, so it counts towards `inbox count` again and shows as unread in the dashboard. The inverse of `inbox read`; useful to re-flag something you opened but have not dealt with. Accepts the full id or an unambiguous prefix.",
+		)
+		.action(async (notificationId: string) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Marking as unread...");
+				const target = await resolveNotificationRef(client, notificationId);
+				await client.appNotification.markUnread.mutate({
+					notificationId: target.id,
+				} as any);
+				succeedSpinner("Marked as unread.");
+				if (isJsonMode()) outputData({ unread: true, notificationId: target.id });
+				else quietOutput(target.id);
 			} catch (err) {
 				failSpinner();
 				handleError(err);

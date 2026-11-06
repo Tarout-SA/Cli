@@ -22,6 +22,7 @@ import {
 	registerLogsCommand,
 } from "./commands/deploy.js";
 import { registerDestinationsCommands } from "./commands/destinations.js";
+import { registerEmailCommands } from "./commands/email.js";
 import { registerDevCommand } from "./commands/dev.js";
 import { registerDomainsCommands } from "./commands/domains.js";
 import { registerExecCommand } from "./commands/exec.js";
@@ -255,6 +256,7 @@ registerBackupsCommands(program);
 registerAccountCommands(program);
 registerDashboardCommands(program);
 registerDestinationsCommands(program);
+registerEmailCommands(program);
 registerInboxCommands(program);
 registerProvidersCommands(program);
 registerSettingsCommands(program);

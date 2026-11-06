@@ -485,6 +485,60 @@ export function registerOrgsCommands(program: Command) {
 			}
 		});
 
+	// ── Free-plan project slot (your own account) ───────────────────────────────
+	// `organization.freeProjectSlotStatus` resolves the slot through the CALLING
+	// USER, because creating an organization makes you its owner. The
+	// organization-scoped answer — the active org owner's slot, which is what
+	// the next project created here is charged to — is `tarout projects
+	// free-slot`. Reading the wrong one blocks a member of someone else's
+	// organization whose own slot is free.
+	orgs
+		.command("free-slot")
+		.description(
+			"Report whether YOUR OWN account's one Free-plan project slot is already taken. This is the slot charged when you create a NEW organization, because you become its owner — it is not the active organization's slot, and the two differ whenever you are a member of an organization somebody else owns. For the active organization's slot, which decides what the next `tarout projects create` costs, use `tarout projects free-slot`.",
+		)
+		.action(async () => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Checking your free project slot...");
+				const status =
+					(await client.organization.freeProjectSlotStatus.query()) as {
+						occupied?: boolean;
+					};
+				succeedSpinner();
+
+				const occupied = status?.occupied === true;
+				if (isJsonMode()) {
+					outputData({ scope: "user", occupied });
+					return;
+				}
+				quietOutput(occupied ? "occupied" : "free");
+				log("");
+				log(colors.bold("Free project slot (your account)"));
+				log(
+					`  ${occupied ? colors.warn("occupied") : colors.success("free")} ${colors.dim("— follows you, not the active organization")}`,
+				);
+				log("");
+				log(
+					colors.dim(
+						occupied
+							? "You already hold a free project somewhere, so the first project of a new organization you create would need a paid plan."
+							: "A new organization you create could hold one Free-plan project.",
+					),
+				);
+				log(
+					colors.dim(
+						"This organization's own slot: tarout projects free-slot",
+					),
+				);
+				log("");
+			} catch (err) {
+				failSpinner();
+				handleError(err);
+			}
+		});
+
 	// Set active organization (switches session context)
 	orgs
 		.command("activate")

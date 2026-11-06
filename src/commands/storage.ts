@@ -23,7 +23,12 @@ import {
 	table,
 } from "../lib/output.js";
 import { confirm, input } from "../utils/prompts.js";
-import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
+import {
+	failSpinner,
+	startSpinner,
+	succeedSpinner,
+	updateSpinner,
+} from "../utils/spinner.js";
 import { requireProfile } from "../lib/auth-profile.js";
 
 /**
@@ -63,6 +68,127 @@ function warnPublicAccess(publicUrl?: string | null) {
 	if (publicUrl) {
 		log(`Public base URL: ${colors.cyan(publicUrl)}`);
 	}
+}
+
+/**
+ * The platform's own `MAX_FILE_LIST_PAGE_SIZE` (its storage router). Asking for
+ * more than this is rejected by Zod, so the CLI never requests a bigger page.
+ */
+const FILE_LIST_MAX_PAGE_SIZE = 1000;
+
+/**
+ * Split a user-supplied folder path into its segments, rejecting anything that
+ * would address something other than a folder inside this bucket. `..` is the
+ * one that matters: object keys are strings, so a `../` segment does not walk
+ * out of the bucket the way a filesystem path would — it silently builds a
+ * DIFFERENT prefix (`a/../b/` is not `b/`), and on a recursive delete that is a
+ * prefix the caller never meant to name. `.` is rejected for the same reason,
+ * and empty segments (`a//b`) because they produce a prefix that matches
+ * nothing.
+ */
+function splitFolderSegments(raw: string, flagHint: string): string[] {
+	const trimmed = String(raw ?? "").trim();
+	const stripped = trimmed.replace(/^\/+/, "").replace(/\/+$/, "");
+	if (!stripped) {
+		throw new InvalidArgumentError(
+			`A folder path is required${flagHint}. "/" and "" mean the whole bucket, which this command will not act on.`,
+		);
+	}
+	const segments = stripped.split("/");
+	if (segments.some((segment) => segment === "" )) {
+		throw new InvalidArgumentError(
+			`Folder path "${raw}" has an empty path segment. Use single slashes, for example "logs/2026".`,
+		);
+	}
+	if (segments.some((segment) => segment === "." || segment === "..")) {
+		throw new InvalidArgumentError(
+			`Folder path "${raw}" contains a "." or ".." segment. Object keys are not filesystem paths: a relative segment does not escape to a parent, it names a literally different prefix. Pass the path as it appears in \`tarout storage browse\`.`,
+		);
+	}
+	return segments;
+}
+
+/**
+ * Normalize a folder path into the `prefix` the platform's storage procedures
+ * expect: no leading slash, exactly one trailing slash. Required — the whole
+ * bucket is never an acceptable target here (`storage delete` is the command
+ * that removes a bucket).
+ */
+export function normalizeFolderPrefix(raw: string): string {
+	return `${splitFolderSegments(raw, " (for example logs/2026)").join("/")}/`;
+}
+
+/**
+ * Same normalization for a browse/listing prefix, except that the root of the
+ * bucket is legal and is expressed as the empty string (which is exactly what
+ * `storage.browse` wants for the top level).
+ */
+export function normalizeBrowsePrefix(raw: string | undefined): string {
+	const trimmed = String(raw ?? "").trim();
+	if (!trimmed || trimmed === "/") return "";
+	return `${splitFolderSegments(trimmed, "").join("/")}/`;
+}
+
+/**
+ * How much a recursive folder delete is about to remove, in words. The count
+ * comes from a listing page, so it is a floor whenever that listing was capped:
+ * say so rather than under-reporting a destructive operation.
+ */
+export function describeFolderDeletionScope(
+	objectCount: number,
+	truncated: boolean,
+): string {
+	const count = Math.max(0, Math.trunc(objectCount)).toLocaleString("en-US");
+	if (truncated) {
+		return `at least ${count} objects (the listing was capped at ${FILE_LIST_MAX_PAGE_SIZE.toLocaleString("en-US")}, so there may be more)`;
+	}
+	if (objectCount === 0) {
+		return "no objects (this folder is already empty, or nothing in the bucket has that prefix)";
+	}
+	return `${count} object${objectCount === 1 ? "" : "s"}`;
+}
+
+/**
+ * `storage.getBucketStats` as display lines. These numbers are measured live
+ * from the object store, unlike the `storageUsed` / `filesCount` counters
+ * `storage info` prints, which only track writes that went through the Tarout
+ * gateway and therefore read 0 for a bucket written to directly with S3
+ * credentials. `truncated` means the server stopped paging and the counts are a
+ * floor; `noncurrentBytes` is retained object versions, which are invisible to
+ * a listing but are stored and billed.
+ */
+export function formatBucketStatsLines(stats: {
+	fileCount?: unknown;
+	totalBytes?: unknown;
+	noncurrentBytes?: unknown;
+	truncated?: unknown;
+}): string[] {
+	const count =
+		typeof stats?.fileCount === "number" && Number.isFinite(stats.fileCount)
+			? stats.fileCount
+			: 0;
+	const totalBytes =
+		typeof stats?.totalBytes === "number" ? stats.totalBytes : 0;
+	const noncurrentBytes =
+		typeof stats?.noncurrentBytes === "number" ? stats.noncurrentBytes : 0;
+	const truncated = Boolean(stats?.truncated);
+
+	const lines = [
+		`Objects: ${truncated ? "at least " : ""}${count.toLocaleString("en-US")}`,
+		`Live size: ${truncated ? "at least " : ""}${formatBytes(totalBytes)}`,
+	];
+	if (noncurrentBytes > 0) {
+		lines.push(
+			`Retained versions: ${formatBytes(noncurrentBytes)} (older generations kept by versioning — stored and billed, but not listed)`,
+		);
+		lines.push(`Billed total: ${formatBytes(totalBytes + noncurrentBytes)}`);
+	}
+	if (truncated) {
+		lines.push(
+			"Truncated: yes — the bucket holds more objects than one measurement pass covers, so these are floors, not totals",
+		);
+	}
+	return lines;
 }
 
 export function registerStorageCommands(program: Command) {
@@ -385,6 +511,14 @@ export function registerStorageCommands(program: Command) {
 					`  Used: ${formatBytes(Number(bucket.storageUsed) || 0)} / ${formatBytes(Number(bucket.storageLimit) || 0)}`,
 				);
 				log(`  Files: ${Number(bucket.filesCount) || 0}`);
+				// Those two counters only track writes made through the Tarout
+				// gateway, so a bucket written to directly with S3 credentials reports
+				// 0 here. `storage stats` measures the object store itself.
+				log(
+					colors.dim(
+						`  Counters track gateway writes only — measure the bucket itself with: tarout storage stats ${bucket.name}`,
+					),
+				);
 				log("");
 				log(colors.bold("Endpoint"));
 				if (bucket.endpoint) {
@@ -415,6 +549,66 @@ export function registerStorageCommands(program: Command) {
 				log(`  Created: ${formatDate(bucket.createdAt)}`);
 				log("");
 			} catch (err) {
+				handleError(err);
+			}
+		});
+
+	// Live object/size measurement. Deliberately a second command rather than
+	// folded into `storage info`: info is a cheap metadata read, while this walks
+	// the object store page by page (up to ~20k objects server-side) and is the
+	// only source that is correct for a bucket written to directly.
+	storage
+		.command("stats")
+		.argument("<bucket>", "Bucket ID or name")
+		.description(
+			"Measure a bucket's real object count and size by walking the object store, and report retained (noncurrent) versions alongside. This is the number to trust: the Used / Files figures in `tarout storage info` come from counters that only track writes made through the Tarout gateway, so they read 0 for a bucket an application wrote to directly with its own S3 credentials. Very large buckets are reported as floors — the server caps the measurement and flags it.",
+		)
+		.action(async (bucketIdentifier) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+
+				const client = getApiClient();
+
+				const _spinner = startSpinner("Finding bucket...");
+				const buckets = await client.storage.allByOrganization.query();
+				const bucket = findBucket(buckets as any[], bucketIdentifier);
+
+				if (!bucket) {
+					failSpinner();
+					const suggestions = findSimilar(
+						bucketIdentifier,
+						(buckets as any[]).map((b: any) => b.name),
+					);
+					throw new NotFoundError(
+						"Storage bucket",
+						bucketIdentifier,
+						suggestions,
+					);
+				}
+
+				const bucketId = bucket.bucketId || bucket.id;
+				const _statsSpinner = startSpinner("Measuring bucket...");
+				// Returns { fileCount, totalBytes, noncurrentBytes, truncated }.
+				const stats: any = await client.storage.getBucketStats.query({
+					bucketId,
+				});
+				succeedSpinner();
+
+				if (isJsonMode()) {
+					outputData(stats);
+					return;
+				}
+
+				quietOutput(String(Number(stats?.totalBytes) || 0));
+
+				log("");
+				log(colors.bold(`${bucket.name} — measured now`));
+				for (const line of formatBucketStatsLines(stats)) {
+					log(`  ${line}`);
+				}
+				log("");
+			} catch (err) {
+				failSpinner();
 				handleError(err);
 			}
 		});
@@ -489,6 +683,150 @@ export function registerStorageCommands(program: Command) {
 			}
 		});
 
+	// One-level, hierarchical listing. Genuinely different from `storage files`,
+	// which calls `storage.getFiles`: that one lists every object under a prefix,
+	// nested ones included and flattened, with folders appearing only as
+	// ".placeholder" markers. This calls `storage.browse`, which uses a delimiter
+	// listing and returns the immediate children plus the real subfolders, so a
+	// bucket can be walked a directory at a time.
+	storage
+		.command("browse")
+		.argument("<bucket>", "Bucket ID or name")
+		.argument("[folder]", "Folder to open (default: the bucket root)")
+		.description(
+			"Open one folder of a bucket and list its immediate contents: the subfolders you can descend into and the files directly inside it. Use this to navigate a bucket level by level — `tarout storage files` is the flat alternative that lists every object under a prefix, nested ones included, and shows folders only as placeholder markers. Pass a folder path (as printed here) to descend, and --limit with the printed next-page token to page through a wide folder.",
+		)
+		.option("-n, --limit <n>", `Max entries per page (1-${FILE_LIST_MAX_PAGE_SIZE})`)
+		.option("--page-token <token>", "Continue from a previous page's token")
+		.action(async (bucketIdentifier, folder, options) => {
+			try {
+				const prefix = normalizeBrowsePrefix(folder);
+				let maxResults: number | undefined;
+				if (options.limit !== undefined) {
+					const parsed = Number(options.limit);
+					if (
+						!Number.isInteger(parsed) ||
+						parsed < 1 ||
+						parsed > FILE_LIST_MAX_PAGE_SIZE
+					) {
+						throw new InvalidArgumentError(
+							`--limit must be a whole number from 1 to ${FILE_LIST_MAX_PAGE_SIZE}; got "${options.limit}".`,
+						);
+					}
+					maxResults = parsed;
+				}
+
+				if (!isLoggedIn()) throw new AuthError();
+
+				const client = getApiClient();
+
+				const _spinner = startSpinner("Finding bucket...");
+				const buckets = await client.storage.allByOrganization.query();
+				const bucket = findBucket(buckets as any[], bucketIdentifier);
+
+				if (!bucket) {
+					failSpinner();
+					const suggestions = findSimilar(
+						bucketIdentifier,
+						(buckets as any[]).map((b: any) => b.name),
+					);
+					throw new NotFoundError(
+						"Storage bucket",
+						bucketIdentifier,
+						suggestions,
+					);
+				}
+
+				const bucketId = bucket.bucketId || bucket.id;
+				const _browseSpinner = startSpinner("Listing folder...");
+				// Returns { prefix, folders: [{ name, prefix }], files: [{ name,
+				// path, size, contentType, createdAt, updatedAt }], nextPageToken }.
+				const listing: any = await client.storage.browse.query({
+					bucketId,
+					prefix,
+					...(maxResults === undefined ? {} : { maxResults }),
+					...(options.pageToken ? { pageToken: options.pageToken } : {}),
+				});
+				succeedSpinner();
+
+				if (isJsonMode()) {
+					outputData(listing);
+					return;
+				}
+
+				const folders: any[] = Array.isArray(listing?.folders)
+					? listing.folders
+					: [];
+				const files: any[] = Array.isArray(listing?.files) ? listing.files : [];
+
+				if (isQuietMode()) {
+					// One path per line, folders with their trailing slash, so the
+					// output can be fed straight back into this command.
+					for (const f of folders) quietOutput(`${prefix}${f.name}/`);
+					for (const f of files) quietOutput(String(f.path ?? f.name ?? ""));
+					return;
+				}
+
+				const here = prefix || "/";
+				log("");
+				log(`${colors.cyan(bucket.name)} ${colors.dim(here)}`);
+
+				if (folders.length === 0 && files.length === 0) {
+					log("");
+					log(
+						prefix
+							? `This folder is empty, or no object in the bucket has the prefix ${colors.dim(prefix)}.`
+							: "This bucket is empty.",
+					);
+					log("");
+					return;
+				}
+
+				log("");
+				table(
+					["TYPE", "NAME", "SIZE", "UPDATED"],
+					[
+						...folders.map((f: any) => [
+							colors.dim("dir"),
+							`${colors.cyan(String(f.name ?? ""))}/`,
+							colors.dim("-"),
+							colors.dim("-"),
+						]),
+						...files.map((f: any) => [
+							colors.dim("file"),
+							String(f.name ?? ""),
+							formatBytes(Number(f.size) || 0),
+							formatDate(f.updatedAt ?? f.createdAt),
+						]),
+					],
+				);
+				log("");
+				log(
+					colors.dim(
+						`${folders.length} folder${folders.length === 1 ? "" : "s"}, ${files.length} file${files.length === 1 ? "" : "s"}`,
+					),
+				);
+				if (folders.length > 0) {
+					log(
+						colors.dim(
+							`Descend with: tarout storage browse ${bucket.name} ${prefix}${folders[0].name}`,
+						),
+					);
+				}
+				if (listing?.nextPageToken) {
+					log(
+						colors.dim(
+							`More entries: tarout storage browse ${bucket.name}${prefix ? ` ${prefix}` : ""} --page-token ${listing.nextPageToken}`,
+						),
+					);
+				}
+				log("");
+			} catch (err) {
+				failSpinner();
+				handleError(err);
+			}
+		});
+
 	// Delete a file from a bucket
 	storage
 		.command("rm-file")
@@ -543,6 +881,120 @@ export function registerStorageCommands(program: Command) {
 					quietOutput(fileName);
 				}
 			} catch (err) {
+				handleError(err);
+			}
+		});
+
+	// Recursive folder delete. The platform deletes every object under the
+	// prefix in one pass, so the only protection against naming the wrong prefix
+	// is here: normalize and reject traversal, count what is in scope, then
+	// confirm with that count on screen.
+	storage
+		.command("rm-folder")
+		.argument("<bucket>", "Bucket ID or name")
+		.argument("<folder>", "Folder path to delete, as shown by `tarout storage browse`")
+		.description(
+			"Recursively delete a folder and everything under it — every object sharing that prefix, at any depth, plus the folder marker itself. This cannot be undone and there is no per-object prompt, so the command first counts what is in scope and shows that count before asking. The whole bucket is never a legal target: remove a bucket with `tarout storage delete`. Requires confirmation unless --yes is passed.",
+		)
+		.action(async (bucketIdentifier, folder) => {
+			try {
+				const prefix = normalizeFolderPrefix(folder);
+
+				if (!isLoggedIn()) throw new AuthError();
+
+				const client = getApiClient();
+
+				const _spinner = startSpinner("Finding bucket...");
+				const buckets = await client.storage.allByOrganization.query();
+				const bucket = findBucket(buckets as any[], bucketIdentifier);
+
+				if (!bucket) {
+					failSpinner();
+					const suggestions = findSimilar(
+						bucketIdentifier,
+						(buckets as any[]).map((b: any) => b.name),
+					);
+					throw new NotFoundError(
+						"Storage bucket",
+						bucketIdentifier,
+						suggestions,
+					);
+				}
+
+				const bucketId = bucket.bucketId || bucket.id;
+
+				// What the delete will cover. `getFiles` is a flat listing of every
+				// object under the prefix, which is exactly the delete's scope; one
+				// page is enough to give an honest number (or an honest floor).
+				let scope = "an unknown number of objects (the listing failed)";
+				if (!shouldSkipConfirmation()) {
+					updateSpinner("Counting objects...");
+					try {
+						const page: any = await client.storage.getFiles.query({
+							bucketId,
+							prefix,
+							maxResults: FILE_LIST_MAX_PAGE_SIZE,
+						});
+						const items: any[] = Array.isArray(page?.files) ? page.files : [];
+						scope = describeFolderDeletionScope(
+							items.length,
+							Boolean(page?.nextPageToken),
+						);
+					} catch {
+						// Counting is a courtesy; never block the delete on it.
+					}
+					succeedSpinner();
+
+					log("");
+					log(`Bucket: ${colors.bold(bucket.name)}`);
+					log(`Folder: ${colors.bold(prefix)}`);
+					log("");
+					log(
+						colors.warn(
+							`This recursively removes ${scope} and cannot be undone.`,
+						),
+					);
+					log("");
+
+					const confirmed = await confirm(
+						`Delete folder "${prefix}" and everything under it from bucket "${bucket.name}"?`,
+						false,
+						{
+							field: "confirm_delete_folder",
+							flag: "--yes",
+							context: { bucketName: bucket.name, prefix, scope },
+						},
+					);
+					if (!confirmed) {
+						log("Cancelled.");
+						return;
+					}
+				} else {
+					succeedSpinner();
+				}
+
+				const _deleteSpinner = startSpinner("Deleting folder...");
+				// Returns { success, deletedCount }.
+				const result: any = await client.storage.deleteFolder.mutate({
+					bucketId,
+					prefix,
+				});
+				const deletedCount =
+					typeof result?.deletedCount === "number" ? result.deletedCount : null;
+				succeedSpinner(
+					deletedCount === null
+						? "Folder deleted."
+						: `Folder deleted — ${deletedCount.toLocaleString("en-US")} object${deletedCount === 1 ? "" : "s"} removed.`,
+				);
+
+				if (isJsonMode()) {
+					outputData({ deleted: true, bucketId, prefix, deletedCount });
+					return;
+				}
+
+				quietOutput(prefix);
+			} catch (err) {
+				failSpinner();
 				handleError(err);
 			}
 		});
@@ -1411,10 +1863,15 @@ function formatDate(date: Date | string | null | undefined): string {
 	});
 }
 
-function formatBytes(bytes: number): string {
-	if (!bytes || bytes === 0) return "0 B";
-	const units = ["B", "KB", "MB", "GB", "TB"];
-	const i = Math.floor(Math.log(bytes) / Math.log(1024));
+/** Human-readable byte size (1024-based), e.g. `5.0 MB`. */
+export function formatBytes(bytes: number): string {
+	if (!bytes || bytes === 0 || !Number.isFinite(bytes)) return "0 B";
+	const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+	// Clamp: without it a petabyte-scale bucket renders as "1.0 undefined".
+	const i = Math.max(
+		0,
+		Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1),
+	);
 	return `${(bytes / 1024 ** i).toFixed(1)} ${units[i]}`;
 }
 
