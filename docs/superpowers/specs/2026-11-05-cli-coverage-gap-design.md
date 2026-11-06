@@ -1,7 +1,9 @@
 # CLI coverage gap — audit and remediation plan
 
 Date: 2026-11-05
-Status: proposed, not approved
+Status: **implemented 2026-11-06** on `feat/cli-coverage-all`. All five phases
+landed; 104 uncovered procedures went to 0 unexplained. See "Outcome" at the
+foot of this document.
 Scope: `@tarout/cli` (this repo) against `platform` tRPC surface at `cc96feb1`
 
 ## Intent
@@ -273,3 +275,84 @@ with a preflight that turns the server's `PRECONDITION_FAILED` into a clear
   Recommendation: add tools only for Phase 1 (agent-facing by definition) and
   `billing retry-renewal`.
 - Arabic strings, if any command surfaces user-facing prose beyond labels.
+
+## Outcome (2026-11-06)
+
+All five phases shipped. Of 470 in-scope procedures, every one is now either
+reached by a command or carries a stated reason in
+`src/lib/coverage-exceptions.ts` — 104 unexplained gaps went to 0.
+
+New command groups: `tarout email` (22 subcommands), `tarout agent-webhooks`,
+`tarout agent-policies`. New subgroups: `servers software`, `servers
+incidents`, `providers gitea`, `domains saudi`, `billing migrate:*`. Plus ~40
+subcommands filled into existing groups.
+
+Tests went 1184 → 1506 (111 → 121 files); `bun test` 101 pass; typecheck and
+`biome check src/` both clean, with zero new lint findings (the three in
+touched files pre-exist upstream at shifted line numbers).
+
+### Decisions taken during implementation
+
+- **15 procedures are deliberately uncovered**, each with a reason in
+  `coverage-exceptions.ts`: two tRPC subscriptions the transport cannot
+  consume, two browser-only handshakes, three procedures that always throw
+  (including a `user.generateToken` tombstone), two platform-ops repair jobs,
+  four covered by a deliberately different command, one static-analysis false
+  negative, and `updateNameservers` withheld as described above.
+- **`servers incidents`** was chosen over a top-level `tarout incidents` so
+  fired alerts sit beside the pre-existing `servers alerts` threshold config.
+  Both groups' help text now points at the other, because "acknowledge a
+  firing alert" and "edit a threshold" were otherwise easy to confuse.
+- **`db rotate-password`** exits non-zero when it cannot re-sync an attached
+  app. Rotation updates linked apps best-effort and swallows per-app failures,
+  so a clean exit would have been a lie.
+- **`env apply`** (replace semantics) is kept verbally distinct from the
+  pre-existing `env push` (merge), and refuses an empty document rather than
+  silently wiping every variable.
+- **`destinations create-native`** is a sibling command, not a flag on
+  `create`: `--bucket` there already means "bucket name at the external
+  provider", and a flag that silently turns five required flags optional
+  cannot be expressed in `--help`.
+
+### The regression guard
+
+`__test__/surface-coverage.test.ts` is the part that matters for drift. It
+checks a committed snapshot of the surface
+(`__test__/fixtures/platform-surface.json`, refreshed by
+`scripts/refresh-surface-snapshot.mjs`) and fails when a procedure has neither
+a command nor a reason, when an exception goes stale, or when a reason is empty
+or says "not implemented yet". It was verified to fail on a seeded gap, not
+just to pass today.
+
+Snapshot refresh is deliberately manual: the gap is only invisible while nobody
+regenerates the file, so regenerating it is the act that surfaces new drift. A
+CI step that refreshes and fails on a diff would close that loop.
+
+### Platform bugs found while reading the routers
+
+Not fixed here — this branch only touches the CLI. Worth filing:
+
+- `subscription.retryRenewal`'s precondition is stricter than the charger it
+  guards: it demands an initial transaction id, while
+  `chargeSubscriptionRenewal` can charge off a default payment method alone. A
+  portal-added card on a subscription with no initial transaction returns
+  `no_card` despite being chargeable.
+- `subscription.getStanding` reads `ctx.session.activeProjectId` directly
+  instead of going through the project-scope helper, so an API key scoped to
+  one project can read another's standing.
+- `email.listSuppressions` is capped at 500 rows with no cursor or address
+  filter, and `removeSuppression` takes an id rather than an address — so an
+  address past the cap cannot be removed by name.
+- `domainRegistrar.getRenewalQuote` omits a `years` input and so always quotes
+  one year; a multi-year renewal cannot be pre-quoted.
+- `payment.getCheckoutOrder` returns FORBIDDEN ("different project") where it
+  means NOT_FOUND, when a `sub_` order has no resolvable subscription.
+- `subscription.getActiveMigration.stage` hides failures in a mixed batch:
+  `copied > 0` wins over `failed > 0`, so failures show only in `counts`.
+- `serverSoftware.list/status/logs` skip the `assertCloudServersLaunched` guard
+  that `install/update/uninstall` apply — harmless while the flag is false,
+  but asymmetric.
+- The hidden `taroutCore` server-software addon cannot install at all (its
+  bootstrap clones a non-public repo), and rows persisted under the legacy
+  `"Tarout Core"` literal read as not-installed, needing a data migration that
+  was never written.
