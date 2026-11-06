@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { type Command, Option } from "commander";
 import { getApiClient } from "../lib/api.js";
 import { toAppNameSlug } from "../lib/app-name.js";
@@ -9,6 +10,7 @@ import {
 	CliError,
 	findSimilar,
 	handleError,
+	InvalidArgumentError,
 	NotFoundError,
 } from "../lib/errors.js";
 import {
@@ -128,6 +130,130 @@ export function resolveDatabaseUpgradeDueHalalas(
 		return preview.proratedChargeHalalas;
 	}
 	return undefined;
+}
+
+/**
+ * The `applicationStatus` values the platform's own schemas accept for
+ * `postgres.changeStatus` / `mysql.changeStatus` (its
+ * `src/server/validations/postgres.ts` and `mysql.ts` both enum exactly these).
+ * Anything else is rejected by Zod before the handler runs, so the CLI checks
+ * the spelling itself instead of surfacing a Zod error.
+ */
+export const DATABASE_STATUS_VALUES = [
+	"idle",
+	"running",
+	"done",
+	"error",
+	"stopped",
+] as const;
+
+export type DatabaseStatus = (typeof DATABASE_STATUS_VALUES)[number];
+
+/** The canonical status for `value`, or an InvalidArgumentError for a typo. */
+export function assertDatabaseStatus(value: string): DatabaseStatus {
+	const normalized = String(value ?? "")
+		.trim()
+		.toLowerCase();
+	if ((DATABASE_STATUS_VALUES as readonly string[]).includes(normalized)) {
+		return normalized as DatabaseStatus;
+	}
+	throw new InvalidArgumentError(
+		`"${value}" is not a database status. The platform accepts ${DATABASE_STATUS_VALUES.join(", ")} — and it refuses all of them for a managed database anyway (see \`tarout db stop\`).`,
+	);
+}
+
+/**
+ * Why `tarout db stop` / `tarout db restart` refuse locally instead of calling
+ * `postgres.changeStatus` / `mysql.changeStatus`. Both engines behave the same
+ * way: the handler rejects every MANAGED_SQL database outright, and on a
+ * non-managed row it only writes the `applicationStatus` column — nothing on
+ * the host reads it, so a database would read "stopped" while it keeps serving
+ * traffic. The target status is validated so a bad caller gets a spelling
+ * error rather than this (correct, but unrelated) lifecycle explanation.
+ */
+export function describeDatabaseStatusChange(status: string): string {
+	const target = assertDatabaseStatus(status);
+	return `${MANAGED_DB_LIFECYCLE_MESSAGE} The call behind this command (postgres.changeStatus / mysql.changeStatus) would only write applicationStatus="${target}" onto the database record, which nothing on the host reads, so the CLI does not send it.`;
+}
+
+/**
+ * What a `postgres.rotatePassword` run changed downstream, in the words an
+ * operator needs. The mutation returns no secret — only
+ * `{ updatedApplicationIds, failedApplicationIds }` — and it is NOT purely a
+ * credential swap:
+ *
+ *  - Every attached Tarout application has its `DATABASE_URL`-style connection
+ *    variables rewritten and is restarted by the platform. That re-sync is
+ *    best-effort and reported per application: anything in
+ *    `failedApplicationIds` is still carrying the OLD password and will fail to
+ *    connect until an operator fixes it by hand.
+ *  - Nothing outside that list is touched. Pooled clients are disconnected (the
+ *    pooler entry is dropped and re-registered), and any psql session, CI job,
+ *    laptop or non-Tarout host holding the old password simply stops
+ *    authenticating.
+ */
+export function buildRotationImpactReport(
+	dbName: string,
+	result: unknown,
+): { updated: string[]; failed: string[]; lines: string[] } {
+	const asIds = (value: unknown): string[] =>
+		Array.isArray(value) ? value.map((id) => String(id)).filter(Boolean) : [];
+	const payload = (result ?? {}) as {
+		updatedApplicationIds?: unknown;
+		failedApplicationIds?: unknown;
+	};
+	const updated = asIds(payload.updatedApplicationIds);
+	const failed = asIds(payload.failedApplicationIds);
+
+	const lines: string[] = [
+		`The old password for "${dbName}" no longer authenticates and every pooled connection was dropped. Anything that connects from outside Tarout — psql on a laptop, a CI job, a non-Tarout host, a saved GUI connection — has to be re-pointed at the new password.`,
+	];
+
+	if (updated.length > 0) {
+		lines.push(
+			`${updated.length} attached application${updated.length === 1 ? "" : "s"} had their connection variables (DATABASE_URL and friends) rewritten and were restarted automatically: ${updated.join(", ")}.`,
+		);
+	}
+
+	if (failed.length > 0) {
+		lines.push(
+			`${failed.length} attached application${failed.length === 1 ? "" : "s"} could NOT be re-synced and still hold the old password: ${failed.join(", ")}. Each one needs a manual fix: read the new credential with \`tarout db info ${dbName} --json\`, check what the app is holding with \`tarout env list <app>\`, re-set it with \`tarout env set <app> DATABASE_URL=<new-url>\` (that pushes to the runtime), then restart the app with \`tarout apps restart <app>\`.`,
+		);
+	}
+
+	if (updated.length === 0 && failed.length === 0) {
+		lines.push(
+			"No applications are attached to this database, so nothing on Tarout needed updating.",
+		);
+	}
+
+	lines.push(
+		`The new password is not printed. \`tarout db connect ${dbName}\` picks it up automatically, and \`tarout db info ${dbName} --json\` returns it.`,
+	);
+
+	return { updated, failed, lines };
+}
+
+/**
+ * Where `tarout db ssl-cert --output` should write the CA. A bare directory
+ * (`./certs/`, `.`, `..`) takes the server-supplied filename, so
+ * `--output .` lands a correctly named PEM in the current directory instead of
+ * failing with EISDIR. The result is absolute: the path is echoed back to the
+ * user, and a relative one is ambiguous in a log.
+ */
+export function resolveCertOutputPath(raw: string, filename: string): string {
+	const trimmed = String(raw ?? "").trim();
+	if (!trimmed) {
+		throw new InvalidArgumentError(
+			`--output needs a file path, for example --output ./${filename}.`,
+		);
+	}
+	const isDirectory =
+		/[\\/]$/.test(trimmed) ||
+		trimmed === "." ||
+		trimmed === ".." ||
+		/[\\/]\.\.?$/.test(trimmed);
+	return resolve(isDirectory ? join(trimmed, filename) : trimmed);
 }
 
 export interface DatabaseTierChangeInput {
@@ -626,14 +752,20 @@ export function registerDbCommands(program: Command) {
 	// are refused, and a paid database would read "stopped" while it keeps
 	// running. Keep the commands so old scripts get a clear answer, and never
 	// touch the API (same pattern as `servers cancel-vm-subscription`).
-	for (const verb of ["restart", "stop"] as const) {
+	// `mysql.changeStatus` behaves identically to its Postgres twin — same
+	// MANAGED_SQL refusal, same inert column write — so these two verbs cover
+	// both engines and MySQL needs no separate command.
+	for (const [verb, targetStatus] of [
+		["restart", "running"],
+		["stop", "stopped"],
+	] as const) {
 		db.command(verb)
 			.argument("[db]", "Database ID or name")
 			.description(
 				"No longer applies: managed databases cannot be stopped, started or restarted",
 			)
 			.action(() => {
-				handleError(new CliError(MANAGED_DB_LIFECYCLE_MESSAGE));
+				handleError(new CliError(describeDatabaseStatusChange(targetStatus)));
 			});
 	}
 
@@ -1232,6 +1364,250 @@ export function registerDbCommands(program: Command) {
 			}
 		});
 
+	// ── Rotate the password (Postgres) ────────────────────────────────────────────
+	db.command("rotate-password")
+		.argument("<db>", "Postgres database ID or name")
+		.description(
+			"Rotate a managed PostgreSQL database's password in place, for credential hygiene or after a leak. The old password stops authenticating immediately and every pooled connection is dropped, so anything connecting from outside Tarout (psql on a laptop, a CI job, a non-Tarout host) must be re-pointed at the new password. Attached Tarout applications are re-synced by the platform — their DATABASE_URL-style variables are rewritten and each app is restarted — but that step is best-effort, so this command reports which apps were updated, which still hold the old password, and exits non-zero if any need a manual fix. The new password is never printed: read it back with `tarout db connect <db>` or `tarout db info <db> --json`. Asks for confirmation unless --yes is passed.",
+		)
+		.action(async (dbIdentifier) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Finding database...");
+				const allDbs = await getAllDatabases(client);
+				const dbSummary = findDatabase(allDbs, dbIdentifier);
+				if (!dbSummary) {
+					failSpinner();
+					const suggestions = findSimilar(
+						dbIdentifier,
+						allDbs.map((d) => d.name),
+					);
+					throw new NotFoundError("Database", dbIdentifier, suggestions);
+				}
+				if (dbSummary.type !== "postgres") {
+					failSpinner();
+					throw new CliError(
+						`Password rotation is only supported for managed PostgreSQL databases. "${dbSummary.name}" is a MySQL database.`,
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+				const details: any = await client.postgres.one.query({
+					postgresId: dbSummary.id,
+				});
+				succeedSpinner();
+
+				// The platform refuses a rotation on anything but a managed tenant.
+				if (details.providerType && details.providerType !== "MANAGED_SQL") {
+					throw new CliError(
+						`Password rotation is only supported for managed PostgreSQL databases, and "${dbSummary.name}" is not one (providerType ${details.providerType}).`,
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+				// Rotation takes the database operation lock and the platform answers
+				// CONFLICT while `applicationStatus` is "running" — the transitional
+				// state used during provisioning and tier migration, which copies the
+				// role's password onto a new host. Say that instead of relaying a bare
+				// conflict.
+				if (details.applicationStatus === "running") {
+					throw new CliError(
+						`"${dbSummary.name}" is still provisioning or migrating (status "running"), and the platform refuses a password rotation while that is in flight. Wait for \`tarout db info ${dbSummary.name}\` to leave the running state, then rotate.`,
+						ExitCode.GENERAL_ERROR,
+					);
+				}
+
+				if (!shouldSkipConfirmation()) {
+					log("");
+					log(`Database: ${colors.bold(dbSummary.name)}`);
+					log(`ID: ${colors.dim(dbSummary.id)}`);
+					log("");
+					log(
+						colors.warn(
+							"Rotating replaces the password on the database role, the pooler entry and every attached application. Pooled clients are disconnected and the old password stops working at once.",
+						),
+					);
+					// A read-only lock (the nightly FREE-tier storage job, or a
+					// suspension) does not block rotation — it is a credential change,
+					// not a write — but the attached apps still get restarted, so an
+					// operator should know the database will come back read-only.
+					if (details.isReadOnly) {
+						log(
+							colors.warn(
+								`This database is currently read-only${
+									details.readOnlyReason
+										? ` (${details.readOnlyReason})`
+										: ""
+								}. Rotation still works, but the new credential is read-only too — fix the underlying lock with \`tarout db stats ${dbSummary.name}\` first if you expected writes.`,
+							),
+						);
+					}
+					log("");
+					const confirmed = await confirm(
+						`Rotate the password for "${dbSummary.name}" now?`,
+						false,
+						{
+							field: "confirm_rotate_db_password",
+							flag: "--yes",
+							context: { id: dbSummary.id, name: dbSummary.name },
+						},
+					);
+					if (!confirmed) {
+						log("Cancelled.");
+						return;
+					}
+				}
+
+				const _rotateSpinner = startSpinner("Rotating database password...");
+				const result = await client.postgres.rotatePassword.mutate({
+					postgresId: dbSummary.id,
+				});
+				succeedSpinner("Database password rotated.");
+
+				const report = buildRotationImpactReport(dbSummary.name, result);
+
+				if (isJsonMode()) {
+					outputData({
+						rotated: true,
+						id: dbSummary.id,
+						updatedApplicationIds: report.updated,
+						failedApplicationIds: report.failed,
+						manualFixRequired: report.failed.length > 0,
+					});
+					if (report.failed.length > 0) exit(ExitCode.GENERAL_ERROR);
+					return;
+				}
+
+				quietOutput(dbSummary.id);
+
+				log("");
+				for (const line of report.lines) {
+					log(report.failed.length > 0 ? colors.warn(line) : line);
+					log("");
+				}
+				if (report.failed.length > 0) {
+					exit(ExitCode.GENERAL_ERROR);
+				}
+			} catch (err) {
+				handleError(err);
+			}
+		});
+
+	// ── Download the pooler CA certificate (Postgres) ─────────────────────────────
+	db.command("ssl-cert")
+		.argument("<db>", "Postgres database ID or name")
+		.description(
+			"Print (or save with --output) the CA certificate that signs the external Postgres pooler, so a client can connect with full TLS verification instead of trusting the endpoint blindly. The certificate is public, not a secret, but it is never written to stdout in --quiet mode: use --output <path> there. The command also prints the sslmode=verify-full parameters to append to the connection string from `tarout db info`.",
+		)
+		.option(
+			"-o, --output <path>",
+			"Write the PEM to this file instead of printing it; a directory takes the platform-supplied filename",
+		)
+		.action(async (dbIdentifier, options) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Finding database...");
+				const allDbs = await getAllDatabases(client);
+				const dbSummary = findDatabase(allDbs, dbIdentifier);
+				if (!dbSummary) {
+					failSpinner();
+					const suggestions = findSimilar(
+						dbIdentifier,
+						allDbs.map((d) => d.name),
+					);
+					throw new NotFoundError("Database", dbIdentifier, suggestions);
+				}
+				if (dbSummary.type !== "postgres") {
+					failSpinner();
+					throw new CliError(
+						"The pooler CA certificate is only available for managed PostgreSQL databases.",
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+				const _certSpinner = startSpinner("Fetching CA certificate...");
+				// Returns { pem, filename, host, port, sslMode, connectionStringSuffix }.
+				const cert: any = await client.postgres.getSslCertificate.query({
+					postgresId: dbSummary.id,
+				});
+				succeedSpinner();
+
+				const filename = String(cert?.filename || "tarout-postgres-ca.pem");
+				const pem = typeof cert?.pem === "string" ? cert.pem : "";
+				if (!pem) {
+					throw new CliError(
+						"The platform returned no certificate body for this database.",
+						ExitCode.GENERAL_ERROR,
+					);
+				}
+
+				let writtenTo: string | null = null;
+				if (options.output) {
+					writtenTo = resolveCertOutputPath(options.output, filename);
+					try {
+						writeFileSync(writtenTo, pem.endsWith("\n") ? pem : `${pem}\n`, {
+							encoding: "utf8",
+							mode: 0o600,
+						});
+					} catch (writeErr) {
+						throw new CliError(
+							`Could not write the certificate to "${writtenTo}": ${
+								writeErr instanceof Error
+									? writeErr.message
+									: String(writeErr)
+							}`,
+							ExitCode.GENERAL_ERROR,
+						);
+					}
+				}
+
+				if (isJsonMode()) {
+					outputData({ ...cert, savedTo: writtenTo });
+					return;
+				}
+
+				// Quiet mode emits one scalar: the path when it was saved. A PEM is
+				// multi-line, so it is never the quiet payload — `--output` is the
+				// scriptable form.
+				if (writtenTo) {
+					quietOutput(writtenTo);
+				} else {
+					quietOutput(filename);
+				}
+
+				log("");
+				if (writtenTo) {
+					log(`CA certificate saved to ${colors.cyan(writtenTo)}`);
+				} else {
+					log(colors.bold(filename));
+					log("");
+					log(pem.trimEnd());
+				}
+				log("");
+				log(colors.bold("Verified TLS"));
+				log(`  Host: ${colors.cyan(String(cert.host ?? "-"))}`);
+				log(`  Port: ${String(cert.port ?? EXTERNAL_POOLER_DEFAULT_PORT)}`);
+				log(`  sslmode: ${String(cert.sslMode ?? "verify-full")}`);
+				if (cert.connectionStringSuffix) {
+					log("");
+					log(
+						`  Append to the connection string from \`tarout db info ${dbSummary.name}\`:`,
+					);
+					log(`  ${colors.cyan(String(cert.connectionStringSuffix))}`);
+				}
+				if (!writtenTo) {
+					log("");
+					log(
+						colors.dim(
+							`Save it instead with: tarout db ssl-cert ${dbSummary.name} --output ./${filename}`,
+						),
+					);
+				}
+				log("");
+			} catch (err) {
+				handleError(err);
+			}
+		});
+
 	// ── List tables (Postgres) ────────────────────────────────────────────────────
 	db.command("tables")
 		.argument("<db>", "Postgres database ID or name")
@@ -1349,6 +1725,147 @@ export function registerDbCommands(program: Command) {
 				);
 				log("");
 				log(colors.dim(`${rows.length} row${rows.length === 1 ? "" : "s"}`));
+			} catch (err) {
+				handleError(err);
+			}
+		});
+
+	// ── Browse table rows with pagination (Postgres) ──────────────────────────────
+	// `postgres.getTableData` is not a third flavour of `db preview`: preview is a
+	// one-shot `SELECT * LIMIT n` with no ordering, no offset and no row count,
+	// and it rejects any identifier that is not a plain ASCII name. getTableData
+	// pages (limit/offset up to 200 rows), sorts on an allow-listed column, sends
+	// the exact COUNT(*) and the column types, and accepts quoted / non-ASCII
+	// table names — i.e. it is the only way to walk a table from the CLI.
+	db.command("rows")
+		.argument("<db>", "Postgres database ID or name")
+		.argument("<table>", "Table name")
+		.description(
+			"Page through a PostgreSQL table's rows with an exact row count, so a large table can be walked from the CLI. Unlike `tarout db preview`, which grabs an unordered first page and stops, this takes --offset and --order-by and reports how many rows the table holds in total, which is what pagination needs. Use `tarout db tables` to find table names.",
+		)
+		.option("--schema <schema>", "Schema name", "public")
+		.option("-n, --limit <n>", "Rows per page (1-200)", "50")
+		.option("--offset <n>", "Rows to skip before this page", "0")
+		.option("--order-by <column>", "Sort by this column (must exist on the table)")
+		.option("--order-dir <dir>", "Sort direction: asc or desc", "asc")
+		.action(async (dbIdentifier, tableName, options) => {
+			try {
+				// getTableData takes limit 1-200 and a non-negative offset; the sort
+				// direction enum is asc/desc.
+				const rawLimit = String(options.limit ?? "50").trim();
+				const limit = Number(rawLimit);
+				if (!/^\d+$/.test(rawLimit) || limit < 1 || limit > 200) {
+					throw new CliError(
+						`--limit must be a whole number from 1 to 200; got "${rawLimit}".`,
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+				const rawOffset = String(options.offset ?? "0").trim();
+				const offset = Number(rawOffset);
+				if (!/^\d+$/.test(rawOffset)) {
+					throw new CliError(
+						`--offset must be a whole number of rows to skip (0 or more); got "${rawOffset}".`,
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+				const orderDir = String(options.orderDir ?? "asc")
+					.trim()
+					.toLowerCase();
+				if (orderDir !== "asc" && orderDir !== "desc") {
+					throw new CliError(
+						`--order-dir must be asc or desc; got "${options.orderDir}".`,
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Finding database...");
+				const allDbs = await getAllDatabases(client);
+				const dbSummary = findDatabase(allDbs, dbIdentifier);
+				if (!dbSummary) {
+					failSpinner();
+					const suggestions = findSimilar(
+						dbIdentifier,
+						allDbs.map((d) => d.name),
+					);
+					throw new NotFoundError("Database", dbIdentifier, suggestions);
+				}
+				if (dbSummary.type !== "postgres") {
+					failSpinner();
+					throw new CliError(
+						"Row browsing is only supported for PostgreSQL databases.",
+						ExitCode.INVALID_ARGUMENTS,
+					);
+				}
+				const _rowsSpinner = startSpinner(`Reading ${tableName}...`);
+				// Returns { columns, rows, totalRows, limit, offset }.
+				const result: any = await client.postgres.getTableData.query({
+					postgresId: dbSummary.id,
+					schema: options.schema || "public",
+					table: tableName,
+					limit,
+					offset,
+					orderBy: options.orderBy ?? null,
+					orderDir,
+				});
+				succeedSpinner();
+
+				if (isJsonMode()) {
+					outputData(result);
+					return;
+				}
+
+				const rows: any[] = Array.isArray(result?.rows) ? result.rows : [];
+				const columns: string[] = Array.isArray(result?.columns)
+					? result.columns.map((c: any) => String(c?.name ?? c))
+					: rows.length > 0
+						? Object.keys(rows[0])
+						: [];
+				const totalRows =
+					typeof result?.totalRows === "number" ? result.totalRows : null;
+
+				quietOutput(String(totalRows ?? rows.length));
+
+				if (rows.length === 0) {
+					log("");
+					log(
+						totalRows === 0
+							? `Table ${colors.cyan(tableName)} is empty.`
+							: `No rows at offset ${offset}${
+									totalRows === null ? "" : ` (the table holds ${formatCount(totalRows)})`
+								}.`,
+					);
+					log("");
+					return;
+				}
+
+				log("");
+				table(
+					columns,
+					rows.map((row: any) =>
+						columns.map((c) => String(row[c] ?? "NULL").slice(0, 30)),
+					),
+				);
+				log("");
+				const shown = `${offset + 1}-${offset + rows.length}`;
+				log(
+					colors.dim(
+						`Rows ${shown}${totalRows === null ? "" : ` of ${formatCount(totalRows)}`}${
+							options.orderBy
+								? ` ordered by ${options.orderBy} ${orderDir}`
+								: " (no ORDER BY: page boundaries are not stable, pass --order-by for a repeatable walk)"
+						}`,
+					),
+				);
+				if (totalRows !== null && offset + rows.length < totalRows) {
+					log(
+						colors.dim(
+							`Next page: tarout db rows ${dbSummary.name} ${tableName} --offset ${offset + rows.length} --limit ${limit}`,
+						),
+					);
+				}
+				log("");
 			} catch (err) {
 				handleError(err);
 			}

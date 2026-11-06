@@ -45,7 +45,12 @@ import {
 } from "../lib/plan-cart.js";
 import { ExitCode, exit } from "../utils/exit-codes.js";
 import { confirm, input, select } from "../utils/prompts.js";
-import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
+import {
+	failSpinner,
+	startSpinner,
+	stopSpinner,
+	succeedSpinner,
+} from "../utils/spinner.js";
 
 // Re-exported for back-compat: callers (e.g. deploy.ts dynamic import, tests)
 // historically imported the poll helper from this module before it moved into
@@ -288,6 +293,400 @@ function parseAppPlan(raw: string): "FREE" | "SHARED" | "DEDICATED" | "CUSTOM" {
 	throw new CliInvalidArgumentError(
 		`Invalid --plan "${raw}". Expected free, shared, dedicated or custom.`,
 	);
+}
+
+// ── Ops-recovery helpers ────────────────────────────────────────────────────
+// Everything below backs the headless recovery surface: billing standing, the
+// renewal retry, the monthly/yearly interval switch, and the shared→dedicated
+// app migration. They are pure (or read only the global output flags) so the
+// contracts can be unit-tested without a network client.
+
+/**
+ * Render an integer halala amount as SAR. Every money field on the wire is an
+ * integer count of halalas (1 SAR = 100 halalas); the VAT parenthetical is NOT
+ * computed here — it comes from the server's own `tax` block via
+ * `resolveCheckoutAmountDisplay`, which renders the actual rate (0 while Tarout
+ * is not VAT-registered) instead of a hardcoded 15%.
+ */
+export function formatSarAmount(halalas: number | null | undefined): string {
+	if (typeof halalas !== "number" || !Number.isFinite(halalas)) return "-";
+	return `${(halalas / 100).toFixed(2)} SAR`;
+}
+
+/** The two intervals `subscription.changeBillingPeriod` accepts. */
+export const BILLING_PERIOD_TARGETS = ["monthly", "yearly"] as const;
+export type BillingPeriodTarget = (typeof BILLING_PERIOD_TARGETS)[number];
+
+/**
+ * Validate the target interval for `period:preview` / `period:set`. The
+ * procedure's zod input is `{ targetPeriod: "monthly" | "yearly" }` with no
+ * default, so an unnamed or misspelled interval has to fail here rather than
+ * being guessed — guessing "yearly" would charge a year up front.
+ */
+export function parseBillingPeriodTarget(raw: unknown): BillingPeriodTarget {
+	const value = String(raw ?? "")
+		.trim()
+		.toLowerCase();
+	const match = BILLING_PERIOD_TARGETS.find((period) => period === value);
+	if (!match) {
+		throw new CliInvalidArgumentError(
+			`Invalid billing period "${String(raw ?? "")}". Expected monthly or yearly; the procedure has no default, so the target interval must be named explicitly.`,
+		);
+	}
+	return match;
+}
+
+/** The exact input both billing-period procedures validate. */
+export function billingPeriodChangeArg(raw: unknown): {
+	targetPeriod: BillingPeriodTarget;
+} {
+	return { targetPeriod: parseBillingPeriodTarget(raw) };
+}
+
+/** What `subscription.changeBillingPeriod` answers with. */
+export interface BillingPeriodChangeResponse {
+	status?: string;
+	effectiveAt?: string | Date | null;
+	chargeTodayHalalas?: number | null;
+	paymentUrl?: string | null;
+	publicPaymentUrl?: string | null;
+	orderId?: string | null;
+}
+
+/**
+ * Re-shape a `changeBillingPeriod` result into the field names
+ * `finalizeBillingMutation` reads, so the interval switch rides the SAME
+ * classify-and-poll path as `billing upgrade` instead of growing a second
+ * payment plumbing.
+ *
+ * - `scheduled` (yearly→monthly): no charge, no order, no refund — the rollover
+ *   queue applies it at term end, so it classifies as `deferred`.
+ * - `checkout` (monthly→yearly): carries orderId + payment URLs, the ordinary
+ *   hosted-checkout shape.
+ * - `applied`: net-zero/instant apply.
+ *
+ * `chargeTodayHalalas` is mapped onto `proratedChargeHalalas` because that is
+ * the key the engine's amount reader looks for; the value is unchanged, so the
+ * amount `period:preview` showed is the amount reported here.
+ */
+export function billingPeriodMutationShape(
+	raw: BillingPeriodChangeResponse | null | undefined,
+): {
+	applied: boolean;
+	proratedChargeHalalas: number;
+	effectiveAt?: string | Date;
+	orderId?: string;
+	paymentUrl?: string;
+	publicPaymentUrl?: string;
+} {
+	const charge =
+		typeof raw?.chargeTodayHalalas === "number" ? raw.chargeTodayHalalas : 0;
+	return {
+		applied: raw?.status === "applied",
+		proratedChargeHalalas: charge,
+		...(raw?.effectiveAt ? { effectiveAt: raw.effectiveAt } : {}),
+		...(raw?.orderId ? { orderId: raw.orderId } : {}),
+		...(raw?.paymentUrl ? { paymentUrl: raw.paymentUrl } : {}),
+		...(raw?.publicPaymentUrl
+			? { publicPaymentUrl: raw.publicPaymentUrl }
+			: {}),
+	};
+}
+
+/** What `subscription.getStanding` answers with (null when healthy). */
+export interface BillingStanding {
+	kind?: string;
+	severity?: string;
+	daysLeft?: number;
+}
+
+/**
+ * Exit code for `billing standing`. A `danger` severity (PAUSED or CANCELED —
+ * the states where resources are already being cut off) exits non-zero so a CI
+ * job or a cron can gate on `tarout billing standing` without parsing JSON. A
+ * `warning` (PAST_DUE inside the grace window) and a healthy/absent standing
+ * both exit 0: those are reportable, not yet failing.
+ */
+export function exitCodeForStanding(
+	standing: BillingStanding | null | undefined,
+): number {
+	return standing?.severity === "danger"
+		? ExitCode.GENERAL_ERROR
+		: ExitCode.SUCCESS;
+}
+
+/** The dashboard page where a human adds or replaces the card on file. */
+export function addCardDashboardUrl(): string {
+	let base = "https://tarout.sa";
+	try {
+		base = getApiUrl();
+	} catch {
+		// A rejected TAROUT_API_URL must not hide the link; the default host is
+		// still where the dashboard lives.
+	}
+	return `${base.replace(/\/+$/, "")}/dashboard/billing/add-card`;
+}
+
+/**
+ * How `billing retry-renewal` must collect consent.
+ *
+ * This deliberately does NOT use `shouldAutoConfirmPaidCheckout`. That helper
+ * exists because a paid plan change ends on a hosted Moyasar page where the
+ * human reads the amount and types card details — that page IS the consent
+ * surface, so a local y/n only halts the agent. A renewal retry has no such
+ * page: it charges the already-saved card server-side, immediately. Nothing
+ * downstream asks the human anything, so the CLI is the only place consent can
+ * be taken.
+ *
+ *   skip    `--yes` was passed: consent is explicit and on the record.
+ *   refuse  `--json` / `--non-interactive` without `--yes`: refuse up front.
+ *   confirm interactive TTY: ask.
+ */
+export type RenewalConsent = "skip" | "refuse" | "confirm";
+
+export function renewalConsentGate(): RenewalConsent {
+	if (shouldSkipConfirmation()) return "skip";
+	if (isJsonMode() || isNonInteractiveMode()) return "refuse";
+	return "confirm";
+}
+
+/** What `subscription.retryRenewal` answers with. */
+export interface RetryRenewalResult {
+	status?: string;
+	reason?: string | null;
+}
+
+export interface RetryRenewalReport {
+	/** Error code for the JSON envelope; null on success. */
+	code: string | null;
+	message: string;
+	exitCode: number;
+}
+
+/**
+ * Map a `retryRenewal` outcome onto an operator-readable report and an exit
+ * code. The procedure cannot choose its own amount and cannot double-charge (a
+ * Postgres advisory lock plus a deterministic provider order id), so the only
+ * question left is what happened:
+ *
+ *   charged  the saved card was charged and the period rolled → exit 0
+ *   no_card  nothing to charge against → exit 1, pointing at the dashboard
+ *   failed   the provider declined (or the charge errored) → exit 1
+ *   skipped  the server refused to charge (not due, catalog defect) → exit 1
+ *
+ * `skipped` is deliberately non-zero: no money moved, so a recovery script that
+ * treated it as success would mark the incident resolved while the
+ * subscription is still unpaid.
+ */
+export function describeRetryRenewal(
+	result: RetryRenewalResult | null | undefined,
+	addCardUrl: string,
+): RetryRenewalReport {
+	const status = result?.status ?? "unknown";
+	const reason = result?.reason ? String(result.reason) : "";
+	switch (status) {
+		case "charged":
+			return {
+				code: null,
+				message:
+					reason === "promo_free_cycle"
+						? "A running promo covered the whole cycle, so the renewal was applied without a charge."
+						: "The renewal was charged to the card on file and the billing period rolled forward.",
+				exitCode: ExitCode.SUCCESS,
+			};
+		case "no_card":
+			return {
+				code: "NO_PAYMENT_METHOD",
+				message: `There is no usable card on file for this subscription, so there is nothing to charge. A human has to add one at ${addCardUrl} and then re-run this command; the CLI cannot add or read a card (those procedures are deliberately off the agent surface).`,
+				exitCode: ExitCode.GENERAL_ERROR,
+			};
+		case "failed":
+			return {
+				code: "RENEWAL_CHARGE_FAILED",
+				message: `The renewal charge did not go through${reason ? ` (${reason})` : ""}. The saved card was attempted and declined or errored; nothing was captured. A manual retry does not advance the dunning ladder, so retrying is safe, but a repeated decline needs a different card at ${addCardUrl}.`,
+				exitCode: ExitCode.GENERAL_ERROR,
+			};
+		case "skipped":
+			return {
+				code: "RENEWAL_NOT_CHARGED",
+				message: `The server declined to charge this renewal${reason ? ` (${reason})` : ""}, so no money moved and the subscription is unchanged. This is not a payment failure: the subscription was not actually due, or its plan price is unusable.`,
+				exitCode: ExitCode.GENERAL_ERROR,
+			};
+		default:
+			return {
+				code: "RENEWAL_UNKNOWN_STATUS",
+				message: `The platform returned an unrecognised renewal status "${status}". Treat the renewal as unresolved and check \`tarout billing invoices\` before retrying.`,
+				exitCode: ExitCode.GENERAL_ERROR,
+			};
+	}
+}
+
+/** What `subscription.getActiveMigration` answers with. */
+export interface ActiveMigrationResponse {
+	active?: boolean;
+	mode?: string;
+	stage?: string;
+	startedAt?: string | Date | null;
+	canCutover?: boolean;
+	progressPct?: number;
+	host?: { name?: string | null; status?: string | null } | null;
+	counts?: {
+		copied?: number;
+		failed?: number;
+		provisioning?: number;
+		ready?: number;
+		total?: number;
+	};
+}
+
+export interface MigrationSummary {
+	active: boolean;
+	stage: string | null;
+	headline: string;
+	/** Extra context an operator should read before acting, when there is any. */
+	note?: string;
+	/** The command that moves this migration forward, when one applies. */
+	nextCommand?: string;
+	/** Whole days since the earliest copy row, or null when unknown. */
+	ageDays: number | null;
+}
+
+/** A `ready_to_cutover` older than this is worth calling out explicitly. */
+const MIGRATION_OLD_AFTER_DAYS = 7;
+
+/**
+ * Turn an `getActiveMigration` payload into one line an operator (or an agent
+ * polling it) can act on, plus the command that moves it forward.
+ *
+ * The normal path is automatic: the queue worker cuts over on its own once
+ * every copied app is healthy on the new host. `migrate:cutover` and
+ * `migrate:rollback` are the retry/fallback for when that did not happen.
+ *
+ * `COPIED` rows are deliberately never aged out server-side — their only exit
+ * is a cutover — so a legitimately months-old `ready_to_cutover` exists in
+ * production. That is reported as old, never as "nothing is happening".
+ */
+export function summarizeMigration(
+	migration: ActiveMigrationResponse | null | undefined,
+	now: Date = new Date(),
+): MigrationSummary {
+	if (!migration?.active) {
+		return {
+			active: false,
+			stage: null,
+			headline:
+				"No shared-to-dedicated app migration is in flight for this project.",
+			ageDays: null,
+		};
+	}
+
+	const counts = migration.counts ?? {};
+	const copied = counts.copied ?? 0;
+	const failed = counts.failed ?? 0;
+	const provisioning = counts.provisioning ?? 0;
+	const ready = counts.ready ?? 0;
+	const total = counts.total ?? 0;
+	const hostName = migration.host?.name || "the dedicated host";
+	const progress =
+		typeof migration.progressPct === "number" ? migration.progressPct : 0;
+	const started = migration.startedAt ? new Date(migration.startedAt) : null;
+	const ageDays =
+		started && !Number.isNaN(started.getTime())
+			? Math.floor((now.getTime() - started.getTime()) / 86_400_000)
+			: null;
+	const stage = migration.stage ?? null;
+
+	if (stage === "ready_to_cutover") {
+		const old =
+			ageDays !== null && ageDays >= MIGRATION_OLD_AFTER_DAYS
+				? `This move has been waiting ${ageDays} days. Copied apps are never aged out server-side — their only exit is a cutover — so an old ready_to_cutover is real and still actionable, not a stale record. Both hosts are being paid for until it finishes.`
+				: undefined;
+		if (migration.canCutover) {
+			return {
+				active: true,
+				stage,
+				headline: `${copied} of ${total} app(s) are copied onto ${hostName} and ${ready} are healthy there, waiting for the traffic cutover.`,
+				...(old ? { note: old } : {}),
+				nextCommand: "tarout billing migrate:cutover",
+				ageDays,
+			};
+		}
+		return {
+			active: true,
+			stage,
+			headline: `${copied} of ${total} app(s) are copied onto ${hostName} but none are healthy there yet, so the cutover would be refused.`,
+			note:
+				old ??
+				"Cutover promotes only apps the new host reports healthy; wait for one to come up, or fix the app and re-check.",
+			nextCommand: "tarout billing migrate:status",
+			ageDays,
+		};
+	}
+
+	if (stage === "failed") {
+		return {
+			active: true,
+			stage,
+			headline: `Every copy in this move failed (${failed} app(s)); nothing has been cut over and traffic is still on the shared pool.`,
+			note: "Roll back to release the dedicated host's migration claim, then start the move again once the cause is fixed.",
+			nextCommand: "tarout billing migrate:rollback",
+			ageDays,
+		};
+	}
+
+	return {
+		active: true,
+		stage: stage ?? "copying",
+		headline: `Copying ${provisioning || total} app(s) onto ${hostName} — ${progress}% of the way to a cutover.`,
+		note: "A queue worker cuts over automatically once every copied app is healthy on the new host; the manual cutover command is only the retry path.",
+		nextCommand: "tarout billing migrate:status",
+		ageDays,
+	};
+}
+
+/** Which checkout a `payment.getCheckoutOrder` id belongs to. */
+export function orderIdKind(
+	orderId: string,
+): "subscription" | "wallet" | "domain" | "unknown" {
+	const id = String(orderId ?? "").trim();
+	if (id.startsWith("sub_")) return "subscription";
+	if (id.startsWith("top_")) return "wallet";
+	if (id.startsWith("dom_")) return "domain";
+	return "unknown";
+}
+
+/**
+ * Refuse a non-subscription order id before it reaches
+ * `subscription.cancelCheckout`, which matches on subscription checkouts only
+ * and would answer `cancelled: false` for a wallet or domain order — reading as
+ * "already settled" when the real problem is the wrong command.
+ */
+export function assertSubscriptionCheckoutOrderId(orderId: string): void {
+	const kind = orderIdKind(orderId);
+	if (kind === "wallet") {
+		throw new CliInvalidArgumentError(
+			`"${orderId}" is a wallet top-up order, not a subscription checkout. Abandon it with \`tarout wallet cancel ${orderId}\` instead.`,
+		);
+	}
+	if (kind === "domain") {
+		throw new CliInvalidArgumentError(
+			`"${orderId}" is a domain order, not a subscription checkout. Subscription checkouts created by \`tarout billing upgrade\` look like "sub_…".`,
+		);
+	}
+}
+
+/**
+ * Exit code for `billing order`. A checkout the platform says is still payable
+ * exits CHECKOUT_PENDING (13) so an agent can tell "this order is resumable,
+ * hand the URL to a human or poll it" apart from a plain read. Terminal and
+ * in-flight-but-unpayable orders exit 0: reporting history is not a failure.
+ */
+export function exitCodeForCheckoutOrder(
+	order: { canPay?: boolean } | null | undefined,
+): number {
+	return order?.canPay === true
+		? ExitCode.CHECKOUT_PENDING
+		: ExitCode.SUCCESS;
 }
 
 export function registerBillingCommands(program: Command) {
@@ -1682,6 +2081,998 @@ export function registerBillingCommands(program: Command) {
 				handleError(err);
 			}
 		});
+
+	// ── Ops recovery: standing, renewal retry, interval switch ───────────────
+
+	billing
+		.command("summary")
+		.description(
+			"Show the team-visible plan label for the active project. Unlike `billing status`, this reads the member-visible summary procedure, so it works for a non-owner credential; in exchange it deliberately carries no prices, no renewal date and no add-on lines.",
+		)
+		.action(async () => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching plan summary...");
+				const summary = await client.subscription.getSummary.query();
+				succeedSpinner();
+
+				if (isJsonMode()) {
+					outputData(summary);
+					return;
+				}
+
+				quietOutput(summary?.planKey || "free");
+
+				log("");
+				log(colors.bold("Plan Summary"));
+				const profile = getCurrentProfile();
+				if (profile?.projectName) {
+					log(`  ${colors.dim(`Project: ${profile.projectName}`)}`);
+				}
+				log("");
+				if (!summary) {
+					log(
+						`  Plan: ${colors.dim("No subscription on this project (free tier)")}`,
+					);
+					log("");
+					return;
+				}
+				log(`  Plan:     ${colors.cyan(summary.planKey || "free")}`);
+				if (summary.planName) log(`  Name:     ${summary.planName}`);
+				if (summary.planQuantityAware) {
+					log(`  Quantity: ${summary.planQuantity ?? 1}`);
+				}
+				log("");
+				log(
+					`Owner-only detail (price, renewal, add-ons): ${colors.dim("tarout billing status")}`,
+				);
+				log("");
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	billing
+		.command("standing")
+		.description(
+			"Report whether the active project's billing is in good standing, and exit non-zero when it is not, so CI or a cron can gate on it. A PAST_DUE subscription inside its grace window is a warning and still exits 0; PAUSED or CANCELED is a danger and exits 1. A healthy project (or a free one) prints nothing to worry about.",
+		)
+		.action(async () => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Checking billing standing...");
+				const standing = (await client.subscription.getStanding.query()) as
+					| BillingStanding
+					| null;
+				succeedSpinner();
+
+				const code = exitCodeForStanding(standing);
+
+				if (isJsonMode()) {
+					outputData({
+						standing: standing ?? null,
+						ok: standing === null || standing === undefined,
+					});
+					if (code !== ExitCode.SUCCESS) exit(code);
+					return;
+				}
+
+				quietOutput(standing?.kind || "ok");
+
+				if (!standing) {
+					log("");
+					log(colors.success("Billing is in good standing."));
+					log("");
+					return;
+				}
+
+				log("");
+				log(colors.bold("Billing Standing"));
+				log(
+					`  Issue:    ${standing.severity === "danger" ? colors.error(standing.kind || "unknown") : colors.warn(standing.kind || "unknown")}`,
+				);
+				log(`  Severity: ${standing.severity || "-"}`);
+				if (typeof standing.daysLeft === "number") {
+					log(`  Grace:    ${standing.daysLeft} day(s) left`);
+				}
+				log("");
+				log(
+					`Recover a failed renewal: ${colors.dim("tarout billing retry-renewal --yes")}`,
+				);
+				log("");
+				if (code !== ExitCode.SUCCESS) exit(code);
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	billing
+		.command("discount")
+		.description(
+			"Show the automatic email-domain discount this account qualifies for, if any. It is not tied to a plan: checkout re-checks the discount's own plan and billing-period limits, so an eligible discount here can still be declined for a specific plan.",
+		)
+		.action(async () => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Checking eligible discount...");
+				const discount = await client.subscription.eligibleDiscount.query();
+				succeedSpinner();
+
+				if (isJsonMode()) {
+					outputData(discount);
+					return;
+				}
+
+				quietOutput(discount?.code || "");
+
+				if (!discount) {
+					log("");
+					log("No automatic discount applies to this account.");
+					log("");
+					return;
+				}
+
+				log("");
+				log(colors.bold("Eligible Discount"));
+				log(`  Code:     ${colors.cyan(discount.code || "-")}`);
+				log(
+					`  Discount: ${discount.discountType === "PERCENT" ? `${discount.discountValue}%` : formatSarAmount(discount.discountValue)}`,
+				);
+				log(`  Status:   ${discount.status || "-"}`);
+				log(
+					`  Applied:  ${discount.running ? colors.success("yes, already discounting renewals") : colors.dim("not yet")}`,
+				);
+				if (discount.durationCycles) {
+					log(`  Cycles:   ${discount.durationCycles}`);
+				}
+				if (Array.isArray(discount.planKeys) && discount.planKeys.length) {
+					log(`  Plans:    ${discount.planKeys.join(", ")}`);
+				}
+				if (
+					Array.isArray(discount.billingPeriods) &&
+					discount.billingPeriods.length
+				) {
+					log(`  Periods:  ${discount.billingPeriods.join(", ")}`);
+				}
+				if (discount.description) log(`  Details:  ${discount.description}`);
+				log("");
+				if (discount.status === "verify_email") {
+					log(
+						colors.warn(
+							"The address this discount is keyed to is not verified yet — verify it before checkout or the discount will not apply.",
+						),
+					);
+					log("");
+				}
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	billing
+		.command("order")
+		.argument(
+			"<orderId>",
+			'Checkout order ID: "sub_…" for a subscription, "top_…" for a wallet top-up, "dom_…" for a domain',
+		)
+		.description(
+			"Show one checkout order: what it charges, what it is for, and whether it can still be paid. Exits 13 (CHECKOUT_PENDING) while the order is payable so an agent can tell a resumable checkout from a settled one without parsing the payload; terminal orders exit 0.",
+		)
+		.action(async (orderId: string) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching checkout order...");
+				const order = await client.payment.getCheckoutOrder.query({ orderId });
+				succeedSpinner();
+
+				const code = exitCodeForCheckoutOrder(order);
+
+				if (isJsonMode()) {
+					outputData(order);
+					if (code !== ExitCode.SUCCESS) exit(code);
+					return;
+				}
+
+				quietOutput(String(order?.status ?? ""));
+
+				log("");
+				log(colors.bold(`Checkout ${orderId}`));
+				log(`  Kind:        ${order?.kind || orderIdKind(orderId)}`);
+				log(`  Description: ${order?.description || "-"}`);
+				log(
+					`  Amount:      ${colors.bold(formatSarAmount(order?.grossAmountHalalas))}${order?.currency && order.currency !== "SAR" ? ` ${order.currency}` : ""}`,
+				);
+				log(`  Status:      ${order?.status || "-"}`);
+				log(`  Phase:       ${order?.phase || "-"}`);
+				if (order?.planKey) log(`  Plan:        ${order.planKey}`);
+				if (order?.actionKind) log(`  Action:      ${order.actionKind}`);
+				if (order?.recurring) {
+					log(
+						`  ${colors.dim("This checkout tokenizes the card for recurring renewals.")}`,
+					);
+				}
+				log("");
+				if (order?.canPay) {
+					log(
+						`This order can still be paid. Resume it with ${colors.dim(`tarout billing wait ${orderId}`)}, or abandon it with ${colors.dim(`tarout billing cancel-checkout ${orderId}`)}.`,
+					);
+					log("");
+				}
+				if (code !== ExitCode.SUCCESS) exit(code);
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	billing
+		.command("cancel-checkout")
+		.argument("<orderId>", 'Subscription checkout order ID ("sub_…")')
+		.option(
+			"--reason <text>",
+			"Why it was abandoned, recorded on the checkout (max 200 characters)",
+		)
+		.description(
+			"Abandon a pending subscription checkout so it stops blocking a retry. This only marks the unpaid order expired; it never refunds and never contacts the payment provider, and it does nothing to an order that was already paid, expired or cancelled (that is reported, not an error). Org owner only, and it acts on the active project.",
+		)
+		.action(async (orderId: string, options: { reason?: string }) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				assertSubscriptionCheckoutOrderId(orderId);
+				const client = getApiClient();
+				const _spinner = startSpinner("Cancelling checkout...");
+				const result = await client.subscription.cancelCheckout.mutate({
+					orderId,
+					...(options.reason ? { reason: options.reason } : {}),
+				});
+				succeedSpinner(
+					result?.cancelled
+						? "Pending checkout abandoned."
+						: "Nothing to abandon.",
+				);
+
+				if (isJsonMode()) {
+					outputData(result);
+					return;
+				}
+
+				quietOutput(result?.cancelled ? "cancelled" : "not_pending");
+
+				log("");
+				if (result?.cancelled) {
+					log(
+						colors.success(
+							`Checkout ${orderId} is abandoned. No money was taken and nothing was refunded — the order was never paid.`,
+						),
+					);
+				} else {
+					log(
+						`No pending checkout matched ${orderId} on this project, so nothing changed. It was already paid, expired or cancelled — check ${colors.dim(`tarout billing order ${orderId}`)}.`,
+					);
+				}
+				log("");
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	billing
+		.command("period:preview")
+		.argument("[period]", "Target billing interval: monthly or yearly")
+		.option(
+			"--period <period>",
+			"Target billing interval (alias for the positional argument; useful for agent invocations)",
+		)
+		.description(
+			"Quote what switching the active project's billing interval costs today. The quote comes from the same charge computation `period:set` uses, so the amount shown here is the amount charged, and this refuses on exactly the same three conditions: already on that interval, a plan change already staged for the end of the term, or the subscription set to cancel at term end. Org owner only.",
+		)
+		.action(async (periodArg: string | undefined, options: { period?: string }) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const target = await resolveBillingPeriodTarget(
+					periodArg ?? options.period,
+				);
+				const client = getApiClient();
+				const _spinner = startSpinner("Quoting interval switch...");
+				const quote = await client.subscription.previewBillingPeriodChange.query(
+					billingPeriodChangeArg(target),
+				);
+				succeedSpinner();
+
+				if (isJsonMode()) {
+					outputData(quote);
+					return;
+				}
+
+				quietOutput(String(quote?.chargeTodayHalalas ?? 0));
+
+				// `resolveCheckoutAmountDisplay` renders the VAT parenthetical from the
+				// server's own rate (empty while Tarout is not VAT-registered) instead
+				// of a hardcoded 15%.
+				const { amountHalalas: dueHalalas, vatNote } =
+					resolveCheckoutAmountDisplay(
+						quote?.tax,
+						typeof quote?.chargeTodayHalalas === "number"
+							? quote.chargeTodayHalalas
+							: undefined,
+					);
+
+				log("");
+				log(colors.bold("Billing Interval Switch"));
+				log(
+					`  From:            ${quote?.currentPeriod || "-"} → ${colors.cyan(quote?.targetPeriod || target)}`,
+				);
+				log(
+					`  Current period:  ${formatSarAmount(quote?.currentPeriodTotalHalalas)}`,
+				);
+				log(
+					`  Target period:   ${formatSarAmount(quote?.targetPeriodTotalHalalas)}`,
+				);
+				log(`  Unused credit:   ${formatSarAmount(quote?.creditHalalas)}`);
+				log(
+					`  Charged today:   ${colors.bold(formatSarAmount(dueHalalas))}${vatNote ? ` ${vatNote}` : ""}`,
+				);
+				log(
+					`  Applies:         ${quote?.appliesImmediately ? "immediately" : `at the end of the current term (${formatDate(quote?.effectiveAt)})`}`,
+				);
+				if (quote?.newTermEnd) {
+					log(`  New term ends:   ${formatDate(quote.newTermEnd)}`);
+				}
+				log("");
+				log(`Apply it: ${colors.dim(`tarout billing period:set ${target}`)}`);
+				log("");
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	billing
+		.command("period:set")
+		.argument("[period]", "Target billing interval: monthly or yearly")
+		.option(
+			"--period <period>",
+			"Target billing interval (alias for the positional argument; useful for agent invocations)",
+		)
+		.option(
+			"--wait",
+			"Wait/poll until the hosted checkout is confirmed (this is the default)",
+		)
+		.option(
+			"--no-wait",
+			"Return as soon as the hosted checkout opens, without polling for confirmation (default: wait until paid)",
+		)
+		.option(
+			"--timeout <seconds>",
+			"Maximum wait time in seconds (default 600)",
+			(v) => Number.parseInt(v, 10),
+			600,
+		)
+		.option("--no-open", "Do not auto-open the payment URL in the browser")
+		.description(
+			"Switch the active project between monthly and yearly billing. Monthly to yearly applies now and opens a hosted checkout for the yearly total minus a credit for the unused remainder — the same amount `period:preview` quotes. Yearly to monthly is only staged: it is applied at the end of the paid term, there is no refund, and `billing plan:cancel-pending` undoes it. Org owner only.",
+		)
+		.action(
+			async (
+				periodArg: string | undefined,
+				options: {
+					period?: string;
+					wait?: boolean;
+					timeout: number;
+					open?: boolean;
+				},
+			) => {
+				try {
+					if (!isLoggedIn()) throw new AuthError();
+					const target = await resolveBillingPeriodTarget(
+						periodArg ?? options.period,
+					);
+					const client = getApiClient();
+
+					// Quote first so the confirm names the real amount, and so an
+					// agent-driven run can decide whether a browser hand-off is coming.
+					const _quoteSpinner = startSpinner("Quoting interval switch...");
+					// biome-ignore lint/suspicious/noExplicitAny: untyped tRPC result.
+					let quote: any;
+					try {
+						quote = await client.subscription.previewBillingPeriodChange.query(
+							billingPeriodChangeArg(target),
+						);
+						succeedSpinner();
+					} catch {
+						// The preview and the mutation refuse on identical conditions, so
+						// a failed quote means the mutation will report the same thing
+						// with a better message. Carry on and let it speak.
+						failSpinner();
+						quote = null;
+					}
+
+					const chargeHalalas: number | undefined =
+						typeof quote?.chargeTodayHalalas === "number"
+							? quote.chargeTodayHalalas
+							: undefined;
+
+					if (!shouldSkipConfirmation()) {
+						log("");
+						log(
+							`Switching billing interval to ${colors.cyan(target)}${chargeHalalas !== undefined ? `, charged today: ${colors.bold(formatSarAmount(chargeHalalas))}` : ""}.`,
+						);
+						if (quote && !quote.appliesImmediately) {
+							log(
+								"This is staged for the end of the paid term — no charge now, and no refund for the remainder.",
+							);
+						}
+						log("");
+						// Parity with `billing upgrade`: a positive charge ends on the
+						// hosted Moyasar page, which is the real consent surface, so a
+						// non-TTY agent run skips the local y/n rather than halting.
+						if (shouldAutoConfirmPaidCheckout(chargeHalalas)) {
+							log(
+								"Opening the secure payment page in your browser to complete the switch...",
+							);
+						} else {
+							const confirmed = await confirm(
+								`Switch to ${target} billing?`,
+								false,
+								{
+									field: "confirm_billing_period",
+									flag: "--yes",
+									context: {
+										targetPeriod: target,
+										chargeTodayHalalas: chargeHalalas,
+										appliesImmediately: quote?.appliesImmediately,
+									},
+								},
+							);
+							if (!confirmed) {
+								log("Cancelled.");
+								return;
+							}
+						}
+					}
+
+					const _spinner = startSpinner("Changing billing interval...");
+					const raw = await client.subscription.changeBillingPeriod.mutate(
+						billingPeriodChangeArg(target),
+					);
+					succeedSpinner("Billing interval change processed.");
+
+					// Ride the shared classify-and-poll engine: `scheduled` has no order
+					// and classifies as deferred, `checkout` goes through the ordinary
+					// hosted-checkout + `billing wait` path.
+					const result = await finalizeBillingMutation(
+						client,
+						billingPeriodMutationShape(raw),
+						{
+							kind: "plan",
+							target: `${target} billing`,
+							wait: options.wait,
+							timeoutMs: options.timeout * 1000,
+							openBrowser: paymentBrowserOpener({
+								noOpen: options.open === false,
+							}),
+							onCheckoutOpened: ({ orderId, paymentUrl }) => {
+								if (isJsonMode()) {
+									outputJsonLine({
+										type: "event",
+										event: "checkout_started",
+										orderId,
+										paymentUrl,
+									});
+								} else {
+									log("");
+									log("Open this URL to complete payment:");
+									log(`  ${colors.cyan(paymentUrl)}`);
+									log(`Order ID: ${colors.dim(orderId)}`);
+									log(`Polling for confirmation (up to ${options.timeout}s)...`);
+								}
+							},
+						},
+					);
+					reportBillingResult(result, `Billing interval: ${target}`);
+					if (raw?.status === "scheduled" && !isJsonMode()) {
+						log(
+							`Undo before it applies: ${colors.dim("tarout billing plan:cancel-pending")}`,
+						);
+						log("");
+					}
+				} catch (err) {
+					stopSpinner();
+					handleError(err);
+				}
+			},
+		);
+
+	billing
+		.command("retry-renewal")
+		.description(
+			"Charge an already-owed renewal against the card on file, right now, outside the dunning schedule. This is the supported recovery path for a PAST_DUE or PAUSED subscription and it refuses on any other status. It cannot double-charge (the charge runs under a Postgres advisory lock with a deterministic provider order id) and it cannot choose its own amount — the period total is recomputed server-side from the plan and the locked add-on prices. Because it charges a saved card with no payment page in between, it ALWAYS requires explicit confirmation: pass --yes under --json or --non-interactive. Org owner only, and it acts on the active project.",
+		)
+		.addHelpText(
+			"after",
+			"\nExit codes: 0 charged, 1 declined / nothing charged / no card on file. A manual retry does not advance the dunning ladder, so retrying is safe.",
+		)
+		.action(async () => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+
+				const gate = renewalConsentGate();
+				if (gate === "refuse") {
+					// Deliberately NOT `shouldAutoConfirmPaidCheckout`: that helper
+					// delegates consent to the hosted payment page, and this charge has
+					// no page. Nothing downstream will ask the human, so refuse here.
+					outputError(
+						"NEEDS_CONFIRMATION",
+						"`billing retry-renewal` charges the saved card immediately and there is no payment page to confirm it on, so it will not run unattended without explicit consent. Re-run with --yes once a human has agreed to the charge.",
+						{
+							nextCommand: "tarout billing retry-renewal --yes",
+							field: "confirm_retry_renewal",
+							flag: "--yes",
+						},
+					);
+					exit(ExitCode.NEEDS_INPUT);
+					return;
+				}
+				if (gate === "confirm") {
+					log("");
+					log(
+						colors.warn(
+							"This charges the card on file for the overdue period immediately. The amount is recomputed server-side from your plan and add-ons; this command cannot change it.",
+						),
+					);
+					log("");
+					const confirmed = await confirm(
+						"Charge the card on file for the overdue renewal now?",
+						false,
+						{ field: "confirm_retry_renewal", flag: "--yes" },
+					);
+					if (!confirmed) {
+						log("Cancelled.");
+						return;
+					}
+				}
+
+				const client = getApiClient();
+				const _spinner = startSpinner("Retrying the renewal charge...");
+				const result = (await client.subscription.retryRenewal.mutate()) as
+					| RetryRenewalResult
+					| null;
+				succeedSpinner();
+
+				const addCardUrl = addCardDashboardUrl();
+				const report = describeRetryRenewal(result, addCardUrl);
+
+				if (report.code === null) {
+					if (isJsonMode()) {
+						outputData({ ...(result ?? {}), hint: report.message });
+						return;
+					}
+					quietOutput(String(result?.status ?? "charged"));
+					log("");
+					log(colors.success(report.message));
+					log(
+						`Confirm with ${colors.dim("tarout billing invoices -n 1")} or ${colors.dim("tarout billing standing")}.`,
+					);
+					log("");
+					return;
+				}
+
+				outputError(report.code, report.message, {
+					status: result?.status ?? "unknown",
+					reason: result?.reason ?? null,
+					...(report.code === "NO_PAYMENT_METHOD" ? { addCardUrl } : {}),
+				});
+				if (!isJsonMode() && report.code === "NO_PAYMENT_METHOD") {
+					box("No card on file", [
+						`Add a card: ${colors.cyan(addCardUrl)}`,
+						`Then re-run: ${colors.dim("tarout billing retry-renewal --yes")}`,
+					]);
+				}
+				exit(report.exitCode);
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	// ── Ops recovery: shared → dedicated app migration ───────────────────────
+	// Flow: migrate:list → migrate:start → migrate:status (copying →
+	// ready_to_cutover) → migrate:cutover or migrate:rollback. The cutover is
+	// normally AUTOMATIC from a queue worker once the copies are healthy; the
+	// manual commands are the retry/fallback.
+
+	billing
+		.command("migrate:list")
+		.option(
+			"--count",
+			"Only fetch the count, not the per-app verdicts (the cheap pre-flight read)",
+		)
+		.description(
+			"List the active project's shared-pool apps that can be moved onto its dedicated host, each with a per-app eligibility verdict, so an incompatibility surfaces before the batch starts instead of failing mid-flight. Apps already pinned to a dedicated server or already mid-migration are excluded. Org owner only.",
+		)
+		.action(async (options: { count?: boolean }) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching movable apps...");
+				if (options.count) {
+					const counted =
+						await client.subscription.getMigratableSharedAppsCount.query();
+					succeedSpinner();
+					if (isJsonMode()) {
+						outputData(counted);
+						return;
+					}
+					quietOutput(String(counted?.count ?? 0));
+					log("");
+					log(`${counted?.count ?? 0} app(s) can be moved.`);
+					log("");
+					return;
+				}
+
+				const data = await client.subscription.getMigratableSharedApps.query();
+				succeedSpinner();
+
+				if (isJsonMode()) {
+					outputData(data);
+					return;
+				}
+
+				// biome-ignore lint/suspicious/noExplicitAny: untyped tRPC result.
+				const apps: any[] = Array.isArray(data?.apps) ? data.apps : [];
+				quietOutput(String(apps.length));
+
+				if (!apps.length) {
+					log("");
+					log("No shared-pool apps on this project can be moved right now.");
+					log("");
+					return;
+				}
+
+				log("");
+				log(colors.bold("Movable Shared Apps"));
+				table(
+					["APP", "ID", "ELIGIBLE", "REASON"],
+					apps.map((app: any) => [
+						app.name || "-",
+						colors.dim(String(app.applicationId || "").slice(0, 12)),
+						app.eligible ? colors.success("yes") : colors.error("no"),
+						app.reasonCode || colors.dim("-"),
+					]),
+				);
+				log("");
+				log(`Start the move: ${colors.dim("tarout billing migrate:start")}`);
+				log("");
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	billing
+		.command("migrate:start")
+		.option(
+			"--app <id>",
+			"Move only this application ID (repeatable; omit to move every eligible shared app)",
+			collectApplicationId,
+			[] as string[],
+		)
+		.description(
+			"Queue the blue/green copy of the project's shared-pool apps onto its dedicated host. This only stages the apps — it copies them and leaves them at `COPIED`; traffic is not moved until a cutover. No money changes hands, and the platform re-checks host capacity, the host's migration claim and per-app eligibility itself, so a repeat call is safe. Requires an ACTIVE dedicated host. Org owner only.",
+		)
+		.action(async (options: { app: string[] }) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const applicationIds =
+					Array.isArray(options.app) && options.app.length > 0
+						? options.app
+						: undefined;
+
+				if (!shouldSkipConfirmation()) {
+					const confirmed = await confirm(
+						applicationIds
+							? `Start copying ${applicationIds.length} app(s) onto the dedicated host?`
+							: "Start copying every eligible shared app onto the dedicated host?",
+						false,
+						{
+							field: "confirm_migrate_start",
+							flag: "--yes",
+							context: { applicationIds: applicationIds ?? "all_eligible" },
+						},
+					);
+					if (!confirmed) {
+						log("Cancelled.");
+						return;
+					}
+				}
+
+				const client = getApiClient();
+				const _spinner = startSpinner("Queueing the move...");
+				const result =
+					await client.subscription.migrateSharedAppsToDedicated.mutate(
+						applicationIds ? { applicationIds } : undefined,
+					);
+				succeedSpinner("Move queued.");
+
+				if (isJsonMode()) {
+					outputData(result);
+					return;
+				}
+
+				quietOutput(String(result?.queued ?? 0));
+
+				log("");
+				if (!result?.queued) {
+					log(
+						`Nothing was queued${result?.skippedIneligible ? ` (${result.skippedIneligible} app(s) skipped as ineligible)` : ""}. Check ${colors.dim("tarout billing migrate:list")}.`,
+					);
+					log("");
+					return;
+				}
+				log(colors.success(`${result.queued} app(s) are being copied.`));
+				if (result.skippedIneligible) {
+					log(
+						colors.warn(
+							`${result.skippedIneligible} app(s) were skipped as ineligible and stay on the shared pool.`,
+						),
+					);
+				}
+				log(
+					`Watch progress: ${colors.dim("tarout billing migrate:status")} — the cutover then happens automatically once every copy is healthy.`,
+				);
+				log("");
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	billing
+		.command("migrate:status")
+		.description(
+			"Show the in-flight shared-to-dedicated move for the active project: stage, per-app state and progress toward a cutover. Safe to poll. A `ready_to_cutover` can legitimately be months old — copied rows are never aged out server-side because a cutover is their only exit — so an old one is reported as old, not as stale.",
+		)
+		.action(async () => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching migration status...");
+				const migration = (await client.subscription.getActiveMigration.query()) as
+					| ActiveMigrationResponse
+					| null;
+				succeedSpinner();
+
+				const summary = summarizeMigration(migration);
+
+				if (isJsonMode()) {
+					outputData({ ...migration, summary });
+					return;
+				}
+
+				quietOutput(summary.stage ?? "none");
+
+				log("");
+				log(colors.bold("Shared → Dedicated Migration"));
+				log(`  ${summary.headline}`);
+				if (summary.note) log(`  ${colors.dim(summary.note)}`);
+				if (!summary.active) {
+					log("");
+					return;
+				}
+				log(`  Mode:     ${migration?.mode || "-"}`);
+				log(`  Stage:    ${summary.stage || "-"}`);
+				log(
+					`  Host:     ${migration?.host?.name || "-"}${migration?.host?.status ? ` (${migration.host.status})` : ""}`,
+				);
+				if (summary.ageDays !== null) {
+					log(`  Age:      ${summary.ageDays} day(s)`);
+				}
+
+				// biome-ignore lint/suspicious/noExplicitAny: untyped tRPC result.
+				const apps: any[] = Array.isArray((migration as any)?.apps)
+					? (migration as any).apps
+					: [];
+				if (apps.length) {
+					log("");
+					table(
+						["APP", "STATE", "READY", "ERROR"],
+						apps.map((app: any) => [
+							app.name || "-",
+							app.state || "-",
+							app.ready ? colors.success("yes") : colors.dim("no"),
+							app.errorMessage || colors.dim("-"),
+						]),
+					);
+				}
+				if (summary.nextCommand) {
+					log(`Next: ${colors.dim(summary.nextCommand)}`);
+				}
+				log("");
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	billing
+		.command("migrate:cutover")
+		.description(
+			"Flip traffic (DNS and ownership) onto the dedicated host for every app that is copied AND reported healthy there, finishing the move. This is the RETRY path: the normal cutover is automatic from a queue worker once the copies come up, and this is what you run when that did not happen. Apps that are still unhealthy stay copied and are left behind rather than blocking the rest; the platform refuses the whole call if none are healthy yet. Org owner only.",
+		)
+		.action(async () => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+
+				if (!shouldSkipConfirmation()) {
+					const confirmed = await confirm(
+						"Flip live traffic onto the dedicated host now?",
+						false,
+						{ field: "confirm_migrate_cutover", flag: "--yes" },
+					);
+					if (!confirmed) {
+						log("Cancelled.");
+						return;
+					}
+				}
+
+				const client = getApiClient();
+				const _spinner = startSpinner("Cutting over...");
+				const result =
+					await client.subscription.completeSharedToDedicatedCutover.mutate();
+				succeedSpinner("Cutover processed.");
+
+				if (isJsonMode()) {
+					outputData(result);
+					return;
+				}
+
+				quietOutput(String(result?.cutover ?? 0));
+
+				log("");
+				if (result?.nothingToDo) {
+					log(
+						`Nothing is staged for cutover on this project. Check ${colors.dim("tarout billing migrate:status")}.`,
+					);
+					log("");
+					return;
+				}
+				log(
+					colors.success(
+						`${result?.cutover ?? 0} app(s) are now serving from the dedicated host.`,
+					),
+				);
+				if (result?.failed) {
+					log(colors.error(`  ${result.failed} app(s) failed to cut over.`));
+				}
+				if (result?.skipped) {
+					log(colors.warn(`  ${result.skipped} app(s) were skipped.`));
+				}
+				if (result?.notReady) {
+					log(
+						colors.warn(
+							`  ${result.notReady} app(s) were still starting and stay copied — re-run this once they are healthy.`,
+						),
+					);
+				}
+				if (result?.failed || result?.notReady) {
+					log(
+						`Give up on the move instead: ${colors.dim("tarout billing migrate:rollback")}`,
+					);
+				}
+				log("");
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	billing
+		.command("migrate:rollback")
+		.description(
+			"Abandon a stuck or partial shared-to-dedicated move: every app goes back to its shared-pool host with DNS and plan restored, and the dedicated host keeps its migration claim so a fixed batch can be retried. Valid any time before a fully clean cutover finalizes; the platform refuses when there is no in-flight move. Org owner only.",
+		)
+		.action(async () => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+
+				if (!shouldSkipConfirmation()) {
+					const confirmed = await confirm(
+						"Move every app back to the shared pool and abandon this migration?",
+						false,
+						{ field: "confirm_migrate_rollback", flag: "--yes" },
+					);
+					if (!confirmed) {
+						log("Cancelled.");
+						return;
+					}
+				}
+
+				const client = getApiClient();
+				const _spinner = startSpinner("Rolling back...");
+				const result =
+					await client.subscription.rollbackSharedToDedicatedCutover.mutate();
+				succeedSpinner("Rollback processed.");
+
+				if (isJsonMode()) {
+					outputData(result);
+					return;
+				}
+
+				quietOutput(String(result?.rolledBack ?? 0));
+
+				log("");
+				log(
+					colors.success(
+						`${result?.rolledBack ?? 0} app(s) are back on the shared pool.`,
+					),
+				);
+				if (result?.failed) {
+					log(
+						colors.error(
+							`  ${result.failed} app(s) could not be rolled back — contact support before retrying the move.`,
+						),
+					);
+				}
+				log("");
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+}
+
+/**
+ * Resolve the target billing interval for `period:preview` / `period:set`.
+ * The procedures have no default, so when neither the positional argument nor
+ * `--period` names one we ask: an interactive run gets a picker, and a
+ * `--json` / `--non-interactive` run gets a `needs_input` event plus exit 6
+ * instead of a guessed interval.
+ */
+async function resolveBillingPeriodTarget(
+	raw: string | undefined,
+): Promise<BillingPeriodTarget> {
+	if (raw !== undefined && String(raw).trim() !== "") {
+		return parseBillingPeriodTarget(raw);
+	}
+	const picked = await select<BillingPeriodTarget>(
+		"Switch billing to:",
+		BILLING_PERIOD_TARGETS.map((period) => ({
+			name:
+				period === "yearly"
+					? "yearly (10× monthly, 2 months free; charged today)"
+					: "monthly (staged for the end of the paid term, no refund)",
+			value: period,
+		})),
+		{
+			field: "target_period",
+			flag: "--period",
+			context: { available: [...BILLING_PERIOD_TARGETS] },
+		},
+	);
+	return parseBillingPeriodTarget(picked);
+}
+
+/**
+ * Commander `--app <id>` accumulator for `billing migrate:start`. Repeated
+ * flags push onto the array; the platform caps an explicit selection at 100
+ * ids and refuses the whole batch if any of them is ineligible.
+ */
+function collectApplicationId(value: string, previous: string[]): string[] {
+	const id = String(value).trim();
+	if (!id) {
+		throw new InvalidArgumentError(
+			"Invalid --app value. Expected an application ID.",
+		);
+	}
+	return [...previous, id];
 }
 
 /**

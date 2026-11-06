@@ -23,7 +23,13 @@ import {
 } from "../lib/output.js";
 import { ExitCode } from "../utils/exit-codes.js";
 import { confirm, input, select } from "../utils/prompts.js";
-import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
+import {
+	failSpinner,
+	startSpinner,
+	stopSpinner,
+	succeedSpinner,
+	updateSpinner,
+} from "../utils/spinner.js";
 
 /**
  * The provider name shown to customers. The platform reports Global GPU
@@ -1960,9 +1966,19 @@ export function registerServersCommands(program: Command) {
 		});
 
 	// Alerts subgroup
+	// `servers alerts` edits the THRESHOLD RULES (virtualMachine.*AlertConfig);
+	// `servers incidents` works the alerts those rules have already fired
+	// (machineAlert.*). The two are easy to confuse, so each group's help names
+	// the other and neither description stands on the bare word "alert".
 	const alerts = servers
 		.command("alerts")
-		.description("Manage server alert configurations");
+		.description(
+			"Configure the monitoring thresholds that decide when a server raises an alert (CPU, disk and network rules). This group edits the rules, not the alerts they produce: to see, acknowledge, resolve or mute an alert that is firing right now, use `tarout servers incidents`.",
+		)
+		.addHelpText(
+			"after",
+			"\nThreshold rules live here. Alerts that have already fired live under `tarout servers incidents`.",
+		);
 
 	alerts
 		.command("list")
@@ -2236,6 +2252,564 @@ export function registerServersCommands(program: Command) {
 			}
 		});
 
+	// ── Firing alerts (machineAlert.*) ───────────────────────────────────────
+
+	const incidents = servers
+		.command("incidents")
+		.description(
+			"Work the alerts your servers have already raised: list them, acknowledge one you are investigating, resolve one you have fixed, or mute one while you work on it. These are fired alerts, raised by Tarout's own monitoring - you never create one. To change the CPU, disk or network thresholds that decide when an alert fires, use `tarout servers alerts`.",
+		)
+		.addHelpText(
+			"after",
+			"\nAn incident is attached to either a rented cloud server or a dedicated runtime host, and is listed for the whole organization rather than one server. Threshold rules live under `tarout servers alerts`; this group never changes them.",
+		);
+
+	incidents
+		.command("list")
+		.alias("ls")
+		.description(
+			"List the alerts raised for this organization's servers, unresolved states first and the most recently seen first within a state. Covers both rented cloud servers and dedicated runtime hosts, so an empty list means nothing is firing anywhere.",
+		)
+		.option(
+			"-s, --status <status>",
+			`Only alerts in this state: ${INCIDENT_STATUSES.join(", ")}`,
+		)
+		.option(
+			"--severity <severity>",
+			`Only alerts at this severity: ${INCIDENT_SEVERITIES.join(", ")}`,
+		)
+		.option(
+			"--server <server>",
+			"Only alerts raised for this cloud server (ID or name)",
+		)
+		.option(
+			"--limit <n>",
+			`How many alerts to return, ${INCIDENT_LIMIT_MIN}-${INCIDENT_LIMIT_MAX} (default ${INCIDENT_LIMIT_DEFAULT}); a larger number is clamped to ${INCIDENT_LIMIT_MAX} instead of failing`,
+		)
+		.action(async (options) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				// Validated before the first request: a bad --severity must fail
+				// without having asked the platform anything.
+				const filters = incidentListInput({
+					status: options.status,
+					severity: options.severity,
+					limit: options.limit,
+				});
+				const _spinner = startSpinner("Fetching server alerts...");
+				if (options.server) {
+					const server = await resolveServerIncludingTerminated(
+						client,
+						options.server,
+					);
+					filters.serverId = server.id || server.serverId;
+				}
+				const alerts = await client.machineAlert.list.query(filters);
+				succeedSpinner();
+				if (isJsonMode()) {
+					outputData(alerts);
+					return;
+				}
+				const rows = incidentRows(alerts);
+				if (isQuietMode()) {
+					for (const row of rows) quietOutput(row.id);
+					return;
+				}
+				if (rows.length === 0) {
+					log("");
+					log("No server alerts match. Nothing is firing.");
+					log("");
+					log(
+						colors.dim(
+							"Thresholds are configured with: tarout servers alerts list <server>",
+						),
+					);
+					log("");
+					return;
+				}
+				log("");
+				table(
+					["ID", "SEVERITY", "STATUS", "TARGET", "TITLE", "LAST SEEN"],
+					rows.map((row) => [
+						colors.cyan(row.id),
+						formatIncidentSeverity(row.severity),
+						formatIncidentStatus(row.status),
+						row.target,
+						row.title,
+						formatTimestamp(row.lastSeenAt),
+					]),
+				);
+				log("");
+				log(
+					colors.dim(
+						`${rows.length} alert${rows.length === 1 ? "" : "s"}. Acknowledge one with: tarout servers incidents ack <id>`,
+					),
+				);
+				log("");
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	incidents
+		.command("summary")
+		.description(
+			"Count this organization's server alerts by severity and state - the one-call health check to run before anything else. Open alerts are broken down per severity; acknowledged and muted are reported as totals.",
+		)
+		.action(async () => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Summarizing server alerts...");
+				const summary = await client.machineAlert.summary.query();
+				succeedSpinner();
+				if (isJsonMode()) {
+					outputData(summary);
+					return;
+				}
+				const s = (summary ?? {}) as {
+					open?: Record<string, number>;
+					acknowledged?: number;
+					muted?: number;
+				};
+				const open = openIncidentTotal(summary);
+				quietOutput(String(open));
+				log("");
+				log(colors.bold("Server alerts"));
+				log(`  Open:         ${open === 0 ? colors.success("0") : String(open)}`);
+				for (const severity of INCIDENT_SEVERITIES) {
+					const count = Number(s.open?.[severity] ?? 0);
+					if (count > 0) {
+						log(`    ${formatIncidentSeverity(severity)}: ${count}`);
+					}
+				}
+				log(`  Acknowledged: ${Number(s.acknowledged ?? 0)}`);
+				log(`  Muted:        ${Number(s.muted ?? 0)}`);
+				log("");
+				if (open > 0) {
+					log(
+						colors.dim("See them with: tarout servers incidents list --status open"),
+					);
+					log("");
+				}
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	incidents
+		.command("ack")
+		.alias("acknowledge")
+		.argument("<id>", "Alert ID, as printed by `tarout servers incidents list`")
+		.description(
+			"Acknowledge a firing alert: record that a human has seen it and is dealing with it, without claiming it is fixed. The alert stays on the list in the acknowledged state until someone resolves it, so acknowledging silences nothing.",
+		)
+		.action(async (id: string) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Acknowledging the alert...");
+				const alert = await client.machineAlert.acknowledge.mutate({ id });
+				succeedSpinner("Alert acknowledged.");
+				if (isJsonMode()) {
+					outputData(alert);
+					return;
+				}
+				quietOutput(String((alert as any)?.id ?? id));
+				logIncidentDetail(alert);
+				log(
+					colors.dim(
+						`Resolve it once it is fixed with: tarout servers incidents resolve ${id}`,
+					),
+				);
+				log("");
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	incidents
+		.command("resolve")
+		.argument("<id>", "Alert ID, as printed by `tarout servers incidents list`")
+		.description(
+			"Mark a firing alert resolved because the underlying problem is fixed. This only closes the alert record: if the condition is still true, Tarout's monitoring raises it again on its next check, which is the signal that the fix did not hold.",
+		)
+		.action(async (id: string) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Resolving the alert...");
+				const alert = await client.machineAlert.resolve.mutate({ id });
+				succeedSpinner("Alert resolved.");
+				if (isJsonMode()) {
+					outputData(alert);
+					return;
+				}
+				quietOutput(String((alert as any)?.id ?? id));
+				logIncidentDetail(alert);
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	incidents
+		.command("mute")
+		.argument("<id>", "Alert ID, as printed by `tarout servers incidents list`")
+		.description(
+			"Mute a firing alert for a set number of minutes so a known-noisy condition stops being reported while you work on it. Only an organization owner may mute, and a mute hides a real problem: the alert returns the moment the window expires.",
+		)
+		.option(
+			"--minutes <minutes>",
+			`How long to mute for, ${MUTE_MINUTES_MIN}-${MUTE_MINUTES_MAX} minutes (${MUTE_MINUTES_MAX / 60 / 24} days)`,
+			String(MUTE_MINUTES_DEFAULT),
+		)
+		.action(async (id: string, options) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const minutes = muteMinutes(options.minutes);
+				if (!shouldSkipConfirmation()) {
+					const confirmed = await confirm(
+						`Mute alert "${id}" for ${describeMuteWindow(minutes)}? It stops being reported until the window expires, even if the problem gets worse.`,
+						false,
+						{
+							field: "confirm_mute_incident",
+							flag: "--yes",
+							context: { id, minutes },
+						},
+					);
+					if (!confirmed) {
+						log("Cancelled.");
+						return;
+					}
+				}
+				const client = getApiClient();
+				const _spinner = startSpinner("Muting the alert...");
+				const alert = await client.machineAlert.mute.mutate({ id, minutes });
+				succeedSpinner(`Alert muted for ${describeMuteWindow(minutes)}.`);
+				if (isJsonMode()) {
+					outputData(alert);
+					return;
+				}
+				quietOutput(String((alert as any)?.id ?? id));
+				logIncidentDetail(alert);
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	// ── Installed software (serverSoftware.*) ────────────────────────────────
+
+	const software = servers
+		.command("software")
+		.description(
+			"Install and manage the self-hosted app platform that runs on a cloud server. Tarout rents you the VM; this installs a curated platform (Coolify or Dokploy) onto it over SSH, so you can deploy your own apps, databases and services on a machine you own outright.",
+		)
+		.addHelpText(
+			"after",
+			`\nInstallable: ${INSTALLABLE_SOFTWARE.join(", ")}. The target must be a running cloud server in Saudi Arabia - a Global GPU server cannot take an install - and only one software operation may run per server at a time. Every operation is asynchronous: the command returns as soon as the job is queued, then \`tarout servers software status\` reports ${SOFTWARE_RUN_STATES.join(" | ")} and \`tarout servers software logs\` shows the installer's own output. Pass --wait to block until the run finishes. A successful install also opens the platform's default ports in the server firewall.`,
+		);
+
+	software
+		.command("list")
+		.alias("ls")
+		.description(
+			"List every software platform tracked on a cloud server, whatever state it is in - installed, mid-install, failed or removed. A server with nothing installed returns an empty list rather than an error.",
+		)
+		.argument("<server>", "Server ID or name")
+		.action(async (serverIdentifier: string) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching installed software...");
+				const server = await resolveServerIncludingTerminated(
+					client,
+					serverIdentifier,
+				);
+				const installed = await client.serverSoftware.list.query({
+					serverId: server.id || server.serverId,
+				});
+				succeedSpinner();
+				if (isJsonMode()) {
+					outputData(installed);
+					return;
+				}
+				const rows = asArray(installed);
+				if (isQuietMode()) {
+					for (const row of rows) quietOutput(String(row.addonId ?? ""));
+					return;
+				}
+				if (rows.length === 0) {
+					log("");
+					log(`No software is tracked on "${server.name || serverIdentifier}".`);
+					log("");
+					log(
+						colors.dim(
+							`Install one with: tarout servers software install ${server.name || serverIdentifier} ${INSTALLABLE_SOFTWARE[0]}`,
+						),
+					);
+					log("");
+					return;
+				}
+				log("");
+				table(
+					["SOFTWARE", "STATUS", "VERSION", "PORTS", "VIA", "UPDATED"],
+					rows.map((row: any) => [
+						softwareLabel(row.addonId),
+						formatSoftwareStatus(row.status),
+						row.installedVersion || row.pinnedRef || colors.dim("-"),
+						asArray(row.ports).join(", ") || colors.dim("-"),
+						row.installedVia || colors.dim("-"),
+						formatTimestamp(row.updatedAt),
+					]),
+				);
+				log("");
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	software
+		.command("install")
+		.argument("<server>", "Server ID or name")
+		.argument("<software>", `Software to install: ${INSTALLABLE_SOFTWARE.join(", ")}`)
+		.description(
+			"Install a curated app platform onto a running cloud server over SSH. The server must be running, must have enough RAM and disk for the platform, and must not already have another software operation in flight; the install itself then runs in the background and opens the platform's default ports on success.",
+		)
+		.option(
+			"--wait",
+			"Block until the install finishes instead of returning as soon as it is queued",
+		)
+		.action(async (serverIdentifier: string, softwareName: string, options) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const addon = resolveSoftwareAddonId(softwareName, { forInstall: true });
+				const client = getApiClient();
+				const _spinner = startSpinner(`Queueing the ${addon.name} install...`);
+				const server = await resolveServerIncludingTerminated(
+					client,
+					serverIdentifier,
+				);
+				const serverId = server.id || server.serverId;
+				let row = await client.serverSoftware.install.mutate(
+					serverSoftwareInput(serverId, addon.id),
+				);
+				if (options.wait) {
+					row = await waitForSoftwareRun(client, serverId, addon.id, "install");
+				}
+				succeedSpinner(
+					options.wait
+						? `${addon.name} install finished (${String((row as any)?.status ?? "unknown")}).`
+						: `${addon.name} install queued.`,
+				);
+				if (isJsonMode()) {
+					outputData(row);
+					return;
+				}
+				quietOutput(String((row as any)?.status ?? "installing"));
+				logSoftwareDetail(addon.name, server.name || serverIdentifier, row);
+				logSoftwarePollHint(server.name || serverIdentifier, addon.id, options.wait);
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	software
+		.command("update")
+		.argument("<server>", "Server ID or name")
+		.argument("<software>", "Software already installed on the server")
+		.description(
+			"Re-run an installed platform's install script in place to pick up its latest release. The script is idempotent, so this is the supported upgrade path; the software must already be tracked on the server, and a retired platform may be updated even though it can no longer be freshly installed.",
+		)
+		.option(
+			"--wait",
+			"Block until the update finishes instead of returning as soon as it is queued",
+		)
+		.action(async (serverIdentifier: string, softwareName: string, options) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const addon = resolveSoftwareAddonId(softwareName);
+				const client = getApiClient();
+				const _spinner = startSpinner(`Queueing the ${addon.name} update...`);
+				const server = await resolveServerIncludingTerminated(
+					client,
+					serverIdentifier,
+				);
+				const serverId = server.id || server.serverId;
+				let row = await client.serverSoftware.update.mutate(
+					serverSoftwareInput(serverId, addon.id),
+				);
+				if (options.wait) {
+					row = await waitForSoftwareRun(client, serverId, addon.id, "update");
+				}
+				succeedSpinner(
+					options.wait
+						? `${addon.name} update finished (${String((row as any)?.status ?? "unknown")}).`
+						: `${addon.name} update queued.`,
+				);
+				if (isJsonMode()) {
+					outputData(row);
+					return;
+				}
+				quietOutput(String((row as any)?.status ?? "installing"));
+				logSoftwareDetail(addon.name, server.name || serverIdentifier, row);
+				logSoftwarePollHint(server.name || serverIdentifier, addon.id, options.wait);
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	software
+		.command("uninstall")
+		.argument("<server>", "Server ID or name")
+		.argument("<software>", "Software already installed on the server")
+		.description(
+			"Remove an installed platform from a cloud server using its curated teardown script, and retract the firewall rule the install opened. Everything the platform was running on that server - its apps, its databases and their data - goes with it, and the server itself is left untouched and still billing.",
+		)
+		.option(
+			"--wait",
+			"Block until the removal finishes instead of returning as soon as it is queued",
+		)
+		.action(async (serverIdentifier: string, softwareName: string, options) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const addon = resolveSoftwareAddonId(softwareName);
+				const client = getApiClient();
+				const _findSpinner = startSpinner("Finding server...");
+				const server = await resolveServerIncludingTerminated(
+					client,
+					serverIdentifier,
+				);
+				const serverId = server.id || server.serverId;
+				const label = server.name || serverIdentifier;
+				succeedSpinner();
+				if (!shouldSkipConfirmation()) {
+					const confirmed = await confirm(
+						`Uninstall ${addon.name} from server "${label}"? This permanently deletes everything it was running there, including any databases and their data.`,
+						false,
+						{
+							field: "confirm_uninstall_server_software",
+							flag: "--yes",
+							context: { server: label, software: addon.id },
+						},
+					);
+					if (!confirmed) {
+						log("Cancelled.");
+						return;
+					}
+				}
+				const _spinner = startSpinner(`Queueing the ${addon.name} removal...`);
+				let row = await client.serverSoftware.uninstall.mutate(
+					serverSoftwareInput(serverId, addon.id),
+				);
+				if (options.wait) {
+					row = await waitForSoftwareRun(client, serverId, addon.id, "uninstall");
+				}
+				succeedSpinner(
+					options.wait
+						? `${addon.name} removal finished (${String((row as any)?.status ?? "unknown")}).`
+						: `${addon.name} removal queued.`,
+				);
+				if (isJsonMode()) {
+					outputData(row);
+					return;
+				}
+				quietOutput(String((row as any)?.status ?? "installing"));
+				logSoftwareDetail(addon.name, label, row);
+				logSoftwarePollHint(label, addon.id, options.wait);
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	software
+		.command("status")
+		.argument("<server>", "Server ID or name")
+		.argument("<software>", "Software tracked on the server")
+		.description(
+			`Show where one platform stands on a cloud server: ${SOFTWARE_RUN_STATES.join(" | ")}, the version it reported, and the ports it listens on. This is the poll target after an install, update or removal; a platform the server has never been asked to install is reported as not tracked.`,
+		)
+		.action(async (serverIdentifier: string, softwareName: string) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const addon = resolveSoftwareAddonId(softwareName);
+				const client = getApiClient();
+				const _spinner = startSpinner(`Checking ${addon.name}...`);
+				const server = await resolveServerIncludingTerminated(
+					client,
+					serverIdentifier,
+				);
+				const row = await client.serverSoftware.status.query(
+					serverSoftwareInput(server.id || server.serverId, addon.id),
+				);
+				succeedSpinner();
+				if (isJsonMode()) {
+					outputData(row);
+					return;
+				}
+				quietOutput(String((row as any)?.status ?? "unknown"));
+				logSoftwareDetail(addon.name, server.name || serverIdentifier, row);
+				logSoftwarePollHint(server.name || serverIdentifier, addon.id, true);
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	software
+		.command("logs")
+		.argument("<server>", "Server ID or name")
+		.argument("<software>", "Software tracked on the server")
+		.description(
+			"Print the installer's captured output for one platform on a cloud server. This is what a failed install left behind - the script's own stdout and stderr, capped at the most recent output - and it is the first thing to read when a status comes back failed.",
+		)
+		.action(async (serverIdentifier: string, softwareName: string) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const addon = resolveSoftwareAddonId(softwareName);
+				const client = getApiClient();
+				const _spinner = startSpinner(`Fetching ${addon.name} logs...`);
+				const server = await resolveServerIncludingTerminated(
+					client,
+					serverIdentifier,
+				);
+				const row = await client.serverSoftware.logs.query(
+					serverSoftwareInput(server.id || server.serverId, addon.id),
+				);
+				succeedSpinner();
+				if (isJsonMode()) {
+					outputData(row);
+					return;
+				}
+				const r = (row ?? {}) as { status?: string; logs?: string | null };
+				quietOutput(String(r.status ?? "unknown"));
+				log("");
+				log(
+					`${colors.bold(addon.name)} on ${server.name || serverIdentifier}: ${formatSoftwareStatus(r.status)}`,
+				);
+				log("");
+				if (!r.logs) {
+					log(colors.dim("No output captured yet."));
+					log("");
+					return;
+				}
+				log(r.logs);
+				log("");
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
 	// ── Missing VM procedures ─────────────────────────────────────────────────
 
 	servers
@@ -2501,6 +3075,74 @@ export function registerServersCommands(program: Command) {
 		.description("Check whether Global GPU servers can be rented")
 		.action(checkGpuAvailability);
 	servers.command("runpod-available", { hidden: true }).action(checkGpuAvailability);
+
+	servers
+		.command("gpu-catalog")
+		.description(
+			"List the GPU cards rentable in the Global region, with the exact size ID and hourly price to pass to `tarout servers create`. One offer per card family and GPU count; an offer marked unavailable has no supplier with capacity right now, so creating it would fail.",
+		)
+		.option("--family <family>", "Only this GPU family (for example a100, h100, l4)")
+		.option("--available", "Only offers that can be launched right now")
+		.action(async (options) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching the Global GPU catalog...");
+				const catalog = await client.virtualMachine.getGlobalGpuCatalog.query();
+				succeedSpinner();
+				if (isJsonMode()) {
+					outputData(catalog);
+					return;
+				}
+				const rows = gpuCatalogRows(catalog, {
+					family: options.family,
+					availableOnly: Boolean(options.available),
+				});
+				if (isQuietMode()) {
+					for (const row of rows) quietOutput(row.sizeId);
+					return;
+				}
+				if (rows.length === 0) {
+					log("");
+					log(
+						options.family || options.available
+							? "No GPU offers match."
+							: "No GPU offers are listed. GPU rentals are not open on this account.",
+					);
+					log("");
+					return;
+				}
+				log("");
+				table(
+					["FAMILY", "GPUS", "SIZE", "PROVIDER", "VCPU", "RAM", "DISK", "SAR/HR", "AVAILABLE"],
+					rows.map((row) => [
+						row.family,
+						String(row.count),
+						colors.cyan(row.sizeId),
+						row.provider,
+						String(row.vcpus),
+						`${row.memoryGb} GB`,
+						`${row.diskSizeGb} GB`,
+						row.hourlySar,
+						row.available ? colors.success("yes") : colors.error("no"),
+					]),
+				);
+				log("");
+				const providers = asArray((catalog as any)?.providers)
+					.map(displayProvider)
+					.join(", ");
+				if (providers) log(colors.dim(`Providers configured: ${providers}`));
+				log(
+					colors.dim(
+						"Rent one with: tarout servers create <name> --type gpu --provider <PROVIDER> --size <SIZE>",
+					),
+				);
+				log("");
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
 
 	servers
 		.command("check-quota")
@@ -2795,6 +3437,36 @@ export function registerServersCommands(program: Command) {
 					]);
 				}
 			} catch (err) {
+				handleError(err);
+			}
+		});
+
+	pool
+		.command("retry-provisioning")
+		.alias("retry-provision")
+		.description(
+			"Re-queue the dedicated host for the active project after its provisioning failed, sizing it from the project's dedicated plan. Also recovers the case where no host row exists at all - a project that pays for a dedicated plan but has nothing provisioning, which otherwise leaves every app create failing with no dedicated host. Refused if the plan is not a dedicated one in good standing, or if a host is already provisioning or active.",
+		)
+		.action(async () => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Re-queueing the dedicated host...");
+				const result =
+					await client.server.retryDedicatedProvisioning.mutate();
+				succeedSpinner("Dedicated host provisioning re-queued.");
+				if (isJsonMode()) {
+					outputData(result);
+					return;
+				}
+				quietOutput(String((result as any)?.status ?? "queued"));
+				box("Dedicated Host", [
+					`Status: ${colors.warn(String((result as any)?.status ?? "queued"))}`,
+					"Provisioning takes a few minutes.",
+					`Watch it with: ${colors.dim("tarout servers pool list")}`,
+				]);
+			} catch (err) {
+				stopSpinner();
 				handleError(err);
 			}
 		});
@@ -3152,7 +3824,61 @@ export const SERVER_OS_TYPES: readonly string[] = [
 	"ubuntu-24",
 	"debian-12",
 ];
-const PRE_INSTALLED_SOFTWARE: readonly string[] = ["coolify", "dokploy"];
+/**
+ * The curated software catalog, mirroring SOFTWARE_ADDONS on the platform. The
+ * `id` is what the API is sent and what is persisted, so it is reproduced
+ * verbatim - including `taroutCore`'s camel case. A `hidden` entry is retired:
+ * an existing install can still be listed, inspected, updated and removed, but
+ * the platform refuses to install it on another server.
+ *
+ * `aliases` are lowercase spellings a user or an agent is likely to type,
+ * including the legacy ids the platform's own normalizer still accepts.
+ */
+interface SoftwareAddonEntry {
+	id: string;
+	name: string;
+	hidden?: boolean;
+	aliases?: readonly string[];
+}
+
+const SOFTWARE_ADDONS: readonly SoftwareAddonEntry[] = [
+	{ id: "coolify", name: "Coolify", aliases: ["tarout-app-platform"] },
+	{ id: "dokploy", name: "Dokploy" },
+	{
+		id: "openship",
+		name: "Tarout Core",
+		hidden: true,
+		aliases: ["tarout core", "tarout-core"],
+	},
+	{
+		id: "taroutCore",
+		name: "Tarout Managed",
+		hidden: true,
+		aliases: ["taroutcore", "tarout managed", "tarout-managed"],
+	},
+];
+
+/** The software a NEW install may name; retired entries are excluded. */
+export const INSTALLABLE_SOFTWARE: readonly string[] = SOFTWARE_ADDONS.filter(
+	(addon) => !addon.hidden,
+).map((addon) => addon.id);
+
+/** `installed_software.status`, the whole lifecycle an install moves through. */
+export const SOFTWARE_RUN_STATES: readonly string[] = [
+	"installing",
+	"installed",
+	"failed",
+	"removed",
+];
+
+/** How often and how long `--wait` polls `serverSoftware.status`. */
+const SOFTWARE_RUN_POLL_MS = 5000;
+const SOFTWARE_RUN_TIMEOUT_MS = 20 * 60 * 1000;
+
+// `servers create --software` pre-installs at boot through a different field
+// (`preInstalledSoftware`), but it reads the same catalog, so both paths offer
+// exactly the same choices.
+const PRE_INSTALLED_SOFTWARE: readonly string[] = INSTALLABLE_SOFTWARE;
 const METRIC_RANGES: readonly string[] = ["1h", "6h", "24h", "7d", "30d"];
 const VOLUME_DISK_TYPES: readonly string[] = ["balanced", "ssd", "standard"];
 /** The only region cloud servers and reserved IPs run in (Dammam). */
@@ -3314,6 +4040,467 @@ export function formatAlertThreshold(metric: string, apiValue: number): string {
 	const mb = apiValue / BYTES_PER_MB;
 	if (apiValue > 0 && mb < 0.01) return formatRate(apiValue);
 	return `${Number(mb.toFixed(2))} MB/s`;
+}
+
+// ── Firing alerts: `servers incidents` (machineAlert.*) ─────────────────────
+//
+// Distinct from the threshold rules above in every way that matters: these rows
+// are created by the platform's monitoring, are listed for the whole
+// organization rather than one server, and cover dedicated runtime hosts as
+// well as rented VMs. Nothing here edits a threshold.
+
+/** `machine_alert_status` on the platform. */
+export const INCIDENT_STATUSES: readonly string[] = [
+	"open",
+	"acknowledged",
+	"resolved",
+	"muted",
+];
+/** `machine_alert_severity`, least to most urgent. */
+export const INCIDENT_SEVERITIES: readonly string[] = [
+	"info",
+	"warning",
+	"error",
+	"critical",
+];
+const INCIDENT_LIMIT_MIN = 1;
+const INCIDENT_LIMIT_MAX = 100;
+const INCIDENT_LIMIT_DEFAULT = 50;
+
+/** The platform's mute window, 15 minutes to 30 days. */
+const MUTE_MINUTES_MIN = 15;
+const MUTE_MINUTES_MAX = 60 * 24 * 30;
+const MUTE_MINUTES_DEFAULT = 60;
+
+export interface IncidentListInput {
+	status?: string;
+	severity?: string;
+	serverId?: string;
+	limit: number;
+}
+
+/**
+ * `--limit` for the incident list. The platform's Zod schema rejects anything
+ * outside 1-100 with a raw BAD_REQUEST, which reads as a server fault for what
+ * is really "you asked for more than we page". A number past the cap means
+ * "give me as many as you can", so clamp it; only a non-number is an error.
+ */
+export function clampIncidentLimit(value: string | number | undefined): number {
+	if (value === undefined || value === null || value === "") {
+		return INCIDENT_LIMIT_DEFAULT;
+	}
+	const parsed = Number(value);
+	if (!Number.isFinite(parsed)) {
+		throw new InvalidArgumentError(
+			`Invalid --limit "${value}". Must be a whole number between ${INCIDENT_LIMIT_MIN} and ${INCIDENT_LIMIT_MAX}.`,
+		);
+	}
+	return Math.min(
+		INCIDENT_LIMIT_MAX,
+		Math.max(INCIDENT_LIMIT_MIN, Math.trunc(parsed)),
+	);
+}
+
+/**
+ * `machineAlert.list` input. Every filter is optional on the platform, and an
+ * omitted key must stay omitted rather than being sent as undefined, so a
+ * filter the user did not ask for can never narrow the result.
+ */
+export function incidentListInput(options: {
+	status?: string;
+	severity?: string;
+	serverId?: string;
+	limit?: string | number;
+}): IncidentListInput {
+	const status = options.status
+		? String(options.status).trim().toLowerCase()
+		: undefined;
+	if (status && !INCIDENT_STATUSES.includes(status)) {
+		throw new InvalidArgumentError(
+			`Invalid alert status "${options.status}". Must be one of: ${INCIDENT_STATUSES.join(", ")}.`,
+		);
+	}
+	const severity = options.severity
+		? String(options.severity).trim().toLowerCase()
+		: undefined;
+	if (severity && !INCIDENT_SEVERITIES.includes(severity)) {
+		throw new InvalidArgumentError(
+			`Invalid alert severity "${options.severity}". Must be one of: ${INCIDENT_SEVERITIES.join(", ")}.`,
+		);
+	}
+	return {
+		...(status ? { status } : {}),
+		...(severity ? { severity } : {}),
+		...(options.serverId ? { serverId: options.serverId } : {}),
+		limit: clampIncidentLimit(options.limit),
+	};
+}
+
+/** How long to mute for. Out of range is refused, never silently adjusted. */
+export function muteMinutes(value: string | number | undefined): number {
+	const parsed = Number(value);
+	if (value === undefined || value === "" || !Number.isFinite(parsed)) {
+		throw new InvalidArgumentError(
+			`Invalid --minutes "${value}". Must be a whole number of minutes between ${MUTE_MINUTES_MIN} and ${MUTE_MINUTES_MAX}.`,
+		);
+	}
+	if (!Number.isInteger(parsed)) {
+		throw new InvalidArgumentError(
+			`Invalid --minutes "${value}". Alerts are muted for a whole number of minutes.`,
+		);
+	}
+	if (parsed < MUTE_MINUTES_MIN || parsed > MUTE_MINUTES_MAX) {
+		throw new InvalidArgumentError(
+			`Cannot mute for ${parsed} minutes. The platform allows ${MUTE_MINUTES_MIN} minutes to ${MUTE_MINUTES_MAX} (${MUTE_MINUTES_MAX / 60 / 24} days).`,
+		);
+	}
+	return parsed;
+}
+
+export function describeMuteWindow(minutes: number): string {
+	if (minutes < 60) return `${minutes} minutes`;
+	if (minutes % (60 * 24) === 0) {
+		const days = minutes / (60 * 24);
+		return `${days} day${days === 1 ? "" : "s"}`;
+	}
+	if (minutes % 60 === 0) {
+		const hours = minutes / 60;
+		return `${hours} hour${hours === 1 ? "" : "s"}`;
+	}
+	return `${minutes} minutes`;
+}
+
+export interface IncidentRow {
+	id: string;
+	severity: string;
+	status: string;
+	title: string;
+	/** The machine the alert is about, or "platform" for an org-wide one. */
+	target: string;
+	count: number;
+	lastSeenAt: string | null;
+}
+
+/**
+ * One table row per alert. `machineAlert.list` runs its rows through
+ * `toCustomerMachineAlert`, which keeps the VM under `server` but renames the
+ * dedicated-host relation to `managedRuntime` (and its `gcpInstanceName` to
+ * `instanceName`), so both have to be read to name the machine.
+ */
+export function incidentRows(alerts: unknown): IncidentRow[] {
+	return asArray(alerts).map((alert: any) => {
+		const vm = alert?.server as
+			| { name?: string; instanceName?: string }
+			| null
+			| undefined;
+		const host = alert?.managedRuntime as
+			| { name?: string; instanceName?: string }
+			| null
+			| undefined;
+		const count = Number(alert?.count);
+		return {
+			id: String(alert?.id ?? ""),
+			severity: String(alert?.severity ?? "-"),
+			status: String(alert?.status ?? "-"),
+			title: String(alert?.title ?? "-"),
+			target: String(
+				vm?.name ||
+					vm?.instanceName ||
+					host?.name ||
+					host?.instanceName ||
+					"platform",
+			),
+			count: Number.isFinite(count) && count > 0 ? count : 1,
+			lastSeenAt: alert?.lastSeenAt ? String(alert.lastSeenAt) : null,
+		};
+	});
+}
+
+/**
+ * Total open alerts across every severity. `machineAlert.summary` reports open
+ * ones grouped by severity and omits a severity with no rows, so there is no
+ * total to read - it has to be summed.
+ */
+export function openIncidentTotal(summary: unknown): number {
+	const open = (summary as { open?: Record<string, unknown> } | null)?.open;
+	if (!open || typeof open !== "object") return 0;
+	return Object.values(open).reduce((total: number, value) => {
+		const count = Number(value);
+		return total + (Number.isFinite(count) ? count : 0);
+	}, 0);
+}
+
+function formatIncidentSeverity(severity: string): string {
+	if (severity === "critical") return colors.error(severity);
+	if (severity === "error") return colors.error(severity);
+	if (severity === "warning") return colors.warn(severity);
+	return colors.dim(severity);
+}
+
+function formatIncidentStatus(status: string): string {
+	if (status === "resolved") return colors.success(status);
+	if (status === "open") return colors.error(status);
+	if (status === "muted") return colors.dim(status);
+	return colors.warn(status);
+}
+
+/** Prints one alert after a state change, from the row the mutation returns. */
+function logIncidentDetail(alert: unknown): void {
+	const row = incidentRows([alert])[0];
+	const a = (alert ?? {}) as {
+		message?: string;
+		source?: string;
+		mutedUntil?: string | null;
+		firstSeenAt?: string | null;
+	};
+	if (!row) return;
+	log("");
+	log(colors.bold(row.title));
+	log(`  ID:        ${colors.cyan(row.id)}`);
+	log(`  Severity:  ${formatIncidentSeverity(row.severity)}`);
+	log(`  Status:    ${formatIncidentStatus(row.status)}`);
+	log(`  Machine:   ${row.target}`);
+	if (a.source) log(`  Raised by: ${a.source}`);
+	log(`  Seen:      ${row.count}x, last ${formatTimestamp(row.lastSeenAt)}`);
+	if (a.mutedUntil) log(`  Muted to:  ${formatTimestamp(a.mutedUntil)}`);
+	if (a.message) log(`  ${colors.dim(String(a.message))}`);
+	log("");
+}
+
+// ── Installed software: `servers software` (serverSoftware.*) ───────────────
+
+export interface SoftwareAddonChoice {
+	id: string;
+	name: string;
+	hidden: boolean;
+}
+
+/**
+ * Resolves what the user typed to a catalog id. The platform matches `addonId`
+ * exactly and one id is camel case (`taroutCore`), so a lowercased spelling has
+ * to be mapped here rather than passed straight through. `forInstall` refuses a
+ * retired entry up front, with the same rule the platform applies: a hidden
+ * addon may still be updated or removed, just not newly installed.
+ */
+export function resolveSoftwareAddonId(
+	name: string,
+	options: { forInstall?: boolean } = {},
+): SoftwareAddonChoice {
+	const wanted = String(name ?? "")
+		.trim()
+		.toLowerCase();
+	const addon = SOFTWARE_ADDONS.find(
+		(candidate) =>
+			candidate.id.toLowerCase() === wanted ||
+			candidate.name.toLowerCase() === wanted ||
+			(candidate.aliases ?? []).includes(wanted),
+	);
+	if (!addon) {
+		const similar = findSimilar(
+			wanted,
+			SOFTWARE_ADDONS.map((candidate) => candidate.id),
+		);
+		throw new InvalidArgumentError(
+			`Unknown software "${name}". Installable: ${INSTALLABLE_SOFTWARE.join(", ")}.${
+				similar.length ? ` Did you mean ${similar.join(" or ")}?` : ""
+			}`,
+		);
+	}
+	if (addon.hidden && options.forInstall) {
+		throw new InvalidArgumentError(
+			`${addon.name} is retired and can no longer be installed on a server. Installable: ${INSTALLABLE_SOFTWARE.join(", ")}. A server that already runs ${addon.name} can still be inspected, updated and uninstalled.`,
+		);
+	}
+	return { id: addon.id, name: addon.name, hidden: Boolean(addon.hidden) };
+}
+
+/** `serverSoftware.{install,update,uninstall,status,logs}` input. */
+export function serverSoftwareInput(serverId: string, addonId: string) {
+	return { serverId, addonId };
+}
+
+/** The display name for a persisted `addonId`, which may be a retired one. */
+function softwareLabel(addonId: unknown): string {
+	const id = String(addonId ?? "");
+	const addon = SOFTWARE_ADDONS.find((candidate) => candidate.id === id);
+	if (!addon) return id || colors.dim("-");
+	return addon.hidden ? `${addon.name} ${colors.dim("(retired)")}` : addon.name;
+}
+
+/**
+ * Whether a software run has finished. `installing` is the only non-terminal
+ * state, and an unknown or missing status is treated as still running so
+ * `--wait` keeps polling rather than reporting a result it does not have.
+ */
+export function softwareRunSettled(status: unknown): boolean {
+	const value = typeof status === "string" ? status : "";
+	return value === "installed" || value === "failed" || value === "removed";
+}
+
+function formatSoftwareStatus(status: unknown): string {
+	const value = String(status ?? "unknown");
+	if (value === "installed") return colors.success(value);
+	if (value === "failed") return colors.error(value);
+	if (value === "installing") return colors.warn(value);
+	if (value === "removed") return colors.dim(value);
+	return value;
+}
+
+function logSoftwareDetail(
+	softwareName: string,
+	serverLabel: string,
+	row: unknown,
+): void {
+	const r = (row ?? {}) as {
+		status?: string;
+		installedVersion?: string | null;
+		pinnedRef?: string | null;
+		installedVia?: string | null;
+		ports?: unknown;
+		updatedAt?: string | null;
+	};
+	log("");
+	log(`${colors.bold(softwareName)} on ${serverLabel}`);
+	log(`  Status:  ${formatSoftwareStatus(r.status)}`);
+	if (r.installedVersion || r.pinnedRef) {
+		log(`  Version: ${r.installedVersion || r.pinnedRef}`);
+	}
+	const ports = asArray(r.ports);
+	if (ports.length > 0) log(`  Ports:   ${ports.join(", ")}`);
+	if (r.installedVia) log(`  Via:     ${r.installedVia}`);
+	if (r.updatedAt) log(`  Updated: ${formatTimestamp(r.updatedAt)}`);
+	log("");
+}
+
+function logSoftwarePollHint(
+	serverLabel: string,
+	addonId: string,
+	settled: boolean,
+): void {
+	if (settled) {
+		log(
+			colors.dim(
+				`Read the installer output with: tarout servers software logs ${serverLabel} ${addonId}`,
+			),
+		);
+		log("");
+		return;
+	}
+	log(colors.dim("The run continues in the background. Follow it with:"));
+	log(
+		colors.dim(`  tarout servers software status ${serverLabel} ${addonId}`),
+	);
+	log(colors.dim(`  tarout servers software logs ${serverLabel} ${addonId}`));
+	log("");
+}
+
+/**
+ * Polls `serverSoftware.status` until the run leaves `installing`. The install
+ * runner is a background SSH job, so there is nothing to stream; this is the
+ * only way a script can block on the outcome.
+ */
+async function waitForSoftwareRun(
+	client: any,
+	serverId: string,
+	addonId: string,
+	action: "install" | "update" | "uninstall",
+): Promise<unknown> {
+	const deadline = Date.now() + SOFTWARE_RUN_TIMEOUT_MS;
+	let row: unknown = null;
+	while (Date.now() < deadline) {
+		const left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+		updateSpinner(`Running the ${action} on the server... (${left}s left)`);
+		await new Promise((resolve) => setTimeout(resolve, SOFTWARE_RUN_POLL_MS));
+		row = await client.serverSoftware.status.query(
+			serverSoftwareInput(serverId, addonId),
+		);
+		if (softwareRunSettled((row as { status?: unknown } | null)?.status)) {
+			return row;
+		}
+	}
+	throw new CliError(
+		`The ${action} is still running after ${SOFTWARE_RUN_TIMEOUT_MS / 60000} minutes. It has not failed - it is still going on the server.`,
+		ExitCode.GENERAL_ERROR,
+		[
+			`Check it with: tarout servers software status <server> ${addonId}`,
+			`Read its output with: tarout servers software logs <server> ${addonId}`,
+		],
+		{ reason: "software_run_timeout", addonId, action },
+	);
+}
+
+// ── Global GPU catalog (virtualMachine.getGlobalGpuCatalog) ────────────────
+
+export interface GpuCatalogRow {
+	family: string;
+	count: number;
+	sizeId: string;
+	provider: string;
+	vcpus: number;
+	memoryGb: number;
+	diskSizeGb: number;
+	gpuMemoryGb: number;
+	hourlySar: string;
+	region: string;
+	available: boolean;
+}
+
+/**
+ * Flattens the catalog into one row per offer (a GPU family at one GPU count).
+ * Prices arrive in halalas; `--family` matches the family key or either of its
+ * display names so `a100`, `A100` and "NVIDIA A100" all work.
+ */
+export function gpuCatalogRows(
+	catalog: unknown,
+	filters: { family?: string; availableOnly?: boolean } = {},
+): GpuCatalogRow[] {
+	const wanted = filters.family
+		? String(filters.family).trim().toLowerCase()
+		: undefined;
+	const rows: GpuCatalogRow[] = [];
+	for (const family of asArray((catalog as any)?.families)) {
+		const names = [family?.key, family?.shortName, family?.displayName]
+			.filter((value) => typeof value === "string")
+			.map((value: string) => value.toLowerCase());
+		if (wanted && !names.includes(wanted)) continue;
+		for (const offer of asArray(family?.offers)) {
+			if (filters.availableOnly && !offer?.available) continue;
+			rows.push({
+				family: String(family?.shortName || family?.key || "-"),
+				count: Number(offer?.count ?? 1),
+				sizeId: String(offer?.sizeId ?? "-"),
+				provider: displayProvider(offer?.providerId) || "-",
+				vcpus: Number(offer?.vcpus ?? 0),
+				memoryGb: Number(offer?.memoryGb ?? 0),
+				diskSizeGb: Number(offer?.diskSizeGb ?? 0),
+				gpuMemoryGb: Number(offer?.gpuMemoryGb ?? 0),
+				hourlySar: formatHalalasPerHour(offer?.hourlyHalalas),
+				region: String(offer?.regionDisplayName || "-"),
+				available: Boolean(offer?.available),
+			});
+		}
+	}
+	return rows;
+}
+
+/** Halalas to the SAR figure the rest of the CLI prints (1 SAR = 100 halalas). */
+export function formatHalalasPerHour(halalas: unknown): string {
+	const value = Number(halalas);
+	if (!Number.isFinite(value)) return "-";
+	return (value / 100).toFixed(3);
+}
+
+/** Date AND time: an alert or an install run is useless dated to the day. */
+function formatTimestamp(value: Date | string | null | undefined): string {
+	if (!value) return colors.dim("-");
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) return colors.dim("-");
+	return date.toLocaleString("en-US", {
+		month: "short",
+		day: "numeric",
+		hour: "2-digit",
+		minute: "2-digit",
+	});
 }
 
 // ── Termination: what goes with the server and what is kept ────────────────

@@ -648,6 +648,107 @@ export function registerAiCommands(program: Command) {
 			}
 		});
 
+	// Per-request log. `ai usage` is the rollup (getOrganizationUsage /
+	// getActivity: totals, a daily series, breakdowns by model and by key);
+	// this is the individual request rows those numbers are summed from, which
+	// is the only place a single expensive or unexpected call is visible.
+	ai.command("requests")
+		.description(
+			"List individual AI Gateway requests, newest first: when each one ran, which model and key served it, its prompt and completion tokens and its own cost. This is the per-request log behind the totals `ai usage` reports, so use it to find the one expensive call or the key that is making traffic you did not expect. Rows are written at billing settlement, so a request made seconds ago appears once it settles.",
+		)
+		.option("-n, --limit <n>", "Requests per page, 1-100", "50")
+		.option("-d, --days <days>", "Days of history, 1-90", "30")
+		.option("-k, --key <key-id>", "Only requests served by this gateway key")
+		.option("-m, --model <model-id>", "Only requests for this model")
+		.option(
+			"--cursor <cursor>",
+			"Continue from the nextCursor of a previous page",
+		)
+		.action(
+			async (options: {
+				cursor?: string;
+				days?: string;
+				key?: string;
+				limit?: string;
+				model?: string;
+			}) => {
+				try {
+					if (!isLoggedIn()) throw new AuthError();
+
+					const client = getApiClient();
+					const _spinner = startSpinner("Fetching requests...");
+
+					const page = (await client.aiGateway.listRequests.query({
+						days: clampDays(options.days, 30),
+						limit: clampRequestLimit(options.limit),
+						...(options.key ? { keyId: options.key } : {}),
+						...(options.model ? { modelId: options.model } : {}),
+						...(options.cursor ? { cursor: options.cursor } : {}),
+					} as any)) as RequestLogPage;
+
+					succeedSpinner();
+
+					if (isJsonMode()) {
+						outputData(page);
+						return;
+					}
+
+					const items = page?.items ?? [];
+					if (isQuietMode()) {
+						for (const item of items) {
+							if (item.id) quietOutput(item.id);
+						}
+						return;
+					}
+
+					if (items.length === 0) {
+						log("");
+						log("No AI Gateway requests in this window.");
+						log(
+							colors.dim(
+								"Usage rows are written at billing settlement; widen the window with --days, or check the key filter.",
+							),
+						);
+						log("");
+						return;
+					}
+
+					log("");
+					log(colors.bold("AI Gateway requests"));
+					table(
+						["WHEN", "MODEL", "KEY", "TOKENS", "COST SAR"],
+						items.map((item) => [
+							item.timestamp
+								? new Date(item.timestamp).toLocaleString("en-US", {
+										month: "short",
+										day: "numeric",
+										hour: "2-digit",
+										minute: "2-digit",
+									})
+								: colors.dim("-"),
+							item.modelId,
+							item.keyDeleted
+								? `${item.keyName} ${colors.dim("(deleted)")}`
+								: item.keyName,
+							`${item.totalTokens} ${colors.dim(`(${item.promptTokens} in, ${item.completionTokens} out)`)}`,
+							formatSar(item.costHalalas),
+						]),
+					);
+					log("");
+					if (page?.nextCursor) {
+						log(
+							colors.dim(
+								`More requests: tarout ai requests --cursor ${page.nextCursor}`,
+							),
+						);
+						log("");
+					}
+				} catch (err) {
+					handleError(err);
+				}
+			},
+		);
+
 	// ── AI Provider Configurations (client.ai.*) ────────────────────────────────
 
 	const aiProvider = ai
@@ -964,6 +1065,34 @@ function formatUsd(value: number | null): string {
 
 function formatSar(halalas: number): string {
 	return (Number(halalas || 0) / 100).toFixed(4);
+}
+
+/** One page of `aiGateway.listRequests`. */
+interface RequestLogPage {
+	items?: Array<{
+		completionTokens: number;
+		costHalalas: number;
+		id: string;
+		keyDeleted?: boolean;
+		keyId: string;
+		keyName: string;
+		modelId: string;
+		modelProvider?: string;
+		promptTokens: number;
+		timestamp: string;
+		totalTokens: number;
+	}>;
+	nextCursor?: string | null;
+}
+
+/**
+ * `listRequests` validates `limit` as an int in [1, 100]; clamp rather than
+ * let a round number like 500 come back as a validation error.
+ */
+function clampRequestLimit(raw: string | undefined): number {
+	const parsed = Number.parseInt(raw ?? "", 10);
+	if (!Number.isFinite(parsed)) return 50;
+	return Math.min(Math.max(parsed, 1), 100);
 }
 
 function clampDays(raw: string | undefined, fallback: number): number {

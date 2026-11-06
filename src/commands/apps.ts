@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import { type Command, Option } from "commander";
 import open from "open";
 import { getApiClient } from "../lib/api.js";
@@ -80,6 +81,110 @@ export function buildApplicationUpdatePlan(
 		application: Object.keys(application).length > 1 ? application : null,
 		subdomain,
 	};
+}
+
+/**
+ * Every region id `application.saveRegion` accepts, mirroring the server's
+ * `gcpRegionSchema` enum (platform `src/server/constants/gcp-regions.ts`).
+ * Kept here only so an unknown region fails locally with the valid list
+ * instead of as an opaque zod enum error; the server stays authoritative, and
+ * it additionally refuses any region other than the project's pinned one.
+ */
+export const GCP_REGION_IDS = [
+	"me-central1",
+	"me-central2",
+	"europe-central2",
+	"europe-north1",
+	"europe-southwest1",
+	"europe-west1",
+	"europe-west2",
+	"europe-west3",
+	"europe-west4",
+	"europe-west6",
+	"europe-west8",
+	"europe-west9",
+	"europe-west10",
+	"europe-west12",
+	"northamerica-northeast1",
+	"northamerica-northeast2",
+	"us-central1",
+	"us-east1",
+	"us-east4",
+	"us-east5",
+	"us-south1",
+	"us-west1",
+	"us-west2",
+	"us-west3",
+	"us-west4",
+	"southamerica-east1",
+	"southamerica-west1",
+	"asia-east1",
+	"asia-east2",
+	"asia-northeast1",
+	"asia-northeast2",
+	"asia-northeast3",
+	"asia-south1",
+	"asia-south2",
+	"asia-southeast1",
+	"asia-southeast2",
+	"australia-southeast1",
+	"australia-southeast2",
+	"africa-south1",
+] as const;
+
+/** Validate a region id before spending a round trip on it. */
+export function normalizeRegionId(raw: string): string {
+	const region = String(raw).trim().toLowerCase();
+	if (!region) {
+		throw new InvalidArgumentError("Region cannot be empty.");
+	}
+	if (!(GCP_REGION_IDS as readonly string[]).includes(region)) {
+		const similar = findSimilar(region, [...GCP_REGION_IDS]);
+		throw new InvalidArgumentError(
+			`Unknown region "${raw}".${
+				similar.length > 0 ? ` Did you mean: ${similar.join(", ")}?` : ""
+			} Applications inherit their project's region — read it with \`tarout projects get <project> --json\`.`,
+		);
+	}
+	return region;
+}
+
+interface BuildArgsOptions {
+	clear?: boolean;
+	file?: string;
+	set?: string;
+}
+
+/**
+ * Decide what `apps build-args` is doing. `application.saveEnvironment` takes
+ * the whole `buildArgs` blob and replaces it, so there is no "append": the
+ * caller either reads the current value (no write flag), replaces it, or
+ * clears it. `fileContent` is passed in by the caller after reading the file,
+ * which keeps this decision testable without touching the filesystem.
+ */
+export function planBuildArgs(
+	options: BuildArgsOptions,
+	fileContent?: string,
+): { buildArgs: string } | null {
+	const writes = [
+		options.set !== undefined,
+		options.file !== undefined,
+		options.clear === true,
+	].filter(Boolean).length;
+	if (writes === 0) return null;
+	if (writes > 1) {
+		throw new InvalidArgumentError(
+			"Pass only one of --set, --file or --clear: each one replaces the whole build-args block.",
+		);
+	}
+	if (options.clear) return { buildArgs: "" };
+	if (options.file !== undefined) {
+		if (fileContent === undefined) {
+			throw new InvalidArgumentError(`File not found: ${options.file}`);
+		}
+		return { buildArgs: fileContent };
+	}
+	return { buildArgs: options.set ?? "" };
 }
 
 export function registerAppsCommands(program: Command) {
@@ -1327,12 +1432,21 @@ export function registerAppsCommands(program: Command) {
 			}
 		});
 
-	// Refresh application screenshot
+	// Refresh application screenshot, or read the stored one with --url.
+	// `application.refreshScreenshot` queues a new capture and returns nothing
+	// viewable; `application.screenshot` signs the stored object (the bucket is
+	// not publicly readable), so retrieving the image needs the second call.
 	apps
 		.command("screenshot")
 		.argument("<app>", "Application ID or name")
-		.description("Refresh the application screenshot")
-		.action(async (appIdentifier) => {
+		.description(
+			"Queue a fresh capture of the application's public page. The capture runs in the background, so the new image appears a little later. Pass --url to skip the capture and print a short-lived signed link to the screenshot already stored instead.",
+		)
+		.option(
+			"--url",
+			"Print a signed URL for the stored screenshot instead of queueing a new capture (empty when the app has never been captured)",
+		)
+		.action(async (appIdentifier, options: { url?: boolean }) => {
 			try {
 				if (!isLoggedIn()) throw new AuthError();
 
@@ -1346,6 +1460,36 @@ export function registerAppsCommands(program: Command) {
 				if (!app) {
 					failSpinner();
 					throw new NotFoundError("Application", appIdentifier);
+				}
+
+				if (options.url) {
+					const _urlSpinner = startSpinner("Fetching screenshot URL...");
+					const stored = (await client.application.screenshot.query({
+						applicationId: app.applicationId,
+					})) as { url?: string | null };
+					succeedSpinner();
+
+					if (isJsonMode()) {
+						outputData(stored);
+						return;
+					}
+					if (!stored?.url) {
+						log("");
+						log("No screenshot stored for this application yet.");
+						log(
+							colors.dim(
+								`Capture one with: tarout apps screenshot ${appIdentifier}`,
+							),
+						);
+						log("");
+						return;
+					}
+					quietOutput(stored.url);
+					log("");
+					log(stored.url);
+					log(colors.dim("The link is signed and expires."));
+					log("");
+					return;
 				}
 
 				const _screenshotSpinner = startSpinner("Refreshing screenshot...");
@@ -1733,6 +1877,243 @@ export function registerAppsCommands(program: Command) {
 		});
 
 	// ── Change plan ──────────────────────────────────────────────────────────────
+	apps
+		.command("build-args")
+		.argument("<app>", "Application ID or name")
+		.description(
+			"Show or replace an application's build arguments — the Docker/Railpack ARG values used while the image is BUILT, not the variables the container runs with. Runtime variables are a separate store managed by `tarout env`, and this endpoint refuses them outright. With no flag it prints the current block; --set, --file and --clear each replace the whole block, because the platform stores it as one text value and has no merge.",
+		)
+		.option(
+			"--set <text>",
+			'The complete build-args block, one KEY=value per line (e.g. --set "NODE_VERSION=22\\nAPI_URL=https://x")',
+		)
+		.option("--file <path>", "Read the complete build-args block from a file")
+		.option("--clear", "Remove every build argument")
+		.action(async (appIdentifier, options: BuildArgsOptions) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+
+				// Read the file before the round trip so a bad path fails instantly.
+				let fileContent: string | undefined;
+				if (options.file !== undefined) {
+					if (!existsSync(options.file)) {
+						throw new InvalidArgumentError(`File not found: ${options.file}`);
+					}
+					fileContent = readFileSync(options.file, "utf-8");
+				}
+				const plan = planBuildArgs(options, fileContent);
+
+				const client = getApiClient();
+				const _spinner = startSpinner("Finding application...");
+				const appsList: AppSummary[] =
+					await client.application.allByOrganization.query();
+				const app = findApp(appsList, appIdentifier);
+				if (!app) {
+					failSpinner();
+					const suggestions = findSimilar(
+						appIdentifier,
+						appsList.map((a) => a.name),
+					);
+					throw new NotFoundError("Application", appIdentifier, suggestions);
+				}
+
+				if (!plan) {
+					const _readSpinner = startSpinner("Fetching build arguments...");
+					const detail = (await client.application.one.query({
+						applicationId: app.applicationId,
+					})) as { buildArgs?: string | null };
+					succeedSpinner();
+
+					const current = detail?.buildArgs ?? "";
+					if (isJsonMode()) {
+						outputData({
+							applicationId: app.applicationId,
+							buildArgs: current,
+						});
+						return;
+					}
+					if (!current.trim()) {
+						log("");
+						log(`No build arguments set for ${app.name}.`);
+						log(
+							colors.dim(
+								`Set them with: tarout apps build-args ${appIdentifier} --set "KEY=value"`,
+							),
+						);
+						log("");
+						return;
+					}
+					quietOutput(current);
+					log("");
+					log(colors.bold(`Build arguments: ${app.name}`));
+					log(current);
+					log("");
+					log(
+						colors.dim(
+							"Build arguments apply on the next build: tarout deploy " +
+								appIdentifier,
+						),
+					);
+					log("");
+					return;
+				}
+
+				// A replace with no merge path can silently drop a build arg the app
+				// needs, so it is confirmed like any other overwrite.
+				if (!shouldSkipConfirmation()) {
+					const confirmed = await confirm(
+						plan.buildArgs === ""
+							? `Remove every build argument from "${app.name}"?`
+							: `Replace all build arguments on "${app.name}"? Anything not in the new block is dropped.`,
+						false,
+						{
+							field: "confirm_build_args",
+							flag: "--yes",
+							context: {
+								appName: app.name,
+								applicationId: app.applicationId,
+							},
+						},
+					);
+					if (!confirmed) {
+						log("Cancelled.");
+						return;
+					}
+				}
+
+				const _saveSpinner = startSpinner("Saving build arguments...");
+				await client.application.saveEnvironment.mutate({
+					applicationId: app.applicationId,
+					buildArgs: plan.buildArgs,
+				} as any);
+				succeedSpinner(
+					plan.buildArgs === ""
+						? "Build arguments cleared."
+						: "Build arguments saved.",
+				);
+
+				if (isJsonMode()) {
+					outputData({
+						applicationId: app.applicationId,
+						buildArgs: plan.buildArgs,
+					});
+					return;
+				}
+				quietOutput(app.applicationId);
+				log("");
+				log(
+					colors.dim(
+						`Build arguments only take effect on the next build: tarout deploy ${appIdentifier}`,
+					),
+				);
+				log("");
+			} catch (err) {
+				failSpinner();
+				handleError(err);
+			}
+		});
+
+	// ── Deployment region ────────────────────────────────────────────────────────
+	// Narrow on purpose: `application.saveRegion` refuses an app that already
+	// sits on a Coolify server, and refuses any region other than the one its
+	// PROJECT is pinned to. It is a repair for an app row whose region drifted
+	// from its project, not a way to move a running app.
+	apps
+		.command("set-region")
+		.argument("<app>", "Application ID or name")
+		.argument("<region>", "GCP region id, e.g. me-central2")
+		.description(
+			"Set the deployment region recorded for an application that has not been placed on a host yet. Region drives host selection at deploy time, so the platform refuses this once the app has been deployed — moving a running app would mean migrating its container, which this does not do; recreate the app in the right project instead. Placement is owned by the PROJECT, so the only region accepted is the one the app's project is pinned to: this re-aligns a drifted app row, it does not relocate anything.",
+		)
+		.action(async (appIdentifier, regionArg: string) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const region = normalizeRegionId(regionArg);
+
+				const client = getApiClient();
+				const _spinner = startSpinner("Finding application...");
+				const appsList: AppSummary[] =
+					await client.application.allByOrganization.query();
+				const app = findApp(appsList, appIdentifier);
+				if (!app) {
+					failSpinner();
+					const suggestions = findSimilar(
+						appIdentifier,
+						appsList.map((a) => a.name),
+					);
+					throw new NotFoundError("Application", appIdentifier, suggestions);
+				}
+
+				const _detailSpinner = startSpinner("Checking placement...");
+				const detail = (await client.application.one.query({
+					applicationId: app.applicationId,
+				})) as { coolifyServerId?: string | null; region?: string | null };
+				succeedSpinner();
+
+				// Fail here rather than after the mutation: the server's refusal is
+				// the same, but this one can say what to do instead.
+				if (detail?.coolifyServerId) {
+					throw new InvalidArgumentError(
+						`"${app.name}" is already deployed on a host, and the region cannot be changed afterwards. Create a new application in a project pinned to ${region} and deploy it there.`,
+					);
+				}
+				if (detail?.region === region) {
+					if (isJsonMode()) {
+						outputData({
+							applicationId: app.applicationId,
+							region,
+							changed: false,
+						});
+						return;
+					}
+					log("");
+					log(`${app.name} is already recorded in ${colors.cyan(region)}.`);
+					log("");
+					return;
+				}
+
+				if (!shouldSkipConfirmation()) {
+					const confirmed = await confirm(
+						`Set the region of "${app.name}" to ${region}? This only works while the app is undeployed, and only if its project is pinned to ${region}.`,
+						false,
+						{
+							field: "confirm_set_region",
+							flag: "--yes",
+							context: {
+								appName: app.name,
+								applicationId: app.applicationId,
+								region,
+							},
+						},
+					);
+					if (!confirmed) {
+						log("Cancelled.");
+						return;
+					}
+				}
+
+				const _saveSpinner = startSpinner(`Setting region to ${region}...`);
+				await client.application.saveRegion.mutate({
+					applicationId: app.applicationId,
+					region,
+				} as any);
+				succeedSpinner(`Region set to ${region}.`);
+
+				if (isJsonMode()) {
+					outputData({
+						applicationId: app.applicationId,
+						region,
+						changed: true,
+					});
+					return;
+				}
+				quietOutput(region);
+			} catch (err) {
+				failSpinner();
+				handleError(err);
+			}
+		});
+
 	apps
 		.command("change-plan")
 		.argument("<app>", "Application ID or name")

@@ -470,7 +470,12 @@ describe("tarout approvals --help", () => {
 			"a human approves or denies requests in the dashboard (https://tarout.sa/dashboard/agent/approvals); an agent cannot approve its own request.",
 		);
 		const names = approvals?.commands.map((c) => c.name());
-		expect(names).toEqual(["list", "get", "wait"]);
+		// Read-only by design: see, count and wait. `approve` and `deny` require a
+		// human session on the server, so the CLI must never grow a command for
+		// either one.
+		expect(names).toEqual(["list", "pending", "get", "wait"]);
+		expect(names).not.toContain("approve");
+		expect(names).not.toContain("deny");
 	});
 });
 

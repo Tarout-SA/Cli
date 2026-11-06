@@ -1,7 +1,13 @@
 import type { Command } from "commander";
 import { getApiClient, setRequestProjectId } from "../lib/api.js";
 import { getCurrentProfile, isLoggedIn, updateProfile } from "../lib/config.js";
-import { AuthError, handleError } from "../lib/errors.js";
+import {
+	AuthError,
+	findSimilar,
+	handleError,
+	InvalidArgumentError,
+	NotFoundError,
+} from "../lib/errors.js";
 import {
 	colors,
 	isJsonMode,
@@ -13,7 +19,12 @@ import {
 	table,
 } from "../lib/output.js";
 import { confirm, input } from "../utils/prompts.js";
-import { failSpinner, startSpinner, succeedSpinner } from "../utils/spinner.js";
+import {
+	failSpinner,
+	startSpinner,
+	stopSpinner,
+	succeedSpinner,
+} from "../utils/spinner.js";
 
 import {
 	type ProjectSummary,
@@ -29,6 +40,131 @@ export { verifyProjectCredentialScope } from "../lib/project-context.js";
  * holds its own set of environments and resources. Profiles persist a
  * `projectId` to scope subsequent commands.
  */
+
+/** One row of `project.autofixRuns`. */
+interface AutofixRun {
+	application?: { appName?: string; name?: string } | null;
+	branch?: string | null;
+	commitSha?: string | null;
+	createdAt?: Date | string | null;
+	id: string;
+	pullRequestNumber?: number | null;
+	pullRequestUrl?: string | null;
+	reason?: string | null;
+	status?: string | null;
+	summary?: string | null;
+	trigger?: string | null;
+}
+
+/** The run states `services/autofix.ts` writes, in the operator's vocabulary. */
+function formatAutofixStatus(status: string | null | undefined): string {
+	switch (status) {
+		case "succeeded":
+			return colors.success("succeeded");
+		case "failed":
+			return colors.error("failed");
+		case "no_fix":
+			return colors.warn("no_fix");
+		case "skipped":
+			return colors.dim("skipped");
+		case "queued":
+		case "analyzing":
+		case "deploying":
+			return colors.cyan(status);
+		default:
+			return status ?? colors.dim("-");
+	}
+}
+
+/** Default page size of `project.autofixRuns` (the server's own default). */
+export const DEFAULT_AUTOFIX_RUNS_LIMIT = 20;
+/** `project.autofixRuns` validates `limit` as an int in [1, 50]. */
+export const MAX_AUTOFIX_RUNS_LIMIT = 50;
+
+/**
+ * Clamp `--limit` into the window `project.autofixRuns` accepts instead of
+ * letting zod reject the call: an agent that asks for 500 runs wants "as many
+ * as you have", not a BAD_REQUEST. A value that is not a number at all falls
+ * back to the server's default rather than being silently read as 0.
+ */
+export function parseAutofixRunsLimit(raw: string | undefined): number {
+	if (raw === undefined) return DEFAULT_AUTOFIX_RUNS_LIMIT;
+	const parsed = Number.parseInt(String(raw).trim(), 10);
+	if (!Number.isFinite(parsed)) return DEFAULT_AUTOFIX_RUNS_LIMIT;
+	return Math.min(Math.max(parsed, 1), MAX_AUTOFIX_RUNS_LIMIT);
+}
+
+/**
+ * The single place the Autofix on/off vocabulary is turned into the boolean
+ * `project.setAutofix` wants, so `on`, `enable` and `true` cannot drift apart.
+ */
+export function parseAutofixState(raw: string): boolean {
+	const value = String(raw).trim().toLowerCase();
+	if (value === "on" || value === "enable" || value === "true") return true;
+	if (value === "off" || value === "disable" || value === "false") return false;
+	throw new InvalidArgumentError(
+		`Invalid Autofix state "${raw}". Use "on" or "off".`,
+	);
+}
+
+/**
+ * Match a project the way `projects use` and `projects get` already do: exact
+ * id, id prefix, exact slug, or case-insensitive name. The server's
+ * `projectId` inputs are real ids only (`getProjectById` does not look up
+ * slugs), so every command that advertises "ID or slug" has to resolve the
+ * reference locally first.
+ */
+export function resolveProjectRef(
+	projects: ProjectSummary[],
+	identifier: string,
+): ProjectSummary | undefined {
+	const lower = identifier.toLowerCase();
+	return projects.find(
+		(project) =>
+			project.projectId === identifier ||
+			project.projectId.startsWith(identifier) ||
+			project.slug === identifier ||
+			project.name.toLowerCase() === lower,
+	);
+}
+
+/**
+ * Resolve the project a command should act on: the reference the caller
+ * passed, or the profile's active project when they passed nothing. Keeps the
+ * existing selection mechanism (`tarout projects use`) as the only source of
+ * "which project" — these commands add no `--project` flag of their own.
+ */
+async function resolveProjectId(
+	client: ReturnType<typeof getApiClient>,
+	identifier?: string,
+): Promise<{ projectId: string; label: string }> {
+	if (!identifier) {
+		const profile = getCurrentProfile();
+		if (!profile?.projectId) {
+			throw new InvalidArgumentError(
+				"No active project. Select one with `tarout projects use <slug>`, or name the project as an argument.",
+			);
+		}
+		return {
+			projectId: profile.projectId,
+			label: profile.projectName ?? profile.projectId,
+		};
+	}
+	const all: ProjectSummary[] = await client.project.all.query();
+	const target = resolveProjectRef(all, identifier);
+	if (!target) {
+		throw new NotFoundError(
+			"Project",
+			identifier,
+			findSimilar(
+				identifier,
+				all.flatMap((project) => [project.name, project.slug]).filter(Boolean),
+			),
+		);
+	}
+	return { projectId: target.projectId, label: target.name };
+}
+
 export function registerProjectsCommands(program: Command) {
 	const projects = program
 		.command("projects")
@@ -393,6 +529,284 @@ export function registerProjectsCommands(program: Command) {
 				);
 				log("");
 			} catch (err) {
+				handleError(err);
+			}
+		});
+
+	// ── Autofix (beta) ───────────────────────────────────────────────────────────
+	// Autofix is a per-PROJECT switch (`project.autofixEnabled`) that the AI
+	// build-repair pipeline reads before it reacts to anything, so it is managed
+	// here and not under `tarout apps`.
+	const autofix = projects
+		.command("autofix")
+		.description(
+			"Show or change Autofix (beta) for a project, and read its run history. When Autofix is on, a failed deployment or an app whose uptime monitor goes down makes the platform read the build log and the repository at the failing commit, commit the fix it verified to an autofix/* branch, open a pull request, and deploy that commit immediately — so an agent should check here before diagnosing a broken build itself.",
+		);
+
+	autofix
+		.command("status", { isDefault: true })
+		.argument(
+			"[project]",
+			"Project ID or slug (default: the active project from `tarout projects use`)",
+		)
+		.description(
+			"Report whether Autofix is currently on for the project. This is the switch the pipeline reads, so `off` means no failed deployment in this project will ever be repaired automatically.",
+		)
+		.action(async (projectRef?: string) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Fetching Autofix state...");
+				const { projectId } = await resolveProjectId(client, projectRef);
+				const project = (await client.project.one.query({
+					projectId,
+				} as any)) as { name?: string; autofixEnabled?: boolean };
+				succeedSpinner();
+
+				const enabled = project?.autofixEnabled === true;
+				if (isJsonMode()) {
+					outputData({ projectId, autofixEnabled: enabled });
+					return;
+				}
+				quietOutput(enabled ? "on" : "off");
+				log("");
+				log(colors.bold(`Autofix: ${project?.name ?? projectId}`));
+				log(
+					`  State: ${enabled ? colors.success("on") : colors.dim("off")} ${colors.dim("(beta)")}`,
+				);
+				log("");
+				if (enabled) {
+					log(
+						colors.dim(
+							"A failed deployment, or an app going down, opens a pull request with the fix and deploys that commit. Merge the PR to keep it — until then your next push to the deploy branch redeploys code without the fix.",
+						),
+					);
+					log(
+						colors.dim(
+							`Recent runs: tarout projects autofix runs ${projectRef ?? ""}`.trimEnd(),
+						),
+					);
+				} else {
+					log(
+						colors.dim(
+							`Turn it on with: tarout projects autofix on ${projectRef ?? ""}`.trimEnd(),
+						),
+					);
+				}
+				log("");
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	/**
+	 * `on` and `off` share one body so the word the user typed is the only
+	 * difference, and `parseAutofixState` is the single mapping to the boolean
+	 * `project.setAutofix` takes.
+	 */
+	const toggleAutofix =
+		(word: "on" | "off") =>
+		async (projectRef?: string): Promise<void> => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const enabled = parseAutofixState(word);
+				const client = getApiClient();
+				const _spinner = startSpinner(
+					enabled ? "Enabling Autofix..." : "Disabling Autofix...",
+				);
+				const { projectId, label } = await resolveProjectId(client, projectRef);
+				const result = (await client.project.setAutofix.mutate({
+					projectId,
+					enabled,
+				} as any)) as { autofixEnabled?: boolean };
+				const applied = result?.autofixEnabled === true;
+				succeedSpinner(
+					applied
+						? `Autofix enabled for ${label}.`
+						: `Autofix disabled for ${label}.`,
+				);
+
+				if (isJsonMode()) {
+					outputData({ projectId, autofixEnabled: applied });
+					return;
+				}
+				quietOutput(applied ? "on" : "off");
+				if (applied) {
+					log("");
+					log(
+						colors.dim(
+							"Autofix only writes to GitHub sources whose installation granted contents:write; anything else records the diagnosis and stops. It never applies environment variable changes, and it is capped at 3 attempts per app per day.",
+						),
+					);
+					log("");
+				}
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		};
+
+	autofix
+		.command("on")
+		.alias("enable")
+		.argument(
+			"[project]",
+			"Project ID or slug (default: the active project from `tarout projects use`)",
+		)
+		.description(
+			"Turn Autofix on for the project. From then on a failed deployment or a downed app lets the platform commit a verified fix to an autofix/* branch, open a pull request and deploy that commit. Only GitHub sources with contents:write are written to; secrets are never guessed, and low-confidence diagnoses are reported instead of applied.",
+		)
+		.action(toggleAutofix("on"));
+
+	autofix
+		.command("off")
+		.alias("disable")
+		.argument(
+			"[project]",
+			"Project ID or slug (default: the active project from `tarout projects use`)",
+		)
+		.description(
+			"Turn Autofix off for the project. Failed deployments are then left exactly as they are, and no branch, pull request or deployment is created on your behalf. Runs already recorded stay readable with `tarout projects autofix runs`.",
+		)
+		.action(toggleAutofix("off"));
+
+	autofix
+		.command("runs")
+		.argument(
+			"[project]",
+			"Project ID or slug (default: the active project from `tarout projects use`)",
+		)
+		.description(
+			"List recent Autofix runs for the project, newest first. Each run records what triggered it (build, deploy or runtime), where it got to (queued, analyzing, skipped, no_fix, deploying, succeeded, failed), the diagnosis summary, and the branch and pull request it opened — which is how an agent tells 'the platform is already fixing this' from 'nobody is looking at it'.",
+		)
+		.option(
+			"-n, --limit <n>",
+			`Number of runs to show, 1-${MAX_AUTOFIX_RUNS_LIMIT} (values outside the range are clamped)`,
+			String(DEFAULT_AUTOFIX_RUNS_LIMIT),
+		)
+		.action(async (projectRef: string | undefined, options: { limit?: string }) => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const limit = parseAutofixRunsLimit(options.limit);
+				const _spinner = startSpinner("Fetching Autofix runs...");
+				const { projectId, label } = await resolveProjectId(client, projectRef);
+				const runs = (await client.project.autofixRuns.query({
+					projectId,
+					limit,
+				} as any)) as AutofixRun[];
+				succeedSpinner();
+
+				if (isJsonMode()) {
+					outputData(runs);
+					return;
+				}
+
+				if (isQuietMode()) {
+					for (const run of runs) {
+						if (run.id) quietOutput(run.id);
+					}
+					return;
+				}
+
+				if (!runs || runs.length === 0) {
+					log("");
+					log(`No Autofix runs recorded for ${label}.`);
+					log(
+						colors.dim(
+							"Nothing has failed since Autofix was turned on, or it is off — check with: tarout projects autofix",
+						),
+					);
+					log("");
+					return;
+				}
+
+				log("");
+				log(colors.bold(`Autofix runs: ${label}`));
+				table(
+					["WHEN", "APP", "TRIGGER", "STATUS", "PR", "SUMMARY"],
+					runs.map((run) => [
+						run.createdAt
+							? new Date(run.createdAt).toLocaleString("en-US", {
+									month: "short",
+									day: "numeric",
+									hour: "2-digit",
+									minute: "2-digit",
+								})
+							: colors.dim("-"),
+						run.application?.name ?? colors.dim("-"),
+						run.trigger ?? colors.dim("-"),
+						formatAutofixStatus(run.status),
+						run.pullRequestNumber
+							? `#${run.pullRequestNumber}`
+							: colors.dim("-"),
+						(run.summary ?? run.reason ?? "-").slice(0, 48),
+					]),
+				);
+				log("");
+				const pending = runs.find(
+					(run) =>
+						run.status === "queued" ||
+						run.status === "analyzing" ||
+						run.status === "deploying",
+				);
+				if (pending) {
+					log(
+						colors.warn(
+							`A run is still in progress (${pending.status}) — wait for it before pushing a fix of your own.`,
+						),
+					);
+					log("");
+				}
+			} catch (err) {
+				stopSpinner();
+				handleError(err);
+			}
+		});
+
+	// ── Free-plan project slot (this organization) ───────────────────────────────
+	// `project.freeSlotStatus` resolves the slot through the ACTIVE
+	// ORGANIZATION's owner. `orgs free-slot` answers the other question — the
+	// calling user's own slot — and the two differ for any member of someone
+	// else's organization.
+	projects
+		.command("free-slot")
+		.description(
+			"Report whether this organization's one Free-plan project slot is already taken. The slot belongs to the organization's OWNER and is shared by every project here, so `occupied` means the next project you create in this organization has to be on a paid plan. For the slot on your own account — the one that decides whether a NEW organization you create can hold a free project — use `tarout orgs free-slot`.",
+		)
+		.action(async () => {
+			try {
+				if (!isLoggedIn()) throw new AuthError();
+				const client = getApiClient();
+				const _spinner = startSpinner("Checking free project slot...");
+				const status = (await client.project.freeSlotStatus.query()) as {
+					occupied?: boolean;
+				};
+				succeedSpinner();
+
+				const occupied = status?.occupied === true;
+				if (isJsonMode()) {
+					outputData({ scope: "organization", occupied });
+					return;
+				}
+				quietOutput(occupied ? "occupied" : "free");
+				log("");
+				log(colors.bold("Free project slot (this organization)"));
+				log(
+					`  ${occupied ? colors.warn("occupied") : colors.success("free")} ${colors.dim("— owner's account-wide slot")}`,
+				);
+				log("");
+				log(
+					colors.dim(
+						occupied
+							? "The owner's free project is already in use, so `tarout projects create` here lands on a paid plan."
+							: "The next project created in this organization can be on the Free plan.",
+					),
+				);
+				log("");
+			} catch (err) {
+				stopSpinner();
 				handleError(err);
 			}
 		});
